@@ -498,3 +498,29 @@ Calls: `GET /consultations/{id}/overview` returns counts, a distribution per dem
 ## 13. Where to go next
 
 `docs/03-adrs/` for the decisions that needed a full record; `docs/04` for the sixteen tables and every index; `docs/05` for the cost arithmetic; `docs/06` and `THREAT_MODEL.md` for the rest of section 10; `poc/` (from PR-03) for the four mechanics to be proved by a test rather than asserted: the fan-in transaction, lease takeover with a fence, idempotent tag inserts and the indexed filter query.
+
+## Correction, 19 September 2026
+
+A review of PR-02 found fifteen inconsistencies across the design documents; `docs/07-reviews.md` logs the pass and PR-02b reconciles them. The entries below correct this file. Each names the section it corrects and gives the corrected text; the body above is left as it merged. `docs/04` is the one document rewritten in place, because the schema is typed from it.
+
+1. **Section 6, the reopen row and the paragraph after the table.** The row read that the later `ready` email "carries that version as `subject_id`". It carries the pass, not the version:
+
+   | From | To | Trigger | Written by | Email |
+   |---|---|---|---|---|
+   | `ready` | `awaiting_review` | A question reopened for correction, or re-run on a new model alias; a new candidate theme-set version, and a new `run_id` minted in the same transaction so the later `ready` email has a row of its own | Web app, on a reviewer's action, through `advance_consultation` | No |
+
+   Add to the paragraph on `advance_consultation`: `run_id` is minted with the consultation row, copied onto every job a pass inserts, and replaced by the reopen. Every milestone outbox row carries the current one as `subject_id`. That is what keeps a reopened question's second `map_themes` job, and the second `analysis_ready` email, from colliding with the first (`docs/04`, sections 2 and 3).
+
+2. **Steps 7 and 10, the outbox insert.** Both inserts read the pass id from the locked row rather than writing bare values:
+
+   ```sql
+   -- only if the UPDATE above touched one row:
+   INSERT INTO notification_outbox (department_id, consultation_id, kind, subject_id)
+   SELECT department_id, id, 'themes_ready', run_id
+     FROM consultation WHERE id = $c
+   ON CONFLICT DO NOTHING;
+   ```
+
+   Step 10 is the same with `'analysis_ready'`.
+
+3. **Section 7, decision 8, the key.** The key is `UNIQUE NULLS NOT DISTINCT (consultation_id, kind, subject_id)`. `theme_set_version_id` is gone from the outbox: once milestone rows took the pass id, nothing wrote it. A milestone row carries the pass's `run_id`; an attention row the failed job's id, or null when a paused budget is the reason and there is no job, which is what the modifier is for; a reminder the question's id. ADR-006 carries the same correction.

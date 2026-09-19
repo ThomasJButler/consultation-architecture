@@ -53,3 +53,9 @@ Dispatch to SQS has the same shape. The reconciler commits `queued` with `sent_a
 ## How I'd know this was wrong
 
 Two Notify notifications sharing one reference, or an outbox row older than fifteen minutes still `pending` while the reconciler's schedule shows it running.
+
+## Correction, 19 September 2026
+
+The outbox has no `theme_set_version_id`. Once milestone rows took the pass id, nothing wrote it, and a column nothing writes is a column the schema shouldn't carry. The table is `notification_outbox(id, consultation_id, kind, subject_id, status pending | sending | sent, notify_id, created_at, sent_at)` with `UNIQUE NULLS NOT DISTINCT (consultation_id, kind, subject_id)`.
+
+A milestone row carries the consultation's `run_id` in `subject_id`. That id is minted with the consultation row and replaced by a reopen in the same transaction as the new candidate version, so a second `analysis_ready` after a reopen is a second row rather than a silent no-op on the first. An attention row carries the failed job's id, or null when a paused budget is the reason and there is no job; a reminder carries the question's id. `NULLS NOT DISTINCT` is there for that null. Milestone rows never carry one now, and the Decision's line that they do is withdrawn. The insert and the reopen are written out in docs/04-data-model.md, section 2; docs/02-architecture.md section 6 and decision 8 carry the same correction.

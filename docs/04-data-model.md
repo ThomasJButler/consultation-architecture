@@ -9,7 +9,7 @@ Two conventions, stated once. Every table carries `department_id uuid NOT NULL`,
 | Table | Key columns | Purpose |
 |---|---|---|
 | `department` | `id`, `name`, `concurrent_jobs_cap`, `monthly_budget_pence`, `contact_email` | The tenant. The dispatcher reads the cap and the budget (docs/02, step 4). |
-| `consultation` | `id`, `department_id`, `name`, `source`, `status` draft / staging / staged / processing / awaiting_review / ready, `attention_reason`, `model_alias`, `retention_until`, `created_by`, `upload_sha256`, `row_count`, `column_roles jsonb` | One upload. `status` is derived from the questions (docs/02, section 6); `attention_reason` is nullable and orthogonal to it. `column_roles` records the columns that aren't questions: respondent id and ignore. |
+| `consultation` | `id`, `department_id`, `name`, `source`, `status` draft / staging / staged / processing / awaiting_review / ready, `attention_reason`, `run_id`, `model_alias`, `retention_until`, `created_by`, `upload_sha256`, `row_count`, `column_roles jsonb` | One upload. `status` is derived from the questions (docs/02, section 6); `attention_reason` is nullable and orthogonal to it. `run_id` names the current pass: minted with the row, copied onto every job the pass inserts, replaced by a reopen (section 2). `column_roles` records the columns that aren't questions: respondent id and ignore. |
 | `question` | `id`, `consultation_id`, `column_ref`, `question_text`, `kind` demographic / closed / open / identity, `response_type`, `ordinal`, `related_closed_question_id`, `value_policy jsonb`, `status`, `assigned_to`, `review_started_at` | One column of the responses file, as configured in the app (docs/02, step 3). `status` is the per-question state machine and stays null unless `kind` is open. `value_policy` holds the N/A decision and any unknown-value resolutions. An identity column gets a row so the export can name it, and no answer rows. |
 | `question_option` | `id`, `question_id`, `label`, `ordinal` | The option vocabulary of a closed question. Options are rows, so a label can contain a comma (docs/00). |
 | `respondent` | `id`, `consultation_id`, `external_id`, `source_row_no`, `attrs jsonb`, `duplicate_of` | One row of the file. `attrs` is the filter read model (section 5). There's no `raw_row`: it would carry the identity columns past the vault, and the original file in S3 keyed by its sha256 plus `source_row_no` is the audit copy. |
@@ -21,7 +21,7 @@ Two conventions, stated once. Every table carries `department_id uuid NOT NULL`,
 | `answer_theme` | `id`, `answer_id`, `theme_id`, `theme_set_version_id`, `job_id`, `batch_no`, `source` ai / human, `user_id`, `created_at`, `retracted_at`, `retracted_by` | A tag. Never deleted; retracted in place by setting `retracted_at`, re-added by clearing it (docs/02, step 11). |
 | `job` | `id`, `consultation_id`, `question_id`, `kind` stage / ingest / find_themes / preview_themes / map_themes / export / report, `run_id`, `status`, `attempts`, `next_attempt_at`, `claimed_by`, `heartbeat_at`, `sent_at`, `model_alias`, `prompt_sha256`, `params`, `tokens_in`, `tokens_cached`, `tokens_out`, `cost_pence`, `error_code`, `provider_request_id` | The unit of work and the ledger. `claimed_by`, `attempts` and `heartbeat_at` are the lease and the fence (docs/02, step 5). `error_code` and `provider_request_id` are all a failure stores; they are the two columns behind what docs/02 section 3.4 calls `job.error`, and there is no column a message body could go in. |
 | `job_batch` | `job_id`, `batch_no`, `stage`, `answer_ids bigint[]`, `status`, `trace_id`, `tokens_in`, `tokens_out`, `finished_at` | One checkpoint: one call of one stage function on one chunk (docs/02, step 6). A batch that failed the two-way check at size 1 is a row with status `unprocessable`, which is where the dashboard's bucket comes from. `trace_id` is the gateway's trace id for the call, so an erasure can find and delete the trace that holds an answer (docs/06, section 4). |
-| `notification_outbox` | `id`, `consultation_id`, `kind`, `theme_set_version_id`, `subject_id`, `status` pending / sending / sent, `notify_id`, `created_at`, `sent_at` | The email, written in the transition's commit (ADR-006). Milestone rows written on a consultation's first pass leave both optional keys null. A milestone reached again after a reopen carries the newest reopened question's candidate `theme_set_version_id` (the highest id, if two were reopened in one pass) (docs/02, section 6, calls that slot `subject_id`), which is what keeps the second `analysis_ready` from colliding with the first and being dropped. An attention row carries the failed job's id and a reminder the question's id in `subject_id`. |
+| `notification_outbox` | `id`, `consultation_id`, `kind`, `subject_id`, `status` pending / sending / sent, `notify_id`, `created_at`, `sent_at` | The email, written in the transition's commit (ADR-006). A milestone row carries the consultation's `run_id` in `subject_id`, so the first pass's `analysis_ready` and the one a reopen earns are two rows and the second isn't dropped on the first (section 2 has the INSERT). An attention row carries the failed job's id, or null when the reason is a paused budget and there's no job; a reminder carries the question's id. |
 | `audit_event` | `id`, `consultation_id`, `actor_id`, `action`, `subject_table`, `subject_id`, `before jsonb`, `after jsonb`, `at` | Append-only: sign-off, tag edits, operator actions. The app role gets INSERT and SELECT and nothing else. |
 | `export` | `id`, `consultation_id`, `kind` xlsx / report, `job_id`, `s3_key`, `created_by`, `created_at`, `superseded_at` | What `GET /exports/{id}` reads and the overview's last-export line shows (docs/02, screen 5). Erasure regenerates exports, which needs a list of them. |
 
@@ -38,6 +38,7 @@ CREATE TABLE consultation (
   status           text NOT NULL DEFAULT 'draft' CHECK (status IN
                      ('draft', 'staging', 'staged', 'processing', 'awaiting_review', 'ready')),
   attention_reason text,
+  run_id           uuid NOT NULL DEFAULT gen_random_uuid(),
   model_alias      text,
   retention_until  date,
   created_by       uuid NOT NULL,
@@ -157,16 +158,29 @@ CREATE TABLE notification_outbox (
   consultation_id      uuid NOT NULL REFERENCES consultation (id),
   kind                 text NOT NULL CHECK (kind IN
                          ('themes_ready', 'analysis_ready', 'attention_needed', 'review_reminder')),
-  theme_set_version_id uuid REFERENCES theme_set_version (id),
   subject_id           uuid,
   status               text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sending', 'sent')),
   notify_id            text,
   created_at           timestamptz NOT NULL DEFAULT now(),
   sent_at              timestamptz,
-  UNIQUE NULLS NOT DISTINCT (consultation_id, kind, theme_set_version_id, subject_id)
+  UNIQUE NULLS NOT DISTINCT (consultation_id, kind, subject_id)
 );
 CREATE INDEX notification_outbox_pending ON notification_outbox (id) WHERE status = 'pending';
 ```
+
+Two statements the outbox key rests on. The first is the milestone insert inside `advance_consultation` (docs/02, section 6), run only when the guarded `UPDATE consultation` touched a row. The second is the reopen: same routine, same row lock, in the transaction that inserts the new candidate `theme_set_version`.
+
+```sql
+INSERT INTO notification_outbox (department_id, consultation_id, kind, subject_id)
+SELECT department_id, id, 'analysis_ready', run_id
+  FROM consultation WHERE id = $c
+ON CONFLICT DO NOTHING;
+
+UPDATE consultation SET status = 'awaiting_review', run_id = gen_random_uuid()
+ WHERE id = $c AND status = 'ready';
+```
+
+The `SELECT` runs under the lock the routine took first, so it reads whatever `run_id` the transaction holds, including one the reopen has just minted. Every job the reopen inserts copies the new `run_id`, which is why the reopened question's second `map_themes` job sits beside its first under `job_one_per_run` instead of colliding with it.
 
 `answer_theme.batch_no` where docs/02 step 9 and ADR-004 say `batch_id`, because `job_batch`'s key is `(job_id, batch_no)` and the tag already carries `job_id`; the pair `(job_id, batch_no)` is the batch id. The unique key on `job` is partial for a different reason: previews and exports repeat by design, so the one-job-per-run rule covers the four pipeline kinds only.
 
@@ -182,9 +196,9 @@ CREATE INDEX notification_outbox_pending ON notification_outbox (id) WHERE statu
 | `theme (theme_set_version_id, key)` | The enum the model returns has one meaning per key, and a re-run of condensation writes each key once. |
 | `theme_example (theme_id, answer_id)` | A re-run preview keeps one quote per answer per theme. |
 | `answer_theme (answer_id, theme_id, theme_set_version_id)`, full, not partial | A `map_themes` batch replayed after takeover inserts nothing new, and a resumed run can't re-insert a tag a person has retracted: the conflict lands on the retracted row and does nothing (ADR-004). PR-05 will pin both. |
-| `job (consultation_id, question_id, kind, run_id) NULLS NOT DISTINCT`, partial on the four pipeline kinds | One job per (consultation, open question, kind, run) is enforced by the index, so a code path that forgets the rule gets a conflict and not a second job (docs/02, section 7, decision 3). `question_id` is null for `stage` and `ingest`, hence the modifier. |
+| `job (consultation_id, question_id, kind, run_id) NULLS NOT DISTINCT`, partial on the four pipeline kinds | One job per (consultation, open question, kind, run) is enforced by the index, so a code path that forgets the rule gets a conflict and not a second job (docs/02, section 7, decision 3). `question_id` is null for `stage` and `ingest`, hence the modifier. `run_id` is minted with the consultation row and replaced by a reopen (section 2), so a reopened question's second `map_themes` job carries a different `run_id` and gets a slot of its own. |
 | `job_batch (job_id, batch_no)` | The checkpoint. A worker taking over reads the last finished batch and starts at the next; a half-written batch's `ON CONFLICT DO NOTHING` lands here (ADR-002). |
-| `notification_outbox NULLS NOT DISTINCT (consultation_id, kind, theme_set_version_id, subject_id)` | One email per milestone. The worker's fan-in, the reconciler's fourth statement re-running the same predicate, and both relays all meet on one row. |
+| `notification_outbox NULLS NOT DISTINCT (consultation_id, kind, subject_id)` | One email per milestone per pass. The worker's fan-in, the reconciler's fourth statement re-running the same predicate, and both relays all meet on one row. The modifier is for the attention row a paused budget writes, which has no job to name. |
 | `vault.respondent_identity (respondent_id, column_ref)` | Ingest replayed writes one identity value per column. |
 
 ## 4. Every other index, and the query it serves
@@ -316,4 +330,4 @@ Roles are the other thing the schema has to carry. `CREATE ROLE` is cluster-wide
 
 **READ COMMITTED and `FOR UPDATE`.** A statement that blocks on a row another transaction has updated waits for that transaction, then re-evaluates its `WHERE` against the new version of that row, and only that row (docs/01, section 4, first paragraph; log row "Postgres READ COMMITTED re-evaluation and FOR UPDATE wording", checked 19 September 2026). So the guarded `UPDATE consultation` in docs/02 step 7 can't be the first statement: two finishers would each see the other's question still running in their subquery, and neither would flip. With `SELECT ... FOR UPDATE` on the consultation row first, in its own statement, the second finisher waits at the lock and its next statement's snapshot includes the first's commit. The lock is the serialiser; the guard on `status = 'processing'` is what stops a double flip.
 
-**`NULLS NOT DISTINCT`.** By default a unique constraint treats nulls as unequal, so two rows with a null in the key never collide (docs/01, section 4; log row "Postgres NULLS NOT DISTINCT wording and default", checked 19 September 2026). The outbox's milestone rows carry null for both the version and the subject on the first pass; after a reopen the version slot is filled (section 1), so the second milestone gets a row of its own. Without the modifier the milestone rows' nulls never collide, `ON CONFLICT DO NOTHING` has no arbiter, and one email per milestone rests on the status guard in the fan-in alone rather than on a constraint (ADR-006). The same modifier is on `answer`, where a free-text row has no option, and on `job`, where `stage` and `ingest` have no question.
+**`NULLS NOT DISTINCT`.** By default a unique constraint treats nulls as unequal, so two rows with a null in the key never collide (docs/01, section 4; log row "Postgres NULLS NOT DISTINCT wording and default", checked 19 September 2026). The outbox's milestone rows carry the pass's `run_id` in `subject_id` and never a null, so they collide on their own; the modifier is there for the attention row a paused budget writes, which has no job to name. Without it two such rows never collide, `ON CONFLICT DO NOTHING` has no arbiter, and one email per pause rests on convention rather than a constraint (ADR-006). The same modifier is on `answer`, where a free-text row has no option, and on `job`, where `stage` and `ingest` have no question.
