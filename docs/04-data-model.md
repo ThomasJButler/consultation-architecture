@@ -9,7 +9,7 @@ Two conventions, stated once. Every table carries `department_id uuid NOT NULL`,
 | Table | Key columns | Purpose |
 |---|---|---|
 | `department` | `id`, `name`, `concurrent_jobs_cap`, `monthly_budget_pence`, `contact_email` | The tenant. The dispatcher reads the cap and the budget (docs/02, step 4). |
-| `consultation` | `id`, `department_id`, `name`, `source`, `status` draft / staging / staged / processing / awaiting_review / ready, `attention_reason`, `run_id`, `model_alias`, `retention_until`, `created_by`, `upload_sha256`, `row_count`, `column_roles jsonb` | One upload. `status` is derived from the questions (docs/02, section 6); `attention_reason` is nullable and orthogonal to it. `run_id` names the current pass: minted with the row, copied onto every job the pass inserts, replaced by a reopen (section 2). `column_roles` records the columns that aren't questions: respondent id and ignore. |
+| `consultation` | `id`, `department_id`, `name`, `source`, `status` draft / staging / staged / processing / awaiting_review / ready, `attention_reason`, `run_id`, `status_changed_at`, `awaiting_review_at`, `model_alias`, `retention_until`, `created_by`, `upload_sha256`, `row_count`, `column_roles jsonb` | One upload. `status` is derived from the questions (docs/02, section 6); `attention_reason` is nullable and orthogonal to it. `run_id` names the current pass: minted with the row, copied onto every job the pass inserts, replaced by a reopen (section 2). `advance_consultation` stamps `status_changed_at` on every transition and `awaiting_review_at` on entry to that state: the first feeds the stuck-consultation alarm, the pair the review-time KPI on the overview (docs/02, step 8 and screen 5), latest pass only. `column_roles` records the columns that aren't questions: respondent id and ignore. |
 | `question` | `id`, `consultation_id`, `column_ref`, `question_text`, `kind` demographic / closed / open / identity, `response_type`, `ordinal`, `related_closed_question_id`, `value_policy jsonb`, `status`, `assigned_to`, `review_started_at` | One column of the responses file, as configured in the app (docs/02, step 3). `status` is the per-question state machine and stays null unless `kind` is open. `value_policy` holds the N/A decision and any unknown-value resolutions. An identity column gets a row so the export can name it, and no answer rows. |
 | `question_option` | `id`, `question_id`, `label`, `ordinal` | The option vocabulary of a closed question. Options are rows, so a label can contain a comma (docs/00). |
 | `respondent` | `id`, `consultation_id`, `external_id`, `source_row_no`, `attrs jsonb`, `duplicate_of` | One row of the file. `attrs` is the filter read model (section 5). There's no `raw_row`: it would carry the identity columns past the vault, and the original file in S3 keyed by its sha256 plus `source_row_no` is the audit copy. |
@@ -19,7 +19,7 @@ Two conventions, stated once. Every table carries `department_id uuid NOT NULL`,
 | `theme` | `id`, `theme_set_version_id`, `key`, `label`, `description`, `is_longlist`, `is_fallback`, `lineage_theme_id`, `preview_count` | One theme in one version. `key` is the enum value the model returns; `is_fallback` marks `OTHER` and `NO_REASON`; `lineage_theme_id` points at the candidate it was condensed from. |
 | `theme_example` | `theme_id`, `answer_id`, `rank` | The quotes on the sign-off screen, from the 200-answer preview. |
 | `answer_theme` | `id`, `answer_id`, `theme_id`, `theme_set_version_id`, `job_id`, `batch_no`, `source` ai / human, `user_id`, `created_at`, `retracted_at`, `retracted_by` | A tag. Never deleted; retracted in place by setting `retracted_at`, re-added by clearing it (docs/02, step 11). |
-| `job` | `id`, `consultation_id`, `question_id`, `kind` stage / ingest / find_themes / preview_themes / map_themes / export / report / erasure, `run_id`, `status`, `attempts`, `next_attempt_at`, `claimed_by`, `heartbeat_at`, `sent_at`, `model_alias`, `prompt_sha256`, `params`, `tokens_in`, `tokens_cached`, `tokens_out`, `cost_pence`, `error_code`, `provider_request_id` | The unit of work and the ledger. `claimed_by`, `attempts` and `heartbeat_at` are the lease and the fence (docs/02, step 5). `error_code` and `provider_request_id` are all a failure stores; they are the two columns behind what docs/02 section 3.4 calls `job.error`, and there is no column a message body could go in. |
+| `job` | `id`, `consultation_id`, `question_id`, `kind` stage / ingest / find_themes / preview_themes / map_themes / export / report / erasure, `run_id`, `created_at`, `status`, `attempts`, `next_attempt_at`, `claimed_by`, `heartbeat_at`, `sent_at`, `model_alias`, `prompt_sha256`, `params`, `tokens_in`, `tokens_cached`, `tokens_out`, `cost_pence`, `error_code`, `provider_request_id` | The unit of work and the ledger. `claimed_by`, `attempts` and `heartbeat_at` are the lease and the fence (docs/02, step 5); `created_at` is what the job-age alarm reads (docs/02, section 3). `error_code` and `provider_request_id` are all a failure stores; they are the two columns behind what docs/02 section 3.4 calls `job.error`, and there is no column a message body could go in. |
 | `job_batch` | `job_id`, `batch_no`, `stage`, `answer_ids bigint[]`, `status`, `trace_id`, `tokens_in`, `tokens_out`, `finished_at` | One checkpoint: one call of one stage function on one chunk (docs/02, step 6). A batch that failed the two-way check at size 1 is a row with status `unprocessable`, which is where the dashboard's bucket comes from. `trace_id` is the gateway's trace id for the call, so an erasure can find and delete every trace that holds an answer; one answer sits in several batches (generation, preview, mapping) and a duplicate in none (docs/06, section 4). |
 | `notification_outbox` | `id`, `consultation_id`, `kind`, `subject_id`, `status` pending / sending / sent, `notify_id`, `created_at`, `sent_at` | The email, written in the transition's commit (ADR-006). A milestone row carries the consultation's `run_id` in `subject_id`, so the first pass's `analysis_ready` and the one a reopen earns are two rows and the second isn't dropped on the first (section 2 has the INSERT). An attention row carries the failed job's id, or null when the reason is a paused budget and there's no job; a reminder carries the question's id. |
 | `audit_event` | `id`, `consultation_id`, `actor_id`, `action`, `subject_table`, `subject_id`, `before jsonb`, `after jsonb`, `at` | Append-only: sign-off, tag edits, operator actions. The app role gets INSERT and SELECT and nothing else. |
@@ -39,6 +39,8 @@ CREATE TABLE consultation (
                      ('draft', 'staging', 'staged', 'processing', 'awaiting_review', 'ready')),
   attention_reason text,
   run_id           uuid NOT NULL DEFAULT gen_random_uuid(),
+  status_changed_at timestamptz NOT NULL DEFAULT now(),
+  awaiting_review_at timestamptz,
   model_alias      text,
   retention_until  date,
   created_by       uuid NOT NULL,
@@ -76,6 +78,8 @@ CREATE TABLE respondent (
   UNIQUE (consultation_id, source_row_no)
 );
 CREATE INDEX respondent_attrs_gin ON respondent USING gin (attrs jsonb_path_ops);
+CREATE UNIQUE INDEX respondent_external_id ON respondent (consultation_id, external_id)
+  WHERE external_id IS NOT NULL;
 
 CREATE TABLE answer (
   id                     bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -104,6 +108,7 @@ CREATE TABLE job (
   kind                text NOT NULL CHECK (kind IN ('stage', 'ingest', 'find_themes',
                         'preview_themes', 'map_themes', 'export', 'report', 'erasure')),
   run_id              uuid NOT NULL,
+  created_at          timestamptz NOT NULL DEFAULT now(),
   status              text NOT NULL DEFAULT 'pending' CHECK (status IN
                         ('pending', 'queued', 'running', 'succeeded', 'failed_retryable', 'failed')),
   attempts            integer NOT NULL DEFAULT 0,
@@ -177,7 +182,8 @@ SELECT department_id, id, 'analysis_ready', run_id
   FROM consultation WHERE id = $c
 ON CONFLICT DO NOTHING;
 
-UPDATE consultation SET status = 'awaiting_review', run_id = gen_random_uuid()
+UPDATE consultation SET status = 'awaiting_review', run_id = gen_random_uuid(),
+       status_changed_at = now(), awaiting_review_at = now()
  WHERE id = $c AND status = 'ready';
 ```
 
@@ -192,6 +198,7 @@ The `SELECT` runs under the lock the routine took first, so it reads whatever `r
 | `question (consultation_id, column_ref)` | Saving the configure screen twice, or the importer running after a hand edit, upserts a column rather than duplicating it. The leading column is what the fan-in's `NOT EXISTS` scans. |
 | `question_option (question_id, label)` | The "add it as an option" resolution applied twice yields one option. |
 | `respondent (consultation_id, source_row_no)` | A second delivery of the `ingest` message finds the rows already there and the job finishes without a second copy. |
+| `respondent (consultation_id, external_id)`, partial on non-null | Two file rows with one respondent id are one person twice or a broken export, and neither should land silently: the validator reports it before spend (docs/02, section 3.2) and ingest refuses it rather than guessing. |
 | `answer NULLS NOT DISTINCT (respondent_id, question_id, option_id)` | The same for exploded answer rows. The modifier is what makes a free-text answer with a null `option_id` collide with itself (docs/01, section 4). Its prefix also serves the other-question semi-join. |
 | `theme_set_version (question_id, version_no)` | A `find_themes` job delivered twice, where the first delivery had already finished, can't write a second v1; two reviewers confirming can't freeze two v2s. |
 | `theme (theme_set_version_id, key)` | The enum the model returns has one meaning per key, and a re-run of condensation writes each key once. |

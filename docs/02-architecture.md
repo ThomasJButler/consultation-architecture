@@ -530,3 +530,13 @@ A review of PR-02 found fifteen inconsistencies across the design documents; `do
 5. **Step 3a, ingest.** Ingest reads the staging table as the ingest role and drops it once its transaction has committed. If the table is missing at Confirm (a restore, a hand drop), the ingest job re-runs the stage step from the S3 original, same sha256, before it ingests. A second `stage` job row would collide on `job_one_per_run` under the same `run_id`, which is why the ingest job does the re-run itself rather than Confirm inserting another job.
 
 6. **Section 10, the retention bullet.** "`retention_until` drives the S3 lifecycle and a deletion job" reads: `retention_until` drives a deletion job that removes the rows, the S3 objects and the traces; the bucket's lifecycle rule is a backstop at five years, because a lifecycle rule can't read a date per object (`docs/06`, section 4, with the log row in `docs/01`). The rest of the bullet stands.
+
+7. **Section 5, statement 5.** `review_reminder` rows had no producer. Statement 5 reads: relay unsent outbox rows, and insert a `review_reminder` row for each question that has sat in `themes_ready` for five working days, keyed on the question's id so the insert is idempotent (ADR-006).
+
+8. **Section 3.2, the validator table.** One row added, for the unique index `docs/04` now puts on `respondent.external_id`:
+
+   | Check | Outcome |
+   |---|---|
+   | A value repeated in the respondent id column | Warning with a resolution: ignore the column and identify rows by their row number, or keep the id on the first occurrence and blank it on the rest. No row is dropped either way |
+
+9. **Section 6, `advance_consultation`, and section 3, the alarms.** The routine also stamps `consultation.status_changed_at` on every transition and `awaiting_review_at` on entry to that state, and every job row carries `created_at` (`docs/04`). The job-age alarm, the stuck-consultation alarm and the review-time KPI on screen 5 read those three columns, and none of them had been named.
