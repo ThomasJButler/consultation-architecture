@@ -172,3 +172,20 @@ A review of PR-02 found fifteen inconsistencies across the design documents; `do
    6. An answer sits in several `job_batch` rows (generation, preview, mapping) and a duplicate in none. The job deletes every trace whose batch carried the answer: `SELECT trace_id FROM job_batch WHERE answer_ids @> ARRAY[$answer_id]::bigint[]`, through the GIN index on `answer_ids` (`docs/04`, section 4). For a duplicate respondent there is no trace to delete, and the honest statement is that their text, identical to the canonical answer's, stays in the canonical's traces until the canonical is erased. The audit event says so.
    7. The raw upload: write the redacted copy under a new key, update `consultation.upload_sha256` to its hash, then delete the original, in that order, so the audit-copy rule in `docs/04` never points at an object that has gone. Both keys go on the audit event.
    8. Regenerate the exports as ordinary `export` jobs and remove the old objects.
+
+2. **Section 2.4, the roles row.** Three roles left nobody holding DELETE on the vault, so the deletion job and an erasure couldn't run. Four roles, and the row reads:
+
+   | Control | Tag | Reason |
+   |---|---|---|
+   | Four database roles: ingest with INSERT only on `vault.respondent_identity` and ownership of the `staging` schema; pipeline with no grant on `vault` or `staging`; export with SELECT on the vault; `consult_admin` with DELETE on `vault.respondent_identity`, `respondent`, `answer`, `answer_theme` and `theme_example`, used only by the deletion job, the erasure job and the operator console's erasure action | MUST | Nobody else holds DELETE on the vault or the answer tables, so the deleting that retention and erasure need is a role grant and not a database engineer, and the pipeline role still can't read the vault (ADR-004). PR-03's `schema.sql` will create the four roles; PR-06 will connect as the pipeline role and expect a permission error |
+
+3. **Section 2.8, the operator row, and a new row.** Erasure step 1 finds a respondent by identity through the vault, which the table said an operator can't do. The lookup is the one stated exception: it runs as `consult_admin` and writes an `audit_event` every time it runs, found or not.
+
+   | Who | Can | Can't |
+   |---|---|---|
+   | An operator (Django admin) | Retry a job, reassign a question, pause a department, resend an outbox row, run an erasure; every action writes an `audit_event` with actor, before and after (`docs/02`, section 3.3) | Edit a theme-set version or a tag; read the vault, except through the erasure action's lookup, which runs as `consult_admin` and is audited whether or not it finds anyone |
+   | The admin role (`consult_admin`) | DELETE on the vault and the answer tables, for the deletion job, the erasure job and the console's erasure lookup | Anything on the pipeline path; insert a tag, a batch or a version |
+
+4. **Section 3, the vault row.** Who can read it: the export role, and `consult_admin` for an audited erasure lookup. Nothing on the pipeline path.
+
+5. **Section 4, step 1.** "By identity through the export role's view of the vault" reads: by identity through the vault as `consult_admin`, which writes an `audit_event` for the lookup itself, or by their respondent id.

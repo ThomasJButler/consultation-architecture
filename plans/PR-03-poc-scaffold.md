@@ -27,7 +27,7 @@ pieces in the order the later PRs will need them. psycopg 3 with row
 factories rather than an ORM, because the SQL is the argument the design
 makes. One `schema.sql` applied by `consult init` (with `--reset`), no
 migration tool: a proof-of-concept changes its schema by rewriting the
-file. The three roles (ingest, pipeline, export) are created in a `DO` block
+file. The four roles (ingest, pipeline, export, `consult_admin`) are created in a `DO` block
 guarded by a `pg_roles` lookup, because roles are cluster-wide and the tests
 apply the schema to a fresh database each session; the vault grants are
 per database and follow. The alternative, an ORM with migrations, was
@@ -38,8 +38,8 @@ rejected because it hides the exact statements the design rests on.
 1. `test_env_example_names_every_setting` pins that `.env.example` and
    `config.py` agree.
 2. `test_init_creates_every_table_the_design_names` pins that `consult
-   init` creates the thirteen tables, the vault schema and the three roles
-   in `docs/04`, and that running it twice is harmless.
+   init` creates the thirteen tables, the `vault` and `staging` schemas and
+   the four roles in `docs/04`, and that running it twice is harmless.
 3. `test_init_reset_leaves_the_same_empty_schema` pins that `--reset` drops
    and recreates everything and no rows survive.
 4. `test_the_fixture_generator_writes_the_three_sheets_and_a_responses_file`
