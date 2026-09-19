@@ -308,7 +308,7 @@ Section 8 has the table. Alternatives: build the full product and switch over; s
 
 ### 12. Operated to three SLOs
 
-Themes ready within four hours for a 100,000-response consultation at p95; the email within fifteen minutes of the state change; a dashboard filter under 500 ms at ten million answers. Alternative: no SLOs until there's a second department, which leaves nothing to argue with. Weak point: the four-hour figure assumes the 1M-TPM share in section 1. At 100,000 TPM it's a working day, which is why the batch lane exists as a lever. The 500 ms figure is a target, unproven on this schema until the staging load test.
+Themes ready within four hours for a 100,000-response consultation at p95; the email within fifteen minutes of the state change; a dashboard filter under 500 ms at ten million answers. Alternative: no SLOs until there's a second department, which leaves nothing to argue with. Weak point: the four-hour figure assumes the 1M-TPM share in section 1. At 100,000 TPM it's nearer two days than one, which is why the batch lane exists as a lever. The 500 ms figure is a target, unproven on this schema until the staging load test.
 
 ## 8. Rollout, SLOs and what to measure
 
@@ -389,7 +389,7 @@ ASCII wireframes with the calls each screen makes. The forms screens are server-
  +--------------------------------------------------------------------+
  | Check your answers                                                 |
  |   1,987 respondents, 2 open questions, ~4,100 open answers         |
- |   Estimated model use: ~1.9M tokens, about £2.70                   |
+ |   Estimated model use: ~2.3M tokens, about £3.30                   |
  |                                                  [ Confirm ]       |
  +--------------------------------------------------------------------+
 ```
