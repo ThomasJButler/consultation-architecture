@@ -22,7 +22,7 @@ The work: the ordered tests and commits in section 4 of the plan file.
 
 Finish: `make check` green (where it exists), open the pull request as a draft
 with a description through the skill, run the reviews the merge policy asks
-for, fix findings on the same branch, mark the pull request ready and stop; the owner merges.
-Update the README Status block, write the plan and prompt for the next PR,
-update `RESUME.md`, then report in fifteen lines at most: what shipped, what is
-deferred, anything the owner must decide.
+for, fix findings on the same branch and mark the pull request ready. Update
+the README Status block, write the plan and prompt for the next PR, update
+`RESUME.md`, then stop and report in fifteen lines at most: what shipped, what
+is deferred, anything the owner must decide. The owner merges.
