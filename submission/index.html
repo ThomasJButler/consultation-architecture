@@ -87,8 +87,8 @@
   <h2>The design, in bullets</h2>
   <ul>
     <li>A named reviewer signs off each question's themes; every edit is kept. Uploads are validated and costed before spend; no demographic reaches a prompt. One platform serves every department.</li>
-    <li>I've added sign-off per question before tagging: in i.AI's published evaluation reviewers left roughly three mappings in four unchanged and corrected the rest. Confirm-as-is is one click.</li>
-    <li>Postgres holds every fact and all pipeline state; S3 is archive only. The job table is the truth and queue messages are hints, so a duplicate or lost message is harmless.</li>
+    <li>The journey gains one step: a reviewer signs off each question's themes before tagging, and the server enforces it. In i.AI's published evaluation reviewers left three mappings in four unchanged.</li>
+    <li>Postgres holds every fact and all pipeline state; S3 holds uploads and exports, nothing the pipeline depends on after ingest. The job table is the truth and queue messages are hints, so a duplicate or lost message is harmless.</li>
     <li>One job per open question with a lease, a fencing token and per-batch checkpoints: a dead worker's job resumes from its checkpoint; a zombie can't write on a stale fence.</li>
     <li>The fan-in is one transaction behind a row lock: mark the question done, flip the consultation if all are, queue the email. One finisher wins; the reconciler covers a crash.</li>
     <li>One answer row per respondent, question and option; a respondent snapshot makes 'villagers who cycle to work and oppose' one indexed query; nothing is edited in place, so counts reproduce.</li>
