@@ -2,6 +2,8 @@
 
 STRIDE-lite: an asset, the way in, the threat, the control that answers it and what's left over. The long form of each control is in `docs/06-security-and-governance.md`, section 2; the pipeline steps referenced are in `docs/02-architecture.md`, section 4. Fourteen rows, then the logging policy in five lines, then what the model leaves out. The pull request that will pin each control is named in its row.
 
+*Corrected on 19 September 2026: the `## Correction` section at the end of this file supersedes the body where the two disagree.*
+
 The people in it. A member of the public who writes an instruction into an answer, or ten thousand of them behind a campaign. A policy team member who uploads a crafted file, or just a very big one. A department user reaching for another department's data. An operator with the admin console. Whoever holds a leaked gateway token. Trust boundaries, with what crosses each:
 
 | Boundary | Trusted side | Untrusted side | What crosses it |
@@ -57,3 +59,25 @@ The STRIDE letters, and where each lands: spoofing in rows 4 and 8; tampering in
 3. The log formatter. Grep the worker for anything logged that came from a spreadsheet cell.
 4. The vault grants in `schema.sql`. One `GRANT SELECT` to the pipeline role undoes row 6.
 5. The export writer. Put `=1+1` in an answer on the fixtures and open the result.
+
+## Correction, 19 September 2026
+
+A review of PR-02 found fifteen inconsistencies across the design documents; `docs/07-reviews.md` logs the pass and PR-02b reconciles them. The entries below correct rows of this file, each reprinting the corrected row. The body above is left as it merged.
+
+1. **Row 6, the identity vault.** A fourth role holds the DELETE that nobody held, and the row names it:
+
+   | # | Asset | Entry point | Threat | Control | Residual risk |
+   |---|---|---|---|---|---|
+   | 6 | The identity vault | The ingest role at step 3a; the export role at step 12; `consult_admin` for the deletion job and the console's erasure action | Disclosure: identity joined back to answers by the pipeline; an email address in a prompt; a DELETE grant wider than the two paths that need it | The pipeline role has no grant on the `vault` schema; `attrs` isn't on the prompt path; regex masking on the prompt copy of an answer; DELETE on every table, the vault included, sits on `consult_admin` alone: the web app holds that connection for the erasure action and nothing else, the deletion job for its daily run, and the worker never. PR-03 will create the four roles; PR-06 will connect as the pipeline role and expect a permission error | A respondent who writes their own name into an open answer sends it to the model unless the regex catches it. NER is on the cut list, and `docs/06` section 6 says why |
+
+2. **Row 10, the operator console.** The console's erasure action looks a respondent up by identity through the vault, which the row said an operator can't do. The lookup runs as `consult_admin` and is audited every time:
+
+   | # | Asset | Entry point | Threat | Control | Residual risk |
+   |---|---|---|---|---|---|
+   | 10 | The operator console | Django admin over `job`, `question`, `notification_outbox`, `department`; the erasure action's vault lookup, run as `consult_admin` | Elevation and repudiation: an operator retries a job in a paused department, reassigns a question, resends an email, looks up a respondent by identity, and later denies it | Every action writes an `audit_event` with actor, before and after, and the vault lookup writes one whether or not a respondent is found; the console can't edit a version or a tag; pause and budget are data the dispatcher reads | An operator is trusted. The audit trail is the control after the fact, and the section 2 logging policy is what keeps it from also being a leak |
+
+3. **Row 4, the queue.** IAM lets three roles send, not one, because dispatch happens wherever a job row is inserted (`docs/02`, step 4):
+
+   | # | Asset | Entry point | Threat | Control | Residual risk |
+   |---|---|---|---|---|---|
+   | 4 | The queue | Any principal with `SendMessage` on the SQS queue: the web task, the worker task and the reconciler | Spoofing and replay: a forged or replayed message naming a job id, from a compromised task or a duplicate delivery | The message is a hint. The conditional claim (step 5) refuses anything the `job` table doesn't say is `queued` or stale; IAM limits sending to the three task roles and receiving to the worker. PR-05 will pin the claim | A replayed message for a stale lease triggers a takeover slightly early, and a compromised web task can enqueue hints for any job id it can name; both end at the claim. The fence holds and the job table is authoritative |

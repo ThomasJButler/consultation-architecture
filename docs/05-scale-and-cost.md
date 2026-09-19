@@ -2,6 +2,8 @@
 
 This file shows the working behind every number docs/02 quotes. Each figure points at a row of the verification log in `docs/01-research.md` (section 6) or says it's an estimate and what it rests on. Prices were checked on 19 September 2026 unless a log row says otherwise. The model arithmetic is sections 2 to 4, the platform is section 5, the people are section 6, and section 9 lists what none of it has measured.
 
+*Corrected on 19 September 2026: the `## Correction` section at the end of this file supersedes the body where the two disagree.*
+
 ## 1. Assumptions
 
 Printed so anyone with a calculator can redo the sums. The first two are docs/02's own (section 1).
@@ -119,3 +121,25 @@ The gateway's tokens-per-minute share sets the wall-clock at 100,000 respondents
 - Smaller ones: 8 s and 20 s per call, 2.5 tags per answer, and every AWS unit price in section 5, which is why the section says "to re-check" ten times.
 
 PR-05 will pin the transactions the rows depend on, PR-09 will measure the one plan it can, and the rest waits for a real consultation and a real invoice.
+
+## Correction, 19 September 2026
+
+A review of PR-02 found fifteen inconsistencies across the design documents; `docs/07-reviews.md` logs the pass and PR-02b reconciles them. The entries below correct this file. Each names the section or sentence it corrects and gives the corrected text; the body above is left as it merged.
+
+1. **Section 3, the method and the 100,000 row.** The table's rule is "whichever is longer of the token bound and the call bound", per round, with no overlap between the two phases. The 1,000 and 10,000 rows follow it; the 100,000 row mixed in an overlap the other rows don't assume and put the mapping phase at its token bound alone. The row by the stated method:
+
+   | Respondents | Open answers | Model calls | Wall-clock, sync at 1M TPM | Model cost, sync (cached / uncached) | Batch lane | Database rows |
+   |---|---|---|---|---|---|---|
+   | 100,000 | 500,000 | ~60,000 | ~2.5 h to themes ready (four questions in a round of ~76 min, token-bound; the fifth alone at ~67 min, call-bound); ~7 h of gateway time in all | £400 / £510 | ~£255 | 2M answers, ~1.25M tags, ~60k `job_batch` |
+
+   The mapping arithmetic behind the 7 h: 10,000 calls and 37.5M tokens per question; four questions in a round are token-bound at 150 min, the fifth alone is call-bound at 133 min (10,000 calls at 8 s, ten in flight), 283 min in all, about 4.7 hours; add the 143 minutes to themes ready. The same sums give the 10,000 row's 45 minutes (7.6 + 6.7 minutes to themes ready, 15 + 13.3 to map) and the 1,000 row's few minutes before rounding up for stage boundaries.
+
+   The overlap assumption, stated once: the table assumes mapping starts after the last theme set is ready. If reviewers sign off questions as they arrive, map jobs run under the same cap of four alongside the last generation round and the 100,000 total is nearer 5 hours: the fifth question's solo rounds are call-bound and leave most of the share idle, which overlap fills. That figure needs a reviewer at the screen while the pipeline runs, so it isn't the one printed.
+
+2. **Section 3, the paragraph after the table.** "Mapping is the larger phase: 66% of the tokens, about three hours" reads: about 4.7 hours by the same method, three at the token bound alone, which is why the batch lane suits it.
+
+3. **Section 4, the 50,000 figure.** "About two and a half hours of gateway time at the assumed share" reads: about three and a half hours by the method in section 3 (72 minutes to themes ready, 142 to map), two and a half at the token bound alone. Still the same order as the reported two hours, and the rest of the paragraph stands.
+
+4. **Section 2, the screen figure.** The paragraph beginning "Screen 1 in docs/02 (section 12) shows about £2.70" predates the alignment it describes. It reads: Screen 1 in docs/02 (section 12) shows about 2.3M tokens and about £3.30 for 4,100 answers, which is this arithmetic at the cached price, 2.83M tokens and £3.97 per 5,000 answers, scaled. The prefix is the assumption that moves the number most: it's 35% of the tokens and the only part the cache discount touches. The screen will compute from the validator's own counts (docs/02, step 2), so neither sketch is what a policy team sees.
+
+5. **Section 3, the 100k TPM paragraph.** "docs/02 section 7.12 calls the first a working day; two is nearer" reads: docs/02 section 7.12 says the same, nearer two days than one.

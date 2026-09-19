@@ -2,6 +2,8 @@
 
 **Status:** Design frozen at PR-01. **Owner:** Thomas Butler. **Date:** 19 September 2026.
 
+*Corrected on 19 September 2026: the `## Correction` section at the end of this file supersedes the body where the two disagree.*
+
 The master reference for the service: what I've assumed, what I've decided and why, how one consultation moves through the pipeline, and what the five screens look like. `docs/00-brief-and-data-shape.md` says what the service is for and what the input files look like. `docs/01-research.md` holds every source with its retrieval date. `docs/03-adrs/` records the decisions in section 7 one by one. The data model, the cost arithmetic and the security notes get their own files in PR-02 (`docs/04`, `docs/05`, `docs/06`).
 
 Read it top to bottom once. The part you'll come back to is section 4, the pipeline, and the SQL in it.
@@ -498,3 +500,48 @@ Calls: `GET /consultations/{id}/overview` returns counts, a distribution per dem
 ## 13. Where to go next
 
 `docs/03-adrs/` for the decisions that needed a full record; `docs/04` for the sixteen tables and every index; `docs/05` for the cost arithmetic; `docs/06` and `THREAT_MODEL.md` for the rest of section 10; `poc/` (from PR-03) for the four mechanics to be proved by a test rather than asserted: the fan-in transaction, lease takeover with a fence, idempotent tag inserts and the indexed filter query.
+
+## Correction, 19 September 2026
+
+A review of PR-02 found fifteen inconsistencies across the design documents; `docs/07-reviews.md` logs the pass and PR-02b reconciles them. The entries below correct this file. Each names the section it corrects and gives the corrected text; the body above is left as it merged. `docs/04` is the one document rewritten in place, because the schema is typed from it.
+
+1. **Section 6, the reopen row and the paragraphs around the table.** The row read that the later `ready` email "carries that version as `subject_id`", and folded two different reopens into one edge. There are two, and they carry the pass, not the version:
+
+   | From | To | Trigger | Written by | Email |
+   |---|---|---|---|---|
+   | `ready` | `awaiting_review` | A question reopened for correction: `complete → themes_ready` with a new candidate theme-set version to edit, and a new `run_id` minted in the same transaction so the later `ready` email has a row of its own | Web app, on a reviewer's action, through `advance_consultation` | No |
+   | `ready` | `processing` | A question re-run on a new model alias: `complete → finding_themes` with a new `find_themes` job under a new `run_id`; fan-in 1 then flips the consultation and sends the email exactly as on the first pass, and the review clock starts there, not at the reopen | Web app, on a reviewer's action, through `advance_consultation` | No (fan-in 1's follows) |
+
+   The paragraph before the table, which gives a reopened question one edge (`complete → themes_ready`), gains the second (`complete → finding_themes`) for a re-run.
+
+   Add to the paragraph on `advance_consultation`: `run_id` is minted with the consultation row, copied onto every job a pass inserts, and replaced by the reopen. Every milestone outbox row carries the current one as `subject_id`. That is what keeps a reopened question's second `map_themes` job, and the second `analysis_ready` email, from colliding with the first (`docs/04`, sections 2 and 3).
+
+2. **Steps 7 and 10, the outbox insert.** Both inserts read the pass id from the locked row rather than writing bare values:
+
+   ```sql
+   -- only if the UPDATE above touched one row:
+   INSERT INTO notification_outbox (department_id, consultation_id, kind, subject_id)
+   SELECT department_id, id, 'themes_ready', run_id
+     FROM consultation WHERE id = $c
+   ON CONFLICT DO NOTHING;
+   ```
+
+   Step 10 is the same with `'analysis_ready'`.
+
+3. **Section 7, decision 8, the key.** The key is `UNIQUE (consultation_id, kind, subject_id)` with `subject_id NOT NULL`. `theme_set_version_id` is gone from the outbox: once milestone rows took the pass id, nothing wrote it. A milestone row carries the pass's `run_id`; an attention row the failed job's id, or the department's `pause_id` for a budget pause; a reminder the id of the candidate version awaiting sign-off. Every row names its subject, so the outbox no longer needs `NULLS NOT DISTINCT` (`docs/04`, sections 2 and 9). ADR-006 carries the same correction.
+
+4. **Step 2, the staging table.** "COPYs the file into a staging table" means one logged table per upload in a `staging` schema the pipeline role can't read. The identity columns sit in it until ingest moves them to the vault, and it has to outlive the human configure step, which an unlogged table can't: Postgres truncates those on crash recovery (`docs/04`, section 2, with the log row in `docs/01`).
+
+5. **Step 3a, ingest.** Ingest reads the staging table as the ingest role and drops it once its transaction has committed. If the table is missing at Confirm (a restore, a hand drop), the ingest job re-runs the stage step from the object `consultation.upload_sha256` names before it ingests (after an erasure that's the redacted copy; `docs/06`, section 4). A second `stage` job row would collide on `job_one_per_run` under the same `run_id`, which is why the ingest job does the re-run itself rather than Confirm inserting another job.
+
+6. **Section 10, the retention bullet.** "`retention_until` drives the S3 lifecycle and a deletion job" reads: `retention_until` drives a deletion job that removes the rows, the S3 objects and the traces; the bucket's lifecycle rule is a backstop at five years, because a lifecycle rule can't read a date per object (`docs/06`, section 4, with the log row in `docs/01`). The rest of the bullet stands.
+
+7. **Section 5, statement 5.** `review_reminder` rows had no producer. Statement 5 reads: relay unsent outbox rows, and insert a `review_reminder` row for each question that has sat in `themes_ready` for five working days, keyed on the id of the candidate theme-set version awaiting sign-off, so the insert is idempotent within a pass and a reopened question, whose reopen makes a new candidate version, can be reminded again (ADR-006).
+
+8. **Section 3.2, the validator table.** One row added, for the unique index `docs/04` now puts on `respondent.external_id`:
+
+   | Check | Outcome |
+   |---|---|
+   | A value repeated in the respondent id column | Warning with a resolution: ignore the column and identify rows by their row number, or keep the id on the first occurrence and blank it on the rest. No row is dropped either way |
+
+9. **Section 6, `advance_consultation`, and section 3, the alarms.** The routine also stamps `consultation.status_changed_at` on every transition and `awaiting_review_at` on entry to that state, and every job row carries `created_at` (`docs/04`). The job-age alarm, the stuck-consultation alarm and the review-time KPI on screen 5 read those three columns, and none of them had been named.

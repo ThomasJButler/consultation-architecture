@@ -27,7 +27,7 @@ pieces in the order the later PRs will need them. psycopg 3 with row
 factories rather than an ORM, because the SQL is the argument the design
 makes. One `schema.sql` applied by `consult init` (with `--reset`), no
 migration tool: a proof-of-concept changes its schema by rewriting the
-file. The three roles (ingest, pipeline, export) are created in a `DO` block
+file. The four roles (ingest, pipeline, export, `consult_admin`) are created in a `DO` block
 guarded by a `pg_roles` lookup, because roles are cluster-wide and the tests
 apply the schema to a fresh database each session; the vault grants are
 per database and follow. The alternative, an ORM with migrations, was
@@ -38,8 +38,8 @@ rejected because it hides the exact statements the design rests on.
 1. `test_env_example_names_every_setting` pins that `.env.example` and
    `config.py` agree.
 2. `test_init_creates_every_table_the_design_names` pins that `consult
-   init` creates the thirteen tables, the vault schema and the three roles
-   in `docs/04`, and that running it twice is harmless.
+   init` creates the fourteen tables, the `vault` and `staging` schemas and
+   the four roles in `docs/04`, and that running it twice is harmless.
 3. `test_init_reset_leaves_the_same_empty_schema` pins that `--reset` drops
    and recreates everything and no rows survive.
 4. `test_the_fixture_generator_writes_the_three_sheets_and_a_responses_file`
@@ -51,14 +51,21 @@ rejected because it hides the exact statements the design rests on.
    prose, malformed JSON).
 7. `test_pure_tests_run_without_a_database` is a repo rule: no test outside
    the `db` marker imports `psycopg` at module level.
+8. `test_job_error_and_log_lines_carry_ids_and_codes_only` pins the
+   logging policy in `THREAT_MODEL.md` section 2: a failed job stores an
+   `error_code` and a `provider_request_id` and the `job` table has no text
+   column a message body could go in (asserted from `information_schema`
+   against an allow-list), and the formatter in `logs.py` keeps ids,
+   counts, durations and codes and drops any field named as text (answer,
+   prompt, label, message).
 
 ## 4. Implementation steps
 
 Each ends in a commit; subjects are plain sentences.
 
 1. `Start the Python project with one green test and CI` (pyproject,
-   Makefile, pytest.ini, test 1, the CI workflow; push and watch it pass
-   before going on)
+   Makefile, pytest.ini, `.env.example`, `config.py`, test 1, the CI
+   workflow; push and watch it pass before going on)
 2. `Pin that init creates every table the design names` (test 2, red)
 3. `Add the schema and the init command` (schema.sql, cli.py with `init`
    and `--reset`, store.py connection helpers; test 2 green)
@@ -71,12 +78,17 @@ Each ends in a commit; subjects are plain sentences.
 6. `Generate a fictional consultation in the real format` (the script and
    the committed fixtures; test 4 green)
 7. `Pin the fakes the model tests will lean on` (tests 5 and 6, red)
-8. `Add the recording and scripted fakes` (fakes.py; green)
-9. `Run ruff, mypy and the guards before every commit` (pre-commit with
-   mypy scoped to `consult/`, gitleaks, the brief guard)
-10. `Say what each test file proves` (TESTING.md, poc/README.md with the
+8. `Add the recording and scripted fakes` (the `LLM` protocol in `llm.py`
+   and both fakes in `fakes.py`; green)
+9. `Pin that a failed job stores a code and a request id and nothing else`
+   (test 8, red)
+10. `Add the log formatter and the failure recorder` (`logs.py` and
+    `store.record_failure`; green)
+11. `Run ruff, mypy and the guards before every commit` (pre-commit with
+    mypy scoped to `consult/`, gitleaks, the brief guard)
+12. `Say what each test file proves` (TESTING.md, poc/README.md with the
     "does not prove" list, test 7)
-11. `Update the status block`
+13. `Update the status block`
 
 ## 5. Output
 
@@ -84,9 +96,9 @@ Each ends in a commit; subjects are plain sentences.
 |---|---|
 | `poc/pyproject.toml`, `Makefile`, `pytest.ini`, `.pre-commit-config.yaml`, `.env.example` | Project, gates, settings |
 | `poc/docker-compose.yml` | Postgres 17 on loopback |
-| `poc/consult/config.py`, `schema.sql`, `store.py`, `cli.py`, `llm.py` (protocol only), `logging.py` | The scaffold's own code |
+| `poc/consult/config.py`, `schema.sql`, `store.py`, `cli.py`, `llm.py` (protocol only), `logs.py` | The scaffold's own code |
 | `poc/scripts/make_fixture_data.py`, `poc/tests/fixtures/` | Fictional consultation |
-| `poc/tests/conftest.py`, `fakes.py`, `test_store.py`, `test_cli.py`, `test_fixtures.py`, `test_fakes.py`, `test_repo_rules.py` | The harness and the first tests |
+| `poc/tests/conftest.py`, `fakes.py`, `test_store.py`, `test_cli.py`, `test_fixtures.py`, `test_fakes.py`, `test_repo_rules.py`, `test_logs.py` | The harness and the first tests |
 | `.github/workflows/ci.yml` | Python job added to the guard job |
 | `poc/README.md`, `poc/TESTING.md` | What it proves, what each file proves |
 
@@ -96,8 +108,10 @@ Postgres binds to loopback with a password from `.env`; `.env.example`
 carries a placeholder. `mypy --strict` on `consult/` with `types-openpyxl`;
 `ignore_missing_imports` is banned (CLAUDE.md rule 7). The fixture
 generator must not reproduce anything from a real sample: different topic,
-question texts, column references, option labels and vocabularies. Logging
-policy from `THREAT_MODEL.md` is wired in `logging.py` and pinned in PR-04.
+question texts, column references, option labels and vocabularies. The
+logging policy from `THREAT_MODEL.md` is wired in `logs.py` (named so it
+doesn't shadow the stdlib) and pinned here by test 8, as `docs/06` section
+2.5, the threat model's fifth line and CLAUDE.md rule 8 say it is.
 
 ## 7. Fallback
 
@@ -109,6 +123,6 @@ db'` still runs the pure tests and CI covers the rest.
 
 - `docker compose up -d db && make check` green locally; CI green on the
   pull request head on Python 3.12.
-- All seven tests in section 3 exist and pass.
+- All eight tests in section 3 exist and pass.
 - `README.md` Status block updated; `plans/PR-04-*.md` written; `RESUME.md`
   updated.

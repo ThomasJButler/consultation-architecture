@@ -41,7 +41,9 @@ be. Everything here is my own work or synthetic data in the same shape.
 Built: the plan, the scaffold, the design documents (brief, research,
 architecture, seven decision records, data model, cost model, security notes
 and threat model), both diagrams and a first draft of the submission with a
-rendered PDF. Planned: the proof-of-concept (PR-03 to PR-09), final polish
+rendered PDF. Reconciled: fifteen inconsistencies a review of the design
+documents found, corrected in PR-02b before the schema is typed from
+`docs/04`. Planned: the proof-of-concept (PR-03 to PR-09), final polish
 (PR-10). Deliberately not built: see above.
 
 ## How it was built
