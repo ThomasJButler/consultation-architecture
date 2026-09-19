@@ -27,3 +27,4 @@ written for. Find the row that matches your question and start there.
   11). Anything that couldn't be verified is rounded or left out.
 - The numbered files are in reading order.
 - Files from later pull requests are added to this table as they land.
+| `07-reviews.md` | One row per pull request: who reviewed it, what was found, what was fixed or kept | Anyone checking how the work was reviewed |
