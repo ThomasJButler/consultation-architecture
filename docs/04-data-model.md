@@ -239,7 +239,7 @@ Built once by the ingest job from the answer rows and never edited by hand. Ever
 
 ## 6. The dashboard queries
 
-The compiled filter is one CTE that every query below reuses. The three predicate kinds from docs/02 step 11 appear in order: containment on `attrs`, the OR'd `theme:` list on this question, and the `other:` semi-join for "what did people tagged K on question Q1 say here". Each is dropped when the URL doesn't carry it.
+The compiled filter is one CTE that every query below reuses. The duplicate toggle comes first: two predicates that hide answer-level and respondent-level duplicates, both dropped when the URL asks for `with=duplicates`, so a count reads either way (docs/02, section 7, decision 9). Then the three predicate kinds from docs/02 step 11, in order: containment on `attrs`, the OR'd `theme:` list on this question, and the `other:` semi-join for "what did people tagged K on question Q1 say here". Each is dropped when the URL doesn't carry it.
 
 ```sql
 WITH scope AS (
@@ -247,6 +247,8 @@ WITH scope AS (
     FROM answer a
     JOIN respondent r ON r.id = a.respondent_id
    WHERE a.question_id = $q AND NOT a.is_blank
+     AND a.duplicate_of_answer_id IS NULL
+     AND r.duplicate_of IS NULL
      AND r.attrs @> $attr
      AND EXISTS (SELECT 1 FROM answer_theme t
                   WHERE t.answer_id = a.id AND t.theme_set_version_id = $v
