@@ -21,8 +21,8 @@ One central service that turns a department's consultation responses into signed
 ## The design, in bullets
 
 - A named reviewer signs off each question's themes; every edit is kept. Uploads are validated and costed before spend; no demographic reaches a prompt. One platform serves every department.
-- The journey gains one step: a reviewer signs off each question's themes before tagging, and the server enforces it. In i.AI's published evaluation reviewers left three mappings in four unchanged.
-- Postgres holds every fact and all pipeline state; S3 holds uploads and exports, nothing the pipeline depends on after ingest. The job table is the truth and queue messages are hints, so a duplicate or lost message is harmless.
+- The journey gains one step: a reviewer signs off each question's themes before tagging, server-enforced. In i.AI's published evaluation reviewers left three mappings in four unchanged.
+- Postgres holds every fact and all pipeline state; S3 only holds uploads and exports. The job table is the truth and queue messages are hints, so a duplicate or lost message is harmless.
 - One job per open question with a lease, a fencing token and per-batch checkpoints: a dead worker's job resumes from its checkpoint; a zombie can't write on a stale fence.
 - The fan-in is one transaction behind a row lock: mark the question done, flip the consultation if all are, queue the email. One finisher wins; the reconciler covers a crash.
 - One answer row per respondent, question and option; a respondent snapshot makes 'villagers who cycle to work and oppose' one indexed query; nothing is edited in place, so counts reproduce.
