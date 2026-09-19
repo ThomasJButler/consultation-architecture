@@ -44,6 +44,18 @@ draft of the submission with a rendered PDF. Planned: the data model, cost
 model and security notes (PR-02), the proof-of-concept (PR-03 to PR-09),
 final polish (PR-10). Deliberately not built: see above.
 
+## How it was built
+
+Test-first, with the checks in CI: ruff, mypy, pytest against a real Postgres,
+pip-audit and bandit (from PR-03 onwards). Every pull request was reviewed
+before merging by [ReviewBot Protocol](https://github.com/ThomasJButler/ReviewBotProtocol),
+a code-review tool I built and run myself: several open-weight models read the
+diff independently on my own machine, their findings are compared, and nothing
+leaves the device. It scales by adding models, not by sending code anywhere.
+What each review found, and what I did about it, is in `docs/07-reviews.md`.
+I used Claude throughout, to research, to stress-test alternatives and to
+draft; the decisions are mine.
+
 ## Licence
 
 MIT. See `LICENSE`.
