@@ -38,11 +38,11 @@ be. Everything here is my own work or synthetic data in the same shape.
 
 ## Status (19 September 2026)
 
-Built: the plan, the repository scaffold, the design documents (brief,
-research, architecture, seven decision records), both diagrams and a first
-draft of the submission with a rendered PDF. Planned: the data model, cost
-model and security notes (PR-02), the proof-of-concept (PR-03 to PR-09),
-final polish (PR-10). Deliberately not built: see above.
+Built: the plan, the scaffold, the design documents (brief, research,
+architecture, seven decision records, data model, cost model, security notes
+and threat model), both diagrams and a first draft of the submission with a
+rendered PDF. Planned: the proof-of-concept (PR-03 to PR-09), final polish
+(PR-10). Deliberately not built: see above.
 
 ## How it was built
 
