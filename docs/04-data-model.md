@@ -320,9 +320,8 @@ The table leaves out three things. Tags accumulate per version: a reopened quest
 
 ## 8. What the proof-of-concept schema leaves out, and what it keeps
 
-PR-03's `schema.sql` will carry thirteen of the sixteen, and its README will say so. The three it drops, and why:
+PR-03's `schema.sql` will carry fourteen of the sixteen, and its README will say so. `department` stays, cut down to `id`, `name` and `concurrent_jobs_cap`: every other table's `department_id NOT NULL REFERENCES department (id)` needs a row to point at, and the dispatch cap is one of the mechanics the tests exercise. The budget columns go, because a budget needs a monthly reconciliation against the gateway's invoice (docs/02, section 7, decision 10) and there's no invoice to reconcile. The two it drops, and why:
 
-- `department`. Concurrency caps become settings, because the in-process queue that stands in for SQS has one tenant. Budgets need a monthly reconciliation against the gateway's invoice (docs/02, section 7, decision 10), and there's no invoice to reconcile.
 - `export`. The XLSX and the report go to a local path; there's no presigned link to hand out and no S3 key to record. The report renderer itself is a print view, so a row that points at it is a production concern.
 - `audit_event`. Its only reader is the operator console, which is Django admin (docs/02, section 3.3), and the proof-of-concept has no Django. The retraction history it would hold is exercised through `retracted_at` and `retracted_by` instead.
 

@@ -38,7 +38,7 @@ rejected because it hides the exact statements the design rests on.
 1. `test_env_example_names_every_setting` pins that `.env.example` and
    `config.py` agree.
 2. `test_init_creates_every_table_the_design_names` pins that `consult
-   init` creates the thirteen tables, the `vault` and `staging` schemas and
+   init` creates the fourteen tables, the `vault` and `staging` schemas and
    the four roles in `docs/04`, and that running it twice is harmless.
 3. `test_init_reset_leaves_the_same_empty_schema` pins that `--reset` drops
    and recreates everything and no rows survive.
