@@ -27,7 +27,7 @@ Two conventions, stated once. Every table carries `department_id uuid NOT NULL`,
 
 ## 2. DDL sketch for the eight tables the mechanics rest on
 
-A sketch in Postgres 17 syntax, checked by eye, not yet run. `department`, `question_option`, `theme_set_version` and `theme` are referenced as though created first; their mechanical content is one unique key each, listed in section 3. Foreign keys to `department` are left implicit after the first table. The `stage` job's staging table isn't one of the sixteen: it's an unlogged relation per upload, COPYed into and dropped once ingest has committed.
+A sketch in Postgres 17 syntax, checked by eye, not yet run. `department`, `question_option`, `theme_set_version` and `theme` are referenced as though created first; their mechanical content is one unique key each, listed in section 3. Foreign keys to `department` are left implicit after the first table. The `stage` job's staging table isn't one of the sixteen. It's one logged table per upload in a `staging` schema (`staging."<consultation id>"`), COPYed into by the `stage` job and read by the `ingest` job, both running as the ingest role; the pipeline role has no grant on the schema, because the identity columns sit there until ingest moves them to the vault. It has to be logged: it lives across the human configure step, and an unlogged table "is automatically truncated after a crash or unclean shutdown" (docs/01, section 6; log row "Postgres UNLOGGED tables", checked 19 September 2026). The ingest job drops it after its transaction commits. If it's missing at Confirm, the ingest job re-runs the stage step from the S3 original first (docs/02, step 3a).
 
 ```sql
 CREATE TABLE consultation (
@@ -324,7 +324,7 @@ PR-03's `schema.sql` will carry thirteen of the sixteen, and its README will say
 - `export`. The XLSX and the report go to a local path; there's no presigned link to hand out and no S3 key to record. The report renderer itself is a print view, so a row that points at it is a production concern.
 - `audit_event`. Its only reader is the operator console, which is Django admin (docs/02, section 3.3), and the proof-of-concept has no Django. The retraction history it would hold is exercised through `retracted_at` and `retracted_by` instead.
 
-Roles are the other thing the schema has to carry. `CREATE ROLE` is cluster-wide, so `schema.sql` will create the ingest, pipeline and export roles inside a `DO` block guarded by a `pg_roles` lookup, then issue the vault grants per database (docs/06, section 2.4). The vault test in PR-06 will assert two things: a `SELECT` on `vault.respondent_identity` as the pipeline role is refused, and nothing on the pipeline path names the schema.
+Roles are the other thing the schema has to carry. `CREATE ROLE` is cluster-wide, so `schema.sql` will create the ingest, pipeline and export roles inside a `DO` block guarded by a `pg_roles` lookup, then issue the `vault` and `staging` grants per database (docs/06, section 2.4). The `staging` schema itself is created by `schema.sql`; its tables are created by the `stage` job and dropped by `ingest`. The vault test in PR-06 will assert two things: a `SELECT` on `vault.respondent_identity` as the pipeline role is refused, and nothing on the pipeline path names the schema.
 
 ## 9. The two Postgres facts under the fan-in
 

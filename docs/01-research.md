@@ -129,6 +129,7 @@ The shape that matters: the median consultation is small, the tail is enormous, 
 | Postgres SKIP LOCKED wording | https://www.postgresql.org/docs/current/sql-select.html | 19 Sep 2026 | verified by fetch today |
 | Postgres NULLS NOT DISTINCT wording and default | https://www.postgresql.org/docs/current/sql-createtable.html | 19 Sep 2026 | verified by fetch today |
 | Postgres jsonb_path_ops operators, size, empty-structure caveat | https://www.postgresql.org/docs/current/datatype-json.html | 19 Sep 2026 | verified by fetch today |
+| Postgres UNLOGGED tables: "automatically truncated after a crash or unclean shutdown" | https://www.postgresql.org/docs/current/sql-createtable.html | 19 Sep 2026 | verified by fetch today |
 | SQS: default 30 s, 12-hour cap from first receive, at-least-once | https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-visibility-timeout.html | 19 Sep 2026 | verified by fetch today |
 | ECS stopTimeout: default 30 s, maximum 120 s | https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html | 19 Sep 2026 | verified by fetch today |
 | Azure gpt-4.1 uksouth meters: $2.00 / $0.50 / $8.00; Batch $1.00 / $4.00; no cached batch meter | https://prices.azure.com/api/retail/prices?$filter=armRegionName%20eq%20%27uksouth%27%20and%20contains(productName,%20%27OpenAI%27)%20and%20contains(meterName,%20%274.1%27) | 19 Sep 2026 | verified by fetch today |

@@ -524,3 +524,7 @@ A review of PR-02 found fifteen inconsistencies across the design documents; `do
    Step 10 is the same with `'analysis_ready'`.
 
 3. **Section 7, decision 8, the key.** The key is `UNIQUE NULLS NOT DISTINCT (consultation_id, kind, subject_id)`. `theme_set_version_id` is gone from the outbox: once milestone rows took the pass id, nothing wrote it. A milestone row carries the pass's `run_id`; an attention row the failed job's id, or null when a paused budget is the reason and there is no job, which is what the modifier is for; a reminder the question's id. ADR-006 carries the same correction.
+
+4. **Step 2, the staging table.** "COPYs the file into a staging table" means one logged table per upload in a `staging` schema the pipeline role can't read. The identity columns sit in it until ingest moves them to the vault, and it has to outlive the human configure step, which an unlogged table can't: Postgres truncates those on crash recovery (`docs/04`, section 2, with the log row in `docs/01`).
+
+5. **Step 3a, ingest.** Ingest reads the staging table as the ingest role and drops it once its transaction has committed. If the table is missing at Confirm (a restore, a hand drop), the ingest job re-runs the stage step from the S3 original, same sha256, before it ingests. A second `stage` job row would collide on `job_one_per_run` under the same `run_id`, which is why the ingest job does the re-run itself rather than Confirm inserting another job.
