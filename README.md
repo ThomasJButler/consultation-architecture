@@ -2,7 +2,7 @@
 
 > A design for turning a piloted consultation-analysis tool into a service every
 > government department can rely on, with the working notes, the decisions and a
-> small proof-of-concept that sit behind a two-page submission.
+> small proof-of-concept that sit behind a three-page submission.
 
 Government has to consult the public before major policy changes. Someone then
 reads every response, works out the themes, and tags each response by hand. An

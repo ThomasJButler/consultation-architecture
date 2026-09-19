@@ -65,12 +65,12 @@ word for word. Counted on 19 September 2026 against the files as committed.
 ## Rendering
 
 ```sh
-npx -y @mermaid-js/mermaid-cli -i docs/diagrams/diagram-1-journey-and-system.mmd -o submission/diagram-1.svg
-npx -y @mermaid-js/mermaid-cli -i docs/diagrams/diagram-2-question-lifecycle.mmd -o submission/diagram-2.svg
+bash submission/build.sh   # renders both SVGs (white background) and prints the PDF
 ```
 
 Measured with mermaid-cli 11.17.0 on 19 September 2026: Diagram 1 renders
-935 px wide and Diagram 2 644 px, at Mermaid's default 16 px type. Scaled to a
-170 mm text width on A4 portrait that's about 8.2 pt and 12 pt. The floor is
-8 pt (`plans/PR-01-design-freeze.md`, section 3), so Diagram 1 is close to it
-in portrait; landscape lifts it to about 12 pt.
+935 px wide and Diagram 2 644 px, at Mermaid's default 16 px type. On the landscape
+sheets `index.html` prints them on, capped at 138 mm and 158 mm high, the
+16 px labels come out at about 9.8 pt and 10.3 pt. The floor is 8 pt
+(`plans/PR-01-design-freeze.md`, section 3), so both clear it, without much
+to spare on Diagram 1.

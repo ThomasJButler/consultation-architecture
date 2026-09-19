@@ -6,7 +6,7 @@ where the work is and which plan to open.
 ## What this repository is
 
 A design for a production consultation-analysis service (docs, decision records,
-a submitted two-page summary) and a proof-of-concept of its job-pipeline
+a submitted three-page summary) and a proof-of-concept of its job-pipeline
 mechanics on Postgres. See `README.md` and `plans/00-plan.md`.
 
 ## Key rules
