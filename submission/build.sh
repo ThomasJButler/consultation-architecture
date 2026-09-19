@@ -13,7 +13,9 @@ out="$root/submission"
 pdf="$out/Thomas_Butler_Consultation_Architecture.pdf"
 
 # ---------- 1. Diagrams ----------
-# Every .mmd renders to an SVG of the same name next to index.html. SVG, because
+# Every .mmd renders to an SVG of the same name next to index.html. The
+# version is pinned: npx would otherwise fetch whatever is newest that day,
+# and a submission build should not depend on the registry's mood. SVG, because
 # the PDF has to keep its diagram text at 8 pt or more at A4 (plans/PR-01 §3)
 # and a bitmap loses that the moment it's scaled. White background, because the
 # SVG sits inside an <img> on a printed page and a transparent one would show
@@ -21,7 +23,7 @@ pdf="$out/Thomas_Butler_Consultation_Architecture.pdf"
 for src in "$root"/docs/diagrams/*.mmd; do
   name="$(basename "${src%.mmd}")"
   echo "render: $name"
-  npx -y @mermaid-js/mermaid-cli -i "$src" -o "$out/$name.svg" -b white
+  npx -y @mermaid-js/mermaid-cli@11.17.0 -i "$src" -o "$out/$name.svg" -b white
 done
 
 # ---------- 2. Find the browser mermaid-cli just used ----------
@@ -94,7 +96,7 @@ if [ -z "$chrome" ] || [ ! -d "$node_modules/puppeteer-core" ]; then
   # nobody should get that by accident. md-to-pdf resolves SUBMISSION.md's
   # image paths against the working directory, hence the cd.
   echo "print: chromium or puppeteer-core not found, falling back to md-to-pdf" >&2
-  (cd "$root" && npx -y md-to-pdf SUBMISSION.md)
+  (cd "$root" && npx -y md-to-pdf@5.2.5 SUBMISSION.md)
   mv "$root/SUBMISSION.pdf" "$pdf"
 else
   print_pdf
