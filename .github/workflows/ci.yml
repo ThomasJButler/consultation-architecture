@@ -1,0 +1,17 @@
+# Until the proof-of-concept lands (PR-03) the only job is the brief guard: it
+# proves no filename or marker from the received brief is anywhere in the tree.
+# The Python job (ruff, mypy, pytest against a Postgres service, pip-audit,
+# bandit) is added with the code it checks.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: sh scripts/brief-guard.sh --all
