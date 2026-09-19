@@ -1,0 +1,40 @@
+# The brief and the sample data for this task were received under a recruitment
+# process and are marked OFFICIAL. They live outside this tree and never come in.
+Take_Home_Task.pdf
+taskemail.png
+example-consulation-responses.csv
+example-consultation-definition.xlsx
+
+# Local working files. RESUME.md and plans/prompts/ are the hand-off between
+# sessions; they're tools, not deliverables.
+.claude/
+RESUME.md
+plans/prompts/
+CLAUDE-SECURITY-*/
+
+# Secrets and environments
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Outputs from local runs (exports, logs, databases)
+exports/
+out/
+*.log
+*.jsonl
+*.db
+
+# Editors and OS
+.DS_Store
+node_modules/
