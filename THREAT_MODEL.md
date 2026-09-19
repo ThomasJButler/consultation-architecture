@@ -73,3 +73,9 @@ A review of PR-02 found fifteen inconsistencies across the design documents; `do
    | # | Asset | Entry point | Threat | Control | Residual risk |
    |---|---|---|---|---|---|
    | 10 | The operator console | Django admin over `job`, `question`, `notification_outbox`, `department`; the erasure action's vault lookup, run as `consult_admin` | Elevation and repudiation: an operator retries a job in a paused department, reassigns a question, resends an email, looks up a respondent by identity, and later denies it | Every action writes an `audit_event` with actor, before and after, and the vault lookup writes one whether or not a respondent is found; the console can't edit a version or a tag; pause and budget are data the dispatcher reads | An operator is trusted. The audit trail is the control after the fact, and the section 2 logging policy is what keeps it from also being a leak |
+
+3. **Row 4, the queue.** IAM lets three roles send, not one, because dispatch happens wherever a job row is inserted (`docs/02`, step 4):
+
+   | # | Asset | Entry point | Threat | Control | Residual risk |
+   |---|---|---|---|---|---|
+   | 4 | The queue | Any principal with `SendMessage` on the SQS queue: the web task, the worker task and the reconciler | Spoofing and replay: a forged or replayed message naming a job id, from a compromised task or a duplicate delivery | The message is a hint. The conditional claim (step 5) refuses anything the `job` table doesn't say is `queued` or stale; IAM limits sending to the three task roles and receiving to the worker. PR-05 will pin the claim | A replayed message for a stale lease triggers a takeover slightly early, and a compromised web task can enqueue hints for any job id it can name; both end at the claim. The fence holds and the job table is authoritative |
