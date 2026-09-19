@@ -19,8 +19,8 @@ Two conventions, stated once. Every table carries `department_id uuid NOT NULL`,
 | `theme` | `id`, `theme_set_version_id`, `key`, `label`, `description`, `is_longlist`, `is_fallback`, `lineage_theme_id`, `preview_count` | One theme in one version. `key` is the enum value the model returns; `is_fallback` marks `OTHER` and `NO_REASON`; `lineage_theme_id` points at the candidate it was condensed from. |
 | `theme_example` | `theme_id`, `answer_id`, `rank` | The quotes on the sign-off screen, from the 200-answer preview. |
 | `answer_theme` | `id`, `answer_id`, `theme_id`, `theme_set_version_id`, `job_id`, `batch_no`, `source` ai / human, `user_id`, `created_at`, `retracted_at`, `retracted_by` | A tag. Never deleted; retracted in place by setting `retracted_at`, re-added by clearing it (docs/02, step 11). |
-| `job` | `id`, `consultation_id`, `question_id`, `kind` stage / ingest / find_themes / preview_themes / map_themes / export / report, `run_id`, `status`, `attempts`, `next_attempt_at`, `claimed_by`, `heartbeat_at`, `sent_at`, `model_alias`, `prompt_sha256`, `params`, `tokens_in`, `tokens_cached`, `tokens_out`, `cost_pence`, `error_code`, `provider_request_id` | The unit of work and the ledger. `claimed_by`, `attempts` and `heartbeat_at` are the lease and the fence (docs/02, step 5). `error_code` and `provider_request_id` are all a failure stores; they are the two columns behind what docs/02 section 3.4 calls `job.error`, and there is no column a message body could go in. |
-| `job_batch` | `job_id`, `batch_no`, `stage`, `answer_ids bigint[]`, `status`, `trace_id`, `tokens_in`, `tokens_out`, `finished_at` | One checkpoint: one call of one stage function on one chunk (docs/02, step 6). A batch that failed the two-way check at size 1 is a row with status `unprocessable`, which is where the dashboard's bucket comes from. `trace_id` is the gateway's trace id for the call, so an erasure can find and delete the trace that holds an answer (docs/06, section 4). |
+| `job` | `id`, `consultation_id`, `question_id`, `kind` stage / ingest / find_themes / preview_themes / map_themes / export / report / erasure, `run_id`, `status`, `attempts`, `next_attempt_at`, `claimed_by`, `heartbeat_at`, `sent_at`, `model_alias`, `prompt_sha256`, `params`, `tokens_in`, `tokens_cached`, `tokens_out`, `cost_pence`, `error_code`, `provider_request_id` | The unit of work and the ledger. `claimed_by`, `attempts` and `heartbeat_at` are the lease and the fence (docs/02, step 5). `error_code` and `provider_request_id` are all a failure stores; they are the two columns behind what docs/02 section 3.4 calls `job.error`, and there is no column a message body could go in. |
+| `job_batch` | `job_id`, `batch_no`, `stage`, `answer_ids bigint[]`, `status`, `trace_id`, `tokens_in`, `tokens_out`, `finished_at` | One checkpoint: one call of one stage function on one chunk (docs/02, step 6). A batch that failed the two-way check at size 1 is a row with status `unprocessable`, which is where the dashboard's bucket comes from. `trace_id` is the gateway's trace id for the call, so an erasure can find and delete every trace that holds an answer; one answer sits in several batches (generation, preview, mapping) and a duplicate in none (docs/06, section 4). |
 | `notification_outbox` | `id`, `consultation_id`, `kind`, `subject_id`, `status` pending / sending / sent, `notify_id`, `created_at`, `sent_at` | The email, written in the transition's commit (ADR-006). A milestone row carries the consultation's `run_id` in `subject_id`, so the first pass's `analysis_ready` and the one a reopen earns are two rows and the second isn't dropped on the first (section 2 has the INSERT). An attention row carries the failed job's id, or null when the reason is a paused budget and there's no job; a reminder carries the question's id. |
 | `audit_event` | `id`, `consultation_id`, `actor_id`, `action`, `subject_table`, `subject_id`, `before jsonb`, `after jsonb`, `at` | Append-only: sign-off, tag edits, operator actions. The app role gets INSERT and SELECT and nothing else. |
 | `export` | `id`, `consultation_id`, `kind` xlsx / report, `job_id`, `s3_key`, `created_by`, `created_at`, `superseded_at` | What `GET /exports/{id}` reads and the overview's last-export line shows (docs/02, screen 5). Erasure regenerates exports, which needs a list of them. |
@@ -102,7 +102,7 @@ CREATE TABLE job (
   consultation_id     uuid NOT NULL REFERENCES consultation (id),
   question_id         uuid REFERENCES question (id),
   kind                text NOT NULL CHECK (kind IN ('stage', 'ingest', 'find_themes',
-                        'preview_themes', 'map_themes', 'export', 'report')),
+                        'preview_themes', 'map_themes', 'export', 'report', 'erasure')),
   run_id              uuid NOT NULL,
   status              text NOT NULL DEFAULT 'pending' CHECK (status IN
                         ('pending', 'queued', 'running', 'succeeded', 'failed_retryable', 'failed')),
@@ -133,6 +133,7 @@ CREATE TABLE job_batch (
   finished_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (job_id, batch_no)
 );
+CREATE INDEX job_batch_answer_ids_gin ON job_batch USING gin (answer_ids);
 
 CREATE TABLE answer_theme (
   id                   bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -182,7 +183,7 @@ UPDATE consultation SET status = 'awaiting_review', run_id = gen_random_uuid()
 
 The `SELECT` runs under the lock the routine took first, so it reads whatever `run_id` the transaction holds, including one the reopen has just minted. Every job the reopen inserts copies the new `run_id`, which is why the reopened question's second `map_themes` job sits beside its first under `job_one_per_run` instead of colliding with it.
 
-`answer_theme.batch_no` where docs/02 step 9 and ADR-004 say `batch_id`, because `job_batch`'s key is `(job_id, batch_no)` and the tag already carries `job_id`; the pair `(job_id, batch_no)` is the batch id. The unique key on `job` is partial for a different reason: previews and exports repeat by design, so the one-job-per-run rule covers the four pipeline kinds only.
+`answer_theme.batch_no` where docs/02 step 9 and ADR-004 say `batch_id`, because `job_batch`'s key is `(job_id, batch_no)` and the tag already carries `job_id`; the pair `(job_id, batch_no)` is the batch id. The unique key on `job` is partial for a different reason: previews, exports and erasures repeat by design, so the one-job-per-run rule covers the four pipeline kinds only.
 
 ## 3. Every unique index, and what it makes idempotent
 
@@ -211,6 +212,7 @@ The `SELECT` runs under the lock the routine took first, so it reads whatever `r
 | GIN on `answer.tsv` | The search box on the per-question view, `tsv @@ plainto_tsquery('english', $term)` ANDed with the question predicate. English only for now; a Welsh configuration belongs to the lane docs/02 section 10 dates. |
 | `answer_theme (theme_set_version_id, theme_id, answer_id) WHERE retracted_at IS NULL` | Theme counts under a filter. Live rows only, so a version with many retractions stays cheap to count; the full unique index handles the per-answer lookup. |
 | `job (status)` | The reconciler's five scans. The table is small enough that the planner may ignore it, which is fine. |
+| GIN on `job_batch.answer_ids` | Erasure's trace lookup, `answer_ids @> ARRAY[$id]::bigint[]`: every batch that carried an answer, so every trace to delete (docs/06, section 4). |
 | `notification_outbox (id) WHERE status = 'pending'` | The relay's `ORDER BY id FOR UPDATE SKIP LOCKED` (ADR-006). |
 | `audit_event (consultation_id, at)` | The history behind a tag or a sign-off, newest first. |
 

@@ -162,3 +162,13 @@ Exports already downloaded are outside the service. The overview screen shows wh
 ## 7. See also
 
 `THREAT_MODEL.md` for the same controls seen from the attacker's side and the logging policy in five lines. `docs/04` for the tables and roles the controls in section 2.4 depend on. PR-03 for the first two tests: `job.error` and the log formatter.
+
+## Correction, 19 September 2026
+
+A review of PR-02 found fifteen inconsistencies across the design documents; `docs/07-reviews.md` logs the pass and PR-02b reconciles them. The entries below correct this file. Each names the section or row it corrects and gives the corrected text; the body above is left as it merged.
+
+1. **Section 4, erasure of one respondent.** Steps 6 to 8 are external effects (a Langfuse delete, an S3 rewrite, export jobs) and can't sit inside "one transaction per respondent". The transaction is steps 1 to 5, an `erasure` job row (`docs/04`, `job.kind`) whose `params` carry the respondent id, the answer ids, `source_row_no` and the upload's key, and the `audit_event`. The job does the rest with the retry budget every job has (`failed_retryable`, backoff, five attempts) and an attention outbox row if it still fails, so a Langfuse outage delays an erasure and never loses one. Steps 6 to 8 as the job runs them:
+
+   6. An answer sits in several `job_batch` rows (generation, preview, mapping) and a duplicate in none. The job deletes every trace whose batch carried the answer: `SELECT trace_id FROM job_batch WHERE answer_ids @> ARRAY[$answer_id]::bigint[]`, through the GIN index on `answer_ids` (`docs/04`, section 4). For a duplicate respondent there is no trace to delete, and the honest statement is that their text, identical to the canonical answer's, stays in the canonical's traces until the canonical is erased. The audit event says so.
+   7. The raw upload: write the redacted copy under a new key, update `consultation.upload_sha256` to its hash, then delete the original, in that order, so the audit-copy rule in `docs/04` never points at an object that has gone. Both keys go on the audit event.
+   8. Regenerate the exports as ordinary `export` jobs and remove the old objects.
