@@ -9,7 +9,7 @@ Seven decisions the design rests on, each with the alternatives that lost and th
 | [ADR-003](ADR-003-human-sign-off-per-question.md) | A named person signs off the themes for each question before anything is tagged | `UPDATE question SET status = 'signed_off' WHERE status = 'themes_ready'` as the mutex |
 | [ADR-004](ADR-004-data-model-long-table-and-immutable-versions.md) | A long answer table, a jsonb read model for filters, immutable theme-set versions, tags that are never deleted | GIN `jsonb_path_ops` on `respondent.attrs`; a full unique index on tags |
 | [ADR-005](ADR-005-llm-access-through-the-gateway.md) | Every model call goes through the gateway with an alias pinned per consultation | Structured output plus an enum of theme keys and a two-way id check in code |
-| [ADR-006](ADR-006-email-through-an-outbox.md) | The email is a row in the same commit as the state change that earns it | `UNIQUE NULLS NOT DISTINCT` on the outbox; `FOR UPDATE SKIP LOCKED` in the relay |
+| [ADR-006](ADR-006-email-through-an-outbox.md) | The email is a row in the same commit as the state change that earns it | `UNIQUE (consultation_id, kind, subject_id)` on the outbox; `FOR UPDATE SKIP LOCKED` in the relay |
 | [ADR-007](ADR-007-rollout-in-three-increments.md) | Three increments, parity with the manual script first | A replay of the piloted consultations as the acceptance gate |
 
 ## How to read them

@@ -503,11 +503,14 @@ Calls: `GET /consultations/{id}/overview` returns counts, a distribution per dem
 
 A review of PR-02 found fifteen inconsistencies across the design documents; `docs/07-reviews.md` logs the pass and PR-02b reconciles them. The entries below correct this file. Each names the section it corrects and gives the corrected text; the body above is left as it merged. `docs/04` is the one document rewritten in place, because the schema is typed from it.
 
-1. **Section 6, the reopen row and the paragraph after the table.** The row read that the later `ready` email "carries that version as `subject_id`". It carries the pass, not the version:
+1. **Section 6, the reopen row and the paragraphs around the table.** The row read that the later `ready` email "carries that version as `subject_id`", and folded two different reopens into one edge. There are two, and they carry the pass, not the version:
 
    | From | To | Trigger | Written by | Email |
    |---|---|---|---|---|
-   | `ready` | `awaiting_review` | A question reopened for correction, or re-run on a new model alias; a new candidate theme-set version, and a new `run_id` minted in the same transaction so the later `ready` email has a row of its own | Web app, on a reviewer's action, through `advance_consultation` | No |
+   | `ready` | `awaiting_review` | A question reopened for correction: `complete → themes_ready` with a new candidate theme-set version to edit, and a new `run_id` minted in the same transaction so the later `ready` email has a row of its own | Web app, on a reviewer's action, through `advance_consultation` | No |
+   | `ready` | `processing` | A question re-run on a new model alias: `complete → finding_themes` with a new `find_themes` job under a new `run_id`; fan-in 1 then flips the consultation and sends the email exactly as on the first pass, and the review clock starts there, not at the reopen | Web app, on a reviewer's action, through `advance_consultation` | No (fan-in 1's follows) |
+
+   The paragraph before the table, which gives a reopened question one edge (`complete → themes_ready`), gains the second (`complete → finding_themes`) for a re-run.
 
    Add to the paragraph on `advance_consultation`: `run_id` is minted with the consultation row, copied onto every job a pass inserts, and replaced by the reopen. Every milestone outbox row carries the current one as `subject_id`. That is what keeps a reopened question's second `map_themes` job, and the second `analysis_ready` email, from colliding with the first (`docs/04`, sections 2 and 3).
 
@@ -523,7 +526,7 @@ A review of PR-02 found fifteen inconsistencies across the design documents; `do
 
    Step 10 is the same with `'analysis_ready'`.
 
-3. **Section 7, decision 8, the key.** The key is `UNIQUE NULLS NOT DISTINCT (consultation_id, kind, subject_id)`. `theme_set_version_id` is gone from the outbox: once milestone rows took the pass id, nothing wrote it. A milestone row carries the pass's `run_id`; an attention row the failed job's id, or null when a paused budget is the reason and there is no job, which is what the modifier is for; a reminder the question's id. ADR-006 carries the same correction.
+3. **Section 7, decision 8, the key.** The key is `UNIQUE (consultation_id, kind, subject_id)` with `subject_id NOT NULL`. `theme_set_version_id` is gone from the outbox: once milestone rows took the pass id, nothing wrote it. A milestone row carries the pass's `run_id`; an attention row the failed job's id, or the department's `pause_id` for a budget pause; a reminder the id of the candidate version awaiting sign-off. Every row names its subject, so the outbox no longer needs `NULLS NOT DISTINCT` (`docs/04`, sections 2 and 9). ADR-006 carries the same correction.
 
 4. **Step 2, the staging table.** "COPYs the file into a staging table" means one logged table per upload in a `staging` schema the pipeline role can't read. The identity columns sit in it until ingest moves them to the vault, and it has to outlive the human configure step, which an unlogged table can't: Postgres truncates those on crash recovery (`docs/04`, section 2, with the log row in `docs/01`).
 
@@ -531,7 +534,7 @@ A review of PR-02 found fifteen inconsistencies across the design documents; `do
 
 6. **Section 10, the retention bullet.** "`retention_until` drives the S3 lifecycle and a deletion job" reads: `retention_until` drives a deletion job that removes the rows, the S3 objects and the traces; the bucket's lifecycle rule is a backstop at five years, because a lifecycle rule can't read a date per object (`docs/06`, section 4, with the log row in `docs/01`). The rest of the bullet stands.
 
-7. **Section 5, statement 5.** `review_reminder` rows had no producer. Statement 5 reads: relay unsent outbox rows, and insert a `review_reminder` row for each question that has sat in `themes_ready` for five working days, keyed on the question's id so the insert is idempotent (ADR-006).
+7. **Section 5, statement 5.** `review_reminder` rows had no producer. Statement 5 reads: relay unsent outbox rows, and insert a `review_reminder` row for each question that has sat in `themes_ready` for five working days, keyed on the id of the candidate theme-set version awaiting sign-off, so the insert is idempotent within a pass and a reopened question, whose reopen makes a new candidate version, can be reminded again (ADR-006).
 
 8. **Section 3.2, the validator table.** One row added, for the unique index `docs/04` now puts on `respondent.external_id`:
 
