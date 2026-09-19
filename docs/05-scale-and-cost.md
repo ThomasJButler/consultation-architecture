@@ -128,9 +128,9 @@ A review of PR-02 found fifteen inconsistencies across the design documents; `do
 
    | Respondents | Open answers | Model calls | Wall-clock, sync at 1M TPM | Model cost, sync (cached / uncached) | Batch lane | Database rows |
    |---|---|---|---|---|---|---|
-   | 100,000 | 500,000 | ~60,000 | ~2.5 h to themes ready (four questions in a round of ~77 min, token-bound; the fifth alone at ~67 min, call-bound); ~7 h of gateway time in all | £400 / £510 | ~£255 | 2M answers, ~1.25M tags, ~60k `job_batch` |
+   | 100,000 | 500,000 | ~60,000 | ~2.5 h to themes ready (four questions in a round of ~76 min, token-bound; the fifth alone at ~67 min, call-bound); ~7 h of gateway time in all | £400 / £510 | ~£255 | 2M answers, ~1.25M tags, ~60k `job_batch` |
 
-   The mapping arithmetic behind the 7 h: 10,000 calls and 37.5M tokens per question; four questions in a round are token-bound at 150 min, the fifth alone is call-bound at 133 min (10,000 calls at 8 s, ten in flight), 283 min in all, about 4.7 hours; add the 143 minutes to themes ready. The same sums give the 10,000 row's 45 minutes (7.7 + 6.7 minutes to themes ready, 15 + 13.3 to map) and the 1,000 row's few minutes before rounding up for stage boundaries.
+   The mapping arithmetic behind the 7 h: 10,000 calls and 37.5M tokens per question; four questions in a round are token-bound at 150 min, the fifth alone is call-bound at 133 min (10,000 calls at 8 s, ten in flight), 283 min in all, about 4.7 hours; add the 143 minutes to themes ready. The same sums give the 10,000 row's 45 minutes (7.6 + 6.7 minutes to themes ready, 15 + 13.3 to map) and the 1,000 row's few minutes before rounding up for stage boundaries.
 
    The overlap assumption, stated once: the table assumes mapping starts after the last theme set is ready. If reviewers sign off questions as they arrive, map jobs run under the same cap of four alongside the last generation round and the 100,000 total is nearer 5 hours: the fifth question's solo rounds are call-bound and leave most of the share idle, which overlap fills. That figure needs a reviewer at the screen while the pipeline runs, so it isn't the one printed.
 
