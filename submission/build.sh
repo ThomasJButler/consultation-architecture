@@ -87,15 +87,43 @@ const { pathToFileURL } = require('node:url');
 JS
 }
 
-if [ -n "$chrome" ] && [ -d "$node_modules/puppeteer-core" ] && print_pdf; then
-  echo "print: chromium ($chrome)"
-else
-  # Fallback (plans/PR-01 §7). md-to-pdf renders SUBMISSION.md with its own
-  # Chromium and writes SUBMISSION.pdf beside the source; the image paths in
-  # SUBMISSION.md are relative to the repo root, which is where it looks.
-  echo "print: chromium path unavailable, falling back to md-to-pdf" >&2
-  npx -y md-to-pdf "$root/SUBMISSION.md"
+if [ -z "$chrome" ] || [ ! -d "$node_modules/puppeteer-core" ]; then
+  # Fallback (plans/PR-01 §7), and only when the browser or puppeteer-core is
+  # genuinely missing. A print that fails for any other reason stops the build
+  # (set -e), because the fallback prints a different source document and
+  # nobody should get that by accident. md-to-pdf resolves SUBMISSION.md's
+  # image paths against the working directory, hence the cd.
+  echo "print: chromium or puppeteer-core not found, falling back to md-to-pdf" >&2
+  (cd "$root" && npx -y md-to-pdf SUBMISSION.md)
   mv "$root/SUBMISSION.pdf" "$pdf"
+else
+  print_pdf
+  echo "print: chromium ($chrome)"
 fi
+
+# ---------- 5. Metadata ----------
+# Chromium writes no Author and stamps the file with its own user agent, host
+# OS included. The submission should carry my name and the title and nothing
+# about the machine it was printed on. pypdf lives in a gitignored venv so the
+# repo stays free of a Python project until the proof-of-concept brings one.
+venv="$root/.build-venv"
+[ -x "$venv/bin/python" ] || python3 -m venv "$venv"
+"$venv/bin/python" -c 'import pypdf' 2>/dev/null || "$venv/bin/pip" -q install 'pypdf>=5,<7'
+PDF="$pdf" "$venv/bin/python" - <<'PY'
+import os
+from pypdf import PdfReader, PdfWriter
+path = os.environ["PDF"]
+reader = PdfReader(path)
+writer = PdfWriter()
+writer.append(reader)
+writer.add_metadata({
+    "/Title": "Consultation analysis: a production architecture",
+    "/Author": "Thomas Butler",
+    "/Creator": "",
+    "/Producer": "",
+})
+with open(path, "wb") as f:
+    writer.write(f)
+PY
 
 echo "wrote: $pdf ($(du -h "$pdf" | cut -f1))"
