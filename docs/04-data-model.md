@@ -42,7 +42,9 @@ CREATE TABLE consultation (
   status_changed_at timestamptz NOT NULL DEFAULT now(),
   awaiting_review_at timestamptz,
   model_alias      text,
-  retention_until  date,
+  retention_until  date,          -- five years at the most: the S3 lifecycle backstop
+                                   -- in docs/06 expires objects at five years whatever
+                                   -- this says, so a longer date would be a lie
   created_by       uuid NOT NULL,
   upload_sha256    bytea,
   row_count        integer,
