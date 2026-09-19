@@ -2,6 +2,8 @@
 
 This file shows the working behind every number docs/02 quotes. Each figure points at a row of the verification log in `docs/01-research.md` (section 6) or says it's an estimate and what it rests on. Prices were checked on 19 September 2026 unless a log row says otherwise. The model arithmetic is sections 2 to 4, the platform is section 5, the people are section 6, and section 9 lists what none of it has measured.
 
+*Corrected on 19 September 2026: the `## Correction` section at the end of this file supersedes the body where the two disagree.*
+
 ## 1. Assumptions
 
 Printed so anyone with a calculator can redo the sums. The first two are docs/02's own (section 1).

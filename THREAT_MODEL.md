@@ -2,6 +2,8 @@
 
 STRIDE-lite: an asset, the way in, the threat, the control that answers it and what's left over. The long form of each control is in `docs/06-security-and-governance.md`, section 2; the pipeline steps referenced are in `docs/02-architecture.md`, section 4. Fourteen rows, then the logging policy in five lines, then what the model leaves out. The pull request that will pin each control is named in its row.
 
+*Corrected on 19 September 2026: the `## Correction` section at the end of this file supersedes the body where the two disagree.*
+
 The people in it. A member of the public who writes an instruction into an answer, or ten thousand of them behind a campaign. A policy team member who uploads a crafted file, or just a very big one. A department user reaching for another department's data. An operator with the admin console. Whoever holds a leaked gateway token. Trust boundaries, with what crosses each:
 
 | Boundary | Trusted side | Untrusted side | What crosses it |

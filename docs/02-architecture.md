@@ -2,6 +2,8 @@
 
 **Status:** Design frozen at PR-01. **Owner:** Thomas Butler. **Date:** 19 September 2026.
 
+*Corrected on 19 September 2026: the `## Correction` section at the end of this file supersedes the body where the two disagree.*
+
 The master reference for the service: what I've assumed, what I've decided and why, how one consultation moves through the pipeline, and what the five screens look like. `docs/00-brief-and-data-shape.md` says what the service is for and what the input files look like. `docs/01-research.md` holds every source with its retrieval date. `docs/03-adrs/` records the decisions in section 7 one by one. The data model, the cost arithmetic and the security notes get their own files in PR-02 (`docs/04`, `docs/05`, `docs/06`).
 
 Read it top to bottom once. The part you'll come back to is section 4, the pipeline, and the SQL in it.

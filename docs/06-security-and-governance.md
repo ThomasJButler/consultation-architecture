@@ -2,6 +2,8 @@
 
 The controls the design commits to, each tagged MUST, SHOULD or COULD with the reason, then where response text goes and for how long, then the governance artefacts a department would ask for before putting a consultation through the service. `docs/02-architecture.md` section 10 lists the commitments in nine lines; here they are in full. `THREAT_MODEL.md` is the adversarial view of the same controls. None of it is built yet: the proof-of-concept starts at PR-03, and where a control is to be pinned by a test the row says which pull request will do it.
 
+*Corrected on 19 September 2026: the `## Correction` section at the end of this file supersedes the body where the two disagree.*
+
 ## 1. Classification and where the data sits
 
 Consultation responses are OFFICIAL under the Government Security Classifications Policy, and some will carry the SENSITIVE handling marking: a person writing about their own health or immigration status in an open answer. The policy defines OFFICIAL as information that "could cause no more than moderate damage if compromised" and says access "must be no wider than necessary" (`docs/01`, section 3; log row "GSCP"). The design treats every response as if it were at the SENSITIVE end, because the service can't tell in advance which answers are.

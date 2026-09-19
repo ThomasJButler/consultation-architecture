@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted, 19 September 2026.
+Accepted, 19 September 2026. Corrected the same day: the section at the end supersedes the Decision where the two disagree.
 
 ## Context
 
