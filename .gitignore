@@ -38,3 +38,6 @@ out/
 # Editors and OS
 .DS_Store
 node_modules/
+
+# Throwaway venv the PDF build uses for pypdf
+.build-venv/

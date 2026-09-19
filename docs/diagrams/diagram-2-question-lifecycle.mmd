@@ -1,0 +1,12 @@
+%% Diagram 2: one open question's life. Caption and word budget in README.md.
+stateDiagram-v2
+  direction TB
+  configured --> finding_themes : worker claims, fenced
+  finding_themes --> find_failed : five attempts, resumed from checkpoint
+  find_failed --> finding_themes : operator retry
+  finding_themes --> themes_ready : all here: one transaction, email
+  themes_ready --> signed_off : reviewer confirms, guarded UPDATE
+  signed_off --> assigning_themes : worker claims, fenced
+  assigning_themes --> map_failed : five attempts, resumed from checkpoint
+  map_failed --> assigning_themes : operator retry
+  assigning_themes --> complete : all here: one transaction, email

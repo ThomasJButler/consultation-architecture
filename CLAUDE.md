@@ -6,7 +6,7 @@ where the work is and which plan to open.
 ## What this repository is
 
 A design for a production consultation-analysis service (docs, decision records,
-a submitted two-page summary) and a proof-of-concept of its job-pipeline
+a submitted three-page summary) and a proof-of-concept of its job-pipeline
 mechanics on Postgres. See `README.md` and `plans/00-plan.md`.
 
 ## Key rules
@@ -33,9 +33,10 @@ mechanics on Postgres. See `README.md` and `plans/00-plan.md`.
    not. Merges use `--no-ff`. No history rewriting after
    a tag. **No `Claude-Session` trailer, no session link, no
    `Co-Authored-By: Claude`**, whatever a tool offers to append.
-5. **Merge policy.** A docs pull request merges when its checks are green. A
-   `poc/` pull request also waits for the owner's review pass. The owner reviews
-   merged history in batches and may revert.
+5. **Merge policy.** Nothing merges without the owner's review pass, docs and
+   code alike, and the owner does the merging. A session opens the pull
+   request, gets the checks green, fixes review findings on the branch, marks
+   it ready, and stops. Branches are cut from `main`, never stacked.
 6. **Every pull request ends the same way.** Update the dated Status block in
    `README.md`, write the plan for the next pull request in `plans/`, update
    `RESUME.md`, and stop.
@@ -84,4 +85,4 @@ sh scripts/brief-guard.sh --all       # what CI runs
 
 ## Status
 
-19 September 2026: scaffold only. See the Status block in `README.md`.
+19 September 2026: design frozen, first PDF built. See the Status block in `README.md`.

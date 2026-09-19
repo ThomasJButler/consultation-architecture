@@ -1,0 +1,21 @@
+%% Diagram 1: the journey and the system. Caption and word budget in README.md.
+%%{init: {"flowchart": {"nodeSpacing": 30, "rankSpacing": 36}}}%%
+flowchart TD
+  s1["1 Upload"] --> before
+  s2["2 Configure"] --> before
+  s3["3 Wait for the email"] -- "themes ready; analysis ready" --> notify
+  s3 -- "reviewer signs off each question" --> after
+  s4["4 Explore"] --> after
+
+  before["Web app, before any spend: upload, validate, configure"]
+  notify["GOV.UK Notify"]
+  after["Same web app, after processing: sign-off, dashboard, exports"]
+  pg[("Postgres: every fact, every job, the outbox")]
+  worker["Worker and reconciler: one image; LLM via gateway"]
+
+  before -- "nothing spent before confirm" --> pg
+  before -- "files, via S3" --> worker
+  notify -. "outbox relay, effectively once" .- pg
+  after -- "sign-off is one guarded UPDATE" --> pg
+  pg -- "jobs, via SQS hints" --> worker
+  worker -- "result, state, outbox: one commit" --> pg

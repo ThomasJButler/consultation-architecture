@@ -2,7 +2,7 @@
 
 > A design for turning a piloted consultation-analysis tool into a service every
 > government department can rely on, with the working notes, the decisions and a
-> small proof-of-concept that sit behind a two-page submission.
+> small proof-of-concept that sit behind a three-page submission.
 
 Government has to consult the public before major policy changes. Someone then
 reads every response, works out the themes, and tags each response by hand. An
@@ -43,6 +43,18 @@ architecture, seven decision records, data model, cost model, security notes
 and threat model), both diagrams and a first draft of the submission with a
 rendered PDF. Planned: the proof-of-concept (PR-03 to PR-09), final polish
 (PR-10). Deliberately not built: see above.
+
+## How it was built
+
+Test-first, with the checks in CI: ruff, mypy, pytest against a real Postgres,
+pip-audit and bandit (from PR-03 onwards). Every pull request was reviewed
+before merging by [ReviewBot Protocol](https://github.com/ThomasJButler/ReviewBotProtocol),
+a code-review tool I built and run myself: several open-weight models read the
+diff independently on my own machine, their findings are compared, and nothing
+leaves the device. It scales by adding models, not by sending code anywhere.
+What each review found, and what I did about it, is in `docs/07-reviews.md`.
+I used Claude throughout, to research, to stress-test alternatives and to
+draft; the decisions are mine.
 
 ## Licence
 
