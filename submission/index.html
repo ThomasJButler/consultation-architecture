@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="author" content="Thomas Butler">
+<title>Consultation analysis: a production architecture</title>
+<!--
+  Draft v0. The bullets mirror SUBMISSION.md and the owner rewrites them by
+  hand before submission; edit SUBMISSION.md first, then this file.
+
+  Printed by submission/build.sh (Chromium, A4, CSS page rules preferred).
+  Three sheets: title and Diagram 1 (landscape), Diagram 2 (landscape),
+  the bullets (portrait). To flip a diagram sheet to portrait, remove its
+  "wide" class.
+-->
+<style>
+  @page { size: A4 portrait; margin: 18mm; }
+  @page wide { size: A4 landscape; margin: 18mm; }
+
+  html {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+      "Helvetica Neue", Helvetica, Arial, sans-serif;
+    font-size: 10pt;
+    line-height: 1.4;
+    color: #111;
+    background: #fff;
+  }
+  body { margin: 0; }
+
+  .sheet { break-after: page; page-break-after: always; }
+  .sheet:last-child { break-after: auto; page-break-after: auto; }
+  .wide { page: wide; }
+
+  h1 { font-size: 17pt; font-weight: 600; margin: 0 0 1.5mm; line-height: 1.2; }
+  h2 { font-size: 11.5pt; font-weight: 600; margin: 0 0 3mm; }
+  .byline { margin: 0 0 1mm; color: #444; }
+  .context { margin: 0 0 4mm; }
+
+  figure { margin: 0; }
+  figure img {
+    display: block;
+    margin: 0 auto;
+    width: auto;
+    height: auto;
+    max-width: 100%;
+    max-height: 138mm;   /* landscape sheet minus title block and caption */
+  }
+  .sheet-2 figure img { max-height: 158mm; }
+  figcaption { margin-top: 3mm; font-size: 9.5pt; color: #333; }
+
+  ul { margin: 0; padding-left: 4.5mm; }
+  li { margin: 0 0 2.4mm; }
+  li::marker { color: #555; }
+  .prior { margin: 4mm 0 0; }
+  hr { border: 0; border-top: 0.3mm solid #999; margin: 4mm 0 3mm; }
+  .disclosure { margin: 0; color: #333; }
+
+  /* On a screen, show the sheets stacked with a gutter instead of pretending to be paper. */
+  @media screen {
+    body { max-width: 190mm; margin: 0 auto; padding: 16px; }
+    .sheet { padding-bottom: 24px; margin-bottom: 24px; border-bottom: 1px dashed #bbb; }
+    .sheet:last-child { border-bottom: 0; }
+  }
+</style>
+</head>
+<body>
+
+<section class="sheet sheet-1 wide">
+  <h1>Consultation analysis: a production architecture</h1>
+  <p class="byline">Thomas Butler</p>
+  <p class="context">One central service that turns a department's consultation responses into signed-off themes and a filterable dashboard.</p>
+  <figure>
+    <img src="diagram-1-journey-and-system.svg" alt="Diagram 1: the journey and the system">
+    <figcaption>Diagram 1. One database holds every fact and job, reviewers sign off before tagging, and each email is written in the commit that earns it.</figcaption>
+  </figure>
+</section>
+
+<section class="sheet sheet-2 wide">
+  <figure>
+    <img src="diagram-2-question-lifecycle.svg" alt="Diagram 2: one open question's life">
+    <figcaption>Diagram 2. Each question runs, fails and retries alone; awaiting_review, ready and both emails come from one guarded UPDATE in the commit finishing a question.</figcaption>
+  </figure>
+</section>
+
+<section class="sheet sheet-3">
+  <h2>The design, in bullets</h2>
+  <ul>
+    <li>A named reviewer signs off each question's themes; every edit is kept. Uploads are validated and costed before spend; no demographic reaches a prompt. One platform serves every department.</li>
+    <li>The journey gains one step: a reviewer signs off each question's themes before tagging, server-enforced. In i.AI's published evaluation reviewers left three mappings in four unchanged.</li>
+    <li>Postgres holds every fact and all pipeline state; S3 only holds uploads and exports. The job table is the truth and queue messages are hints, so a duplicate or lost message is harmless.</li>
+    <li>One job per open question with a lease, a fencing token and per-batch checkpoints: a dead worker's job resumes from its checkpoint; a zombie can't write on a stale fence.</li>
+    <li>The fan-in is one transaction behind a row lock: mark the question done, flip the consultation if all are, queue the email. One finisher wins; the reconciler covers a crash.</li>
+    <li>One answer row per respondent, question and option; a respondent snapshot makes 'villagers who cycle to work and oppose' one indexed query; nothing is edited in place, so counts reproduce.</li>
+    <li>Responses are untrusted input: no tools, answers sent as JSON data, labels an enum of theme keys, small batches to bound the blast radius. Containment first; detection is a bonus.</li>
+    <li>Encrypted at rest in London. Only the question, the open answer and any linked closed answer reach the model, via a gateway logging each job's inference region for the DPIA.</li>
+    <li>Parity first, the manual process alongside and pilot consultations replayed as the gate. Then sign-off and dashboard, then self-serve behind department caps. A small team, two quarters.</li>
+    <li>Model spend is small beside reviewer time, as the water commission press release shows; throughput and sign-off time bind. Cost is a guard: an estimate at Confirm, a department budget.</li>
+    <li>Least sure, so I'd test first: the dashboard's query plan under a selective filter on the largest consultations, and whether per-question sign-off is bearable at dozens of questions.</li>
+  </ul>
+  <p class="prior">I read i.AI's public repository and decision records first; where 'every department' changes the problem I've gone further.</p>
+  <hr>
+  <p class="disclosure">I used Claude throughout, to research, to stress-test alternatives and to draft the diagrams. The choices are mine.</p>
+</section>
+
+</body>
+</html>
