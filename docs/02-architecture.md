@@ -42,8 +42,8 @@ I read the public Consult repository and its ADRs before designing (`github.com/
 | Dashboard | One Svelte + TypeScript island over a JSON API | Filter state lives in the URL query string so a view can be shared and the back button works. GOV.UK Design System components. Page numbers with OFFSET on the dashboard; keyset cursors for export and deep scroll. |
 | Validator | A module in the web app, run inside the `stage` job | Every check that can fail before spend (3.2). Errors block; warnings carry a resolution. |
 | PostgreSQL | RDS Postgres 17, Multi-AZ, starting at db.t4g.medium | Every fact and every piece of pipeline state. GIN `jsonb_path_ops` on `respondent.attrs`; B-tree `(question_id, id)` on `answer`; a partial index on live tags; tsvector + GIN on open answers. No pgvector, no materialised views in the MVP. |
-| S3 | eu-west-2, SSE-KMS, Block Public Access, TLS only | Raw uploads keyed by sha256; generated exports. Never on the pipeline path. |
-| SQS + DLQ | Standard queue, at-least-once; `maxReceiveCount` 10 | One message per job, sent only by the dispatcher. Messages are hints; the `job` table is authoritative. The DLQ catches a message nobody expected; `job.attempts` is the retry budget. |
+| S3 | eu-west-2, SSE-KMS, Block Public Access, TLS only | Raw uploads keyed by sha256; generated exports. Nothing the pipeline depends on after ingest: the `stage` job reads the upload from it once, and exports are served from it. |
+| SQS + DLQ | Standard queue, at-least-once; `maxReceiveCount` 10 | One message per job, sent by whichever transaction queues the job, with the reconciler as the slow path. Messages are hints; the `job` table is authoritative. The DLQ catches a message nobody expected; `job.attempts` is the retry budget. |
 | Worker | Same image, separate ECS service, 1 vCPU / 4 GB; autoscale on backlog from zero; scale-in protection while a job runs; `stopTimeout` 120 s | Claim with lease takeover and a fencing token; heartbeat on a background thread; checkpoint per batch; results, state change, fan-in and outbox row in one transaction. |
 | Reconciler | Same image; EventBridge Scheduler runs it as an ECS task every five minutes | Five idempotent statements (section 5). Exists so nothing depends on a worker being alive. |
 | Model gateway | The team's central gateway (ADR 0011 in the Consult repo, August 2026, chose LiteLLM with Langfuse and pydantic-evals for evaluation) | Model alias pinned per consultation and recorded on every job; structured outputs; keys, spend caps and traces live there. |
@@ -110,9 +110,9 @@ The definition workbook is an importer that pre-fills this screen. It isn't the 
 
 The worker streams rows with COPY and explodes multi-select answers to one `answer` row per chosen option (ADR 0006 in the Consult repo made the same choice). It builds `respondent.attrs` with every demographic and closed answer keyed by column, values always arrays, so containment works the same for single- and multi-select. Identity columns go to the `vault` schema through an insert-only role. It computes `answer.duplicate_of_answer_id` (same question, identical normalised text) and `respondent.duplicate_of` (every open answer identical: a campaign proforma), runs ANALYZE, inserts one `find_themes` job per open question and sets the consultation `processing`. One transaction.
 
-### Step 4. Dispatch (the reconciler)
+### Step 4. Dispatch
 
-`pending → queued`, commit with `sent_at`, then send to SQS. Commit first, because a message for a job the database doesn't know is queued is a message the claim will refuse. Caps: 6 jobs per department, 4 per consultation, 20 service-wide, round-robin across departments when contended. A department past its monthly budget is paused with an attention outbox row.
+The request or job that inserts a job row dispatches it in the same breath: `pending → queued` under the caps, commit with `sent_at`, then send to SQS. The reconciler repeats the same statement every five minutes as the slow path, for crashes and for slots the caps have just freed, so a reviewer who clicks Re-run preview isn't waiting on a schedule. Commit first, because a message for a job the database doesn't know is queued is a message the claim will refuse. Caps: 6 jobs per department, 4 per consultation, 20 service-wide, round-robin across departments when contended. A department past its monthly budget is paused with an attention outbox row.
 
 ### Step 5. Claim, with a fence
 
@@ -141,7 +141,7 @@ Zero rows means someone else holds the lease now. The worker aborts at the next 
 
 ### Step 6. Find themes
 
-Shuffle with a stored seed. Batch about 50 answers by count and token cap, partitioned by the related closed answer where the question has one, with the follow-up question's placeholder filled from that answer. Generate candidates with structured outputs under a semaphore of 10. Condense to about 30 (cap 70), keeping the longlist with lineage back to the candidates. Refine. Preview-map a stratified sample of 200 answers so each candidate gets a count and quotes. Checkpoint every batch into `job_batch` with `ON CONFLICT DO NOTHING`. Then write `theme_set_version` v1 (`UNIQUE (question_id, version_no)`) and set the question `themes_ready` in the same transaction as fan-in 1.
+Shuffle with a stored seed. Batch about 50 distinct answers by count and token cap (exact duplicates were flagged at ingest and are themed once), partitioned by the related closed answer where the question has one, with the follow-up question's placeholder filled from that answer. Generate candidates with structured outputs under a semaphore of 10. Condense to about 30 (cap 70), keeping the longlist with lineage back to the candidates. Refine. Preview-map a stratified sample of 200 answers so each candidate gets a count and quotes. Checkpoint every batch into `job_batch` with `ON CONFLICT DO NOTHING`. Then write `theme_set_version` v1 (`UNIQUE (question_id, version_no)`) and set the question `themes_ready` in the same transaction as fan-in 1.
 
 The worker drives themefinder stage by stage rather than calling its top-level function. One `job_batch` is one call of one stage function on one chunk. That's how checkpoints, the two-way id check and enum labels wrap the library instead of forking it. Rewriting a library the team maintains would be the wrong first move.
 
@@ -233,7 +233,7 @@ Two kinds. XLSX: the original columns, one column per theme, a per-question summ
 
 Every five minutes, in order, each idempotent.
 
-1. Dispatch: `pending → queued` under the caps, commit, then send.
+1. Dispatch: `pending → queued` under the caps, commit, then send. The slow path: the transaction that inserts a job does this itself first.
 2. Recover: `queued` with `sent_at` older than ten minutes, or `running` with a stale heartbeat. If `attempts >= 5`, mark the job `failed`, set the question to `find_failed` or `map_failed`, set `attention_reason` and insert an attention outbox row. Otherwise re-send. Duplicates are harmless because the claim is conditional.
 3. Retry: `failed_retryable` whose `next_attempt_at` has passed and `attempts < 5` goes back to `pending`.
 4. Re-run both fan-in predicates for any consultation whose questions have all reached a milestone but whose status hasn't advanced. The outbox row shares the transition's commit, so a crash can't lose it. This statement is for the case where statement 2 has just moved the last unfinished question to `find_failed`: no worker transaction runs then, and fan-in 1 doesn't wait on a failed question, so this is what flips the consultation to `awaiting_review` and queues the email. (`map_failed` blocks fan-in 2 by design, so that case waits for the retry.)
@@ -250,9 +250,11 @@ Question states are `configured → finding_themes → themes_ready → signed_o
 | `staged` | `processing` | `ingest` job finishes; `find_themes` jobs inserted | Worker, one transaction | No |
 | `processing` | `awaiting_review` | Fan-in 1: no open question still in `configured` or `finding_themes` | Worker, or reconciler statement 4 | Themes ready |
 | `awaiting_review` | `ready` | Fan-in 2: every open question `complete` | Worker, or reconciler statement 4 | Analysis ready |
-| `ready` | `awaiting_review` | A question reopened for correction, or re-run on a new model alias; a new theme-set version, and its later `ready` email carries that version as `subject_id` so it cannot collide with the first | Web app, on a reviewer's action | No |
+| `ready` | `awaiting_review` | A question reopened for correction, or re-run on a new model alias; a new theme-set version, and its later `ready` email carries that version as `subject_id` so it cannot collide with the first | Web app, on a reviewer's action, through `advance_consultation` | No |
 | any | same state | A job reaches `failed`: `attention_reason` set (`stage_failed`, `find_failed:<question>`, `map_failed:<question>`, `budget_exceeded`) | Reconciler statement 2, or dispatch | Attention needed |
 | any | same state | Operator retry: job back to `pending`, `attention_reason` cleared | Operator console | No |
+
+Every path that can move a consultation's state goes through one routine, `advance_consultation(id)`: take the row lock, run both guarded UPDATEs, insert the outbox row if one of them fired. The worker's completing transaction calls it, so do reconciler statements 2 and 4, a reopen, and an operator retry. There is no second way to change the column, which is what stops a reopen racing a worker's fan-in.
 
 `attention_reason` is nullable and orthogonal to the state; the task list shows it as a banner. There's no `failed` state for a consultation because nothing about a consultation fails. A job does, and the consultation waits.
 
@@ -290,7 +292,7 @@ Generate from every answer, not a sample: a 5,000-answer sample sees a view held
 
 ### 8. Email through an outbox row
 
-Inserted in the transition transaction, relayed with `FOR UPDATE SKIP LOCKED` (worker fast path, reconciler slow path), Notify reference set to the outbox id, a link and nothing else in the body. Alternatives: send from the worker after commit (the dual write: a crash between the two loses or duplicates the email); SNS or EventBridge in the middle (another system to be at-least-once with). The same answer covers the database-to-SQS write at dispatch: commit, then send, and let the conditional claim absorb duplicates. Weak point: Notify's reference identifies a notification for lookup, and I don't rely on it to deduplicate. A crash between the send and the `sent_at` write can produce one duplicate email. The window is stated rather than hidden.
+Inserted in the transition transaction, relayed with `FOR UPDATE SKIP LOCKED` (worker fast path, reconciler slow path), Notify reference set to the outbox id, a link and nothing else in the body. Alternatives: send from the worker after commit (the dual write: a crash between the two loses or duplicates the email); SNS or EventBridge in the middle (another system to be at-least-once with). The same answer covers the database-to-SQS write at dispatch: commit, then send, and let the conditional claim absorb duplicates. The row goes `pending → sending → sent`: the relay marks it `sending` before the call, `sent` after, and the reconciler asks Notify by reference before resending anything left in `sending`, so a crash between the call and the `sent` write costs a lookup, not a duplicate. The key is `UNIQUE NULLS NOT DISTINCT (consultation_id, kind, theme_set_version_id, subject_id)`, so a milestone can only ever have one row. Weak point: a send Notify accepted but never acknowledged is the one window left, and it's stated rather than hidden. ADR-006 has the detail.
 
 ### 9. Validation, ingest and campaigns
 
