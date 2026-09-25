@@ -47,3 +47,26 @@ def test_claim_returns_the_fence_and_refuses_a_live_lease(db: psycopg.Connection
         db, consultation_id, question_id, kind="preview_themes", status="succeeded"
     )
     assert claim(db, done, "worker-2") is None
+
+
+def test_a_stale_lease_can_be_taken_over_and_the_fence_moves_on(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    consultation_id = make_consultation(db, make_department(db))
+    job_id = make_queued_job(db, consultation_id, make_open_question(db, consultation_id))
+    assert claim(db, job_id, "worker-1") == Lease(job_id, "worker-1", 1)
+
+    # Nine minutes of silence isn't stale; ten is the threshold (docs/02, step 5).
+    db.execute(
+        "UPDATE job SET heartbeat_at = now() - interval '9 minutes' WHERE id = %s", (job_id,)
+    )
+    assert claim(db, job_id, "worker-2") is None
+    db.execute(
+        "UPDATE job SET heartbeat_at = now() - interval '11 minutes' WHERE id = %s", (job_id,)
+    )
+
+    assert claim(db, job_id, "worker-2") == Lease(job_id, "worker-2", 2)
+    row = db.execute(
+        "SELECT claimed_by, attempts, status FROM job WHERE id = %s", (job_id,)
+    ).fetchone()
+    assert row == {"claimed_by": "worker-2", "attempts": 2, "status": "running"}
