@@ -191,3 +191,39 @@ def test_a_row_with_more_fields_than_the_column_cap_is_refused(tmp_path: Path) -
     sheet.append([1, 2, 3, 4])
     workbook.save(tmp_path / "wide.xlsx")
     assert refusal_of(Responses, tmp_path / "wide.xlsx", caps).reason is Refusal.TOO_MANY_COLUMNS
+
+
+def test_the_definition_workbook_gets_the_cell_and_width_caps_too(tmp_path: Path) -> None:
+    caps = Caps(
+        max_upload_bytes=100_000_000,
+        max_rows=1_000,
+        max_cell_chars=50,
+        max_zip_ratio=100,
+        max_columns=3,
+    )
+    workbook = Workbook()
+    del workbook["Sheet"]
+    sheet = workbook.create_sheet("Demographic questions")
+    sheet.append(["column_reference", "question_text"])
+    sheet.append(["d_area", "x" * 51])
+    for name, header in (
+        ("Closed questions", ["column_reference", "question_text", "response_type", "options"]),
+        ("Open questions", ["column_reference", "question_text", "related_closed_column"]),
+    ):
+        workbook.create_sheet(name).append(header)
+    workbook.save(tmp_path / "long.xlsx")
+    assert refusal_of(read_definition, tmp_path / "long.xlsx", caps).reason is Refusal.CELL_TOO_LONG
+
+    workbook = Workbook()
+    del workbook["Sheet"]
+    workbook.create_sheet("Demographic questions").append(["column_reference", "question_text"])
+    workbook.create_sheet("Closed questions").append(
+        ["column_reference", "question_text", "response_type", "options"]
+    )
+    workbook.create_sheet("Open questions").append(
+        ["column_reference", "question_text", "related_closed_column"]
+    )
+    workbook.save(tmp_path / "wide.xlsx")
+    assert (
+        refusal_of(read_definition, tmp_path / "wide.xlsx", caps).reason is Refusal.TOO_MANY_COLUMNS
+    )
