@@ -1,0 +1,40 @@
+# Runs before every commit, from the repository root: `pre-commit install`
+# once, with the venv's pre-commit (`poc/.venv/bin/pre-commit install`).
+#
+# ruff and mypy are scoped to poc/, and mypy to poc/consult/ alone, so a
+# red test can still be committed ahead of the code that makes it pass
+# (CLAUDE.md, rule 2). gitleaks looks for secrets. The brief guard is the
+# tracked half of the check SECURITY.md describes; `pre-commit install`
+# keeps an existing .git/hooks/pre-commit as pre-commit.legacy and runs it
+# after these, so the private half keeps running too.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.9
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+        files: ^poc/
+      - id: ruff-format
+        files: ^poc/
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+  - repo: local
+    hooks:
+      - id: mypy-consult
+        name: mypy --strict on poc/consult
+        entry: mypy --strict --python-version 3.12 --warn-unreachable
+        language: python
+        additional_dependencies:
+          - mypy==2.3.1
+          - psycopg[binary]==3.3.6
+          - openpyxl==3.1.5
+          - types-openpyxl==3.1.5.20260827
+        files: ^poc/consult/.*\.py$
+      - id: brief-guard
+        name: brief guard
+        entry: sh scripts/brief-guard.sh
+        language: system
+        pass_filenames: false
+        always_run: true
