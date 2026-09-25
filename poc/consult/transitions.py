@@ -142,3 +142,91 @@ def finish_map_themes(
     advance = advance_consultation(conn, consultation_id)
     jobs.succeed(conn, lease)
     return advance
+
+
+@dataclass(frozen=True)
+class SignOff:
+    version_id: UUID
+    job_id: UUID
+
+
+FALLBACK_THEMES = (("OTHER", "Other"), ("NO_REASON", "No reason given"))
+
+
+def sign_off(
+    conn: psycopg.Connection[DictRow], question_id: UUID, reviewer: UUID
+) -> SignOff | None:
+    """Confirm the themes for one question (docs/02, step 8; ADR-003).
+
+    The guard is the mutex: two reviewers clicking at once produce one
+    signed-off question and one None. In the same transaction the
+    candidate is frozen as the next version with stable keys plus OTHER
+    and NO_REASON, the candidate is superseded, and a map_themes job for
+    this question only is inserted under job_one_per_run.
+    """
+    confirmed = conn.execute(
+        "UPDATE question SET status = 'signed_off' WHERE id = %s AND status = 'themes_ready'",
+        (question_id,),
+    ).rowcount
+    if confirmed != 1:
+        return None
+    candidate = conn.execute(
+        """
+        SELECT id FROM theme_set_version
+         WHERE question_id = %s AND status = 'candidate'
+         ORDER BY version_no DESC LIMIT 1
+        """,
+        (question_id,),
+    ).fetchone()
+    if candidate is None:
+        raise TransitionError(f"question {question_id} has no candidate version to sign off")
+    frozen = conn.execute(
+        """
+        INSERT INTO theme_set_version (department_id, question_id, version_no, status,
+                                       parent_version_id, signed_off_by, signed_off_at)
+        SELECT department_id, question_id, version_no + 1, 'signed_off', id, %(reviewer)s, now()
+          FROM theme_set_version WHERE id = %(candidate)s
+        RETURNING id
+        """,
+        {"candidate": candidate["id"], "reviewer": reviewer},
+    ).fetchone()
+    if frozen is None:
+        raise TransitionError(f"question {question_id}: the signed-off version was not written")
+    version_id: UUID = frozen["id"]
+    # Keys stay stable across versions; lineage points back at the candidate.
+    conn.execute(
+        """
+        INSERT INTO theme (department_id, theme_set_version_id, key, label, description,
+                           is_longlist, is_fallback, lineage_theme_id, preview_count)
+        SELECT department_id, %(version)s, key, label, description,
+               is_longlist, is_fallback, id, preview_count
+          FROM theme WHERE theme_set_version_id = %(candidate)s
+        """,
+        {"version": version_id, "candidate": candidate["id"]},
+    )
+    for key, label in FALLBACK_THEMES:
+        conn.execute(
+            """
+            INSERT INTO theme (department_id, theme_set_version_id, key, label, is_fallback)
+            SELECT department_id, id, %(key)s, %(label)s, true
+              FROM theme_set_version WHERE id = %(version)s
+            ON CONFLICT (theme_set_version_id, key) DO NOTHING
+            """,
+            {"version": version_id, "key": key, "label": label},
+        )
+    conn.execute(
+        "UPDATE theme_set_version SET status = 'superseded' WHERE id = %s", (candidate["id"],)
+    )
+    job = conn.execute(
+        """
+        INSERT INTO job (department_id, consultation_id, question_id, kind, run_id, status)
+        SELECT q.department_id, q.consultation_id, q.id, 'map_themes', c.run_id, 'pending'
+          FROM question q JOIN consultation c ON c.id = q.consultation_id
+         WHERE q.id = %s
+        RETURNING id
+        """,
+        (question_id,),
+    ).fetchone()
+    if job is None:
+        raise TransitionError(f"question {question_id}: the map_themes job was not written")
+    return SignOff(version_id, job["id"])
