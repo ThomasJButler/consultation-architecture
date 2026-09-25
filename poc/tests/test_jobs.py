@@ -16,7 +16,15 @@ import pytest
 from psycopg.rows import DictRow
 
 from consult.errors import ErrorCode
-from consult.jobs import Lease, LeaseLostError, checkpoint, claim, heartbeat, record_failure
+from consult.jobs import (
+    Lease,
+    LeaseLostError,
+    checkpoint,
+    claim,
+    heartbeat,
+    next_batch_no,
+    record_failure,
+)
 from tests.rows import make_consultation, make_department, make_open_question, make_queued_job
 
 pytestmark = pytest.mark.db
@@ -104,3 +112,24 @@ def test_a_zombie_with_a_stale_fence_writes_nothing(db: psycopg.Connection[DictR
     # And the successor carries on as if nothing happened.
     heartbeat(db, successor)
     assert checkpoint(db, successor, batch_no=1, stage="generate", answer_ids=[1, 2]) is True
+
+
+def test_checkpoints_are_idempotent_and_resume_from_the_last_batch(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    consultation_id = make_consultation(db, make_department(db))
+    job_id = make_queued_job(db, consultation_id, make_open_question(db, consultation_id))
+    lease = claim(db, job_id, "worker-1")
+    assert lease is not None
+
+    assert next_batch_no(db, job_id) == 1
+    assert checkpoint(db, lease, batch_no=1, stage="generate", answer_ids=[1, 2, 3]) is True
+    assert checkpoint(db, lease, batch_no=2, stage="generate", answer_ids=[4, 5]) is True
+    # A worker taking over replays batch 2: the row is already there, the
+    # insert does nothing, and the first checkpoint's answer ids stand.
+    assert checkpoint(db, lease, batch_no=2, stage="generate", answer_ids=[9, 9]) is False
+    assert next_batch_no(db, job_id) == 3
+    rows = db.execute(
+        "SELECT batch_no, answer_ids FROM job_batch WHERE job_id = %s ORDER BY batch_no", (job_id,)
+    ).fetchall()
+    assert [(row["batch_no"], row["answer_ids"]) for row in rows] == [(1, [1, 2, 3]), (2, [4, 5])]
