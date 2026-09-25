@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import csv
 import random
+import zipfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -275,11 +276,28 @@ def _definition_workbook() -> Workbook:
     return workbook
 
 
+def _fix_zip_timestamps(path: Path) -> None:
+    """Rewrite the zip with one fixed timestamp per entry.
+
+    openpyxl stamps each entry with the wall clock, so two runs never produce
+    the same bytes; with the entries re-dated the file is byte-for-byte
+    reproducible and the committed copy can be held to it.
+    """
+    with zipfile.ZipFile(path) as source:
+        entries = [(info.filename, source.read(info.filename)) for info in source.infolist()]
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as target:
+        for name, data in entries:
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            target.writestr(info, data)
+
+
 def write_fixtures(out_dir: Path) -> Written:
     out_dir.mkdir(parents=True, exist_ok=True)
     definition = out_dir / "definition.xlsx"
     responses = out_dir / "responses.csv"
     _definition_workbook().save(definition)
+    _fix_zip_timestamps(definition)
     rng = random.Random(SEED)
     columns = response_columns()
     with responses.open("w", newline="", encoding="utf-8") as handle:

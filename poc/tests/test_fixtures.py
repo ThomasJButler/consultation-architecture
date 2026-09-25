@@ -96,7 +96,4 @@ def test_the_committed_fixtures_are_what_the_generator_writes(tmp_path: Path) ->
     committed_definition = FIXTURES_DIR / written.definition.name
 
     assert committed_responses.read_bytes() == written.responses.read_bytes()
-    fresh, kept = load_workbook(written.definition), load_workbook(committed_definition)
-    assert fresh.sheetnames == kept.sheetnames
-    for sheet in fresh.sheetnames:
-        assert rows_of(fresh, sheet) == rows_of(kept, sheet)
+    assert committed_definition.read_bytes() == written.definition.read_bytes()
