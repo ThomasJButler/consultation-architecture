@@ -7,9 +7,37 @@ from __future__ import annotations
 from importlib import resources
 
 import psycopg
+from psycopg import sql
 from psycopg.rows import DictRow, dict_row
 
 from consult.config import Settings
+
+# The fourteen tables schema.sql creates, in dependency order, so the test
+# harness can truncate them between tests (docs/04, section 8).
+TABLES: tuple[str, ...] = (
+    "department",
+    "consultation",
+    "question",
+    "question_option",
+    "respondent",
+    "vault.respondent_identity",
+    "answer",
+    "theme_set_version",
+    "theme",
+    "theme_example",
+    "job",
+    "job_batch",
+    "answer_theme",
+    "notification_outbox",
+)
+
+
+def qualified(name: str) -> sql.Composable:
+    """`vault.respondent_identity` as two identifiers, never as a format string."""
+    schema, _, table = name.rpartition(".")
+    if schema:
+        return sql.SQL(".").join((sql.Identifier(schema), sql.Identifier(table)))
+    return sql.Identifier(table)
 
 
 def connect(settings: Settings, *, autocommit: bool = False) -> psycopg.Connection[DictRow]:
