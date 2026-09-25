@@ -9,6 +9,8 @@ consultation's status.
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 import psycopg
 import pytest
 from psycopg.rows import DictRow
@@ -19,8 +21,16 @@ from consult.transitions import (
     advance_consultation,
     finish_find_themes,
     finish_map_themes,
+    sign_off,
 )
-from tests.rows import make_consultation, make_department, make_open_question, make_queued_job
+from tests.rows import (
+    make_consultation,
+    make_department,
+    make_open_question,
+    make_queued_job,
+    make_theme,
+    make_theme_set_version,
+)
 
 pytestmark = pytest.mark.db
 
@@ -144,3 +154,63 @@ def test_fan_in_two_needs_every_open_question_complete(db: psycopg.Connection[Di
     assert outbox_rows(db, consultation_id) == [
         {"kind": "analysis_ready", "subject_id": after["run_id"], "status": "pending"}
     ]
+
+
+def test_sign_off_is_a_guarded_update_that_admits_one_reviewer(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    consultation_id = make_consultation(db, make_department(db), status="awaiting_review")
+    question_id = make_open_question(db, consultation_id, status="themes_ready")
+    candidate = make_theme_set_version(db, question_id)
+    parking = make_theme(db, candidate, "PARKING", "Loss of parking on Mill Lane")
+    make_theme(db, candidate, "SAFETY", "Junction safety at the bridge")
+    reviewer, rival = uuid4(), uuid4()
+
+    signed = sign_off(db, question_id, reviewer)
+
+    assert signed is not None
+    # The guard is the mutex: the second reviewer gets nothing (ADR-003).
+    assert sign_off(db, question_id, rival) is None
+    question = db.execute("SELECT status FROM question WHERE id = %s", (question_id,)).fetchone()
+    assert question == {"status": "signed_off"}
+
+    # v2 is frozen with stable keys plus the two fallbacks, v1 is superseded.
+    versions = db.execute(
+        """
+        SELECT id, version_no, status, parent_version_id, signed_off_by
+          FROM theme_set_version WHERE question_id = %s ORDER BY version_no
+        """,
+        (question_id,),
+    ).fetchall()
+    assert [
+        (v["version_no"], v["status"], v["parent_version_id"], v["signed_off_by"]) for v in versions
+    ] == [
+        (1, "superseded", None, None),
+        (2, "signed_off", candidate, reviewer),
+    ]
+    assert versions[1]["id"] == signed.version_id
+    themes = db.execute(
+        "SELECT key, is_fallback, lineage_theme_id FROM theme WHERE theme_set_version_id = %s ORDER BY key",
+        (signed.version_id,),
+    ).fetchall()
+    assert [(t["key"], t["is_fallback"]) for t in themes] == [
+        ("NO_REASON", True),
+        ("OTHER", True),
+        ("PARKING", False),
+        ("SAFETY", False),
+    ]
+    assert next(t["lineage_theme_id"] for t in themes if t["key"] == "PARKING") == parking
+
+    # One map job for this question only, on the consultation's pass.
+    jobs_ = db.execute(
+        """
+        SELECT j.id, j.kind, j.status, j.run_id = c.run_id AS this_pass
+          FROM job j JOIN consultation c ON c.id = j.consultation_id
+         WHERE j.question_id = %s
+        """,
+        (question_id,),
+    ).fetchall()
+    assert [(j["kind"], j["status"], j["this_pass"]) for j in jobs_] == [
+        ("map_themes", "pending", True)
+    ]
+    assert jobs_[0]["id"] == signed.job_id
