@@ -53,6 +53,9 @@ ignore = [
   "E501",
 ]
 
+[tool.ruff.lint.isort]
+known-first-party = ["consult", "tests", "make_fixture_data"]
+
 [tool.ruff.lint.per-file-ignores]
 # Tests assert and spell out test passwords; the fixture generator uses a seeded random for fictional data.
 "tests/*" = ["S101", "S105", "S106"]
