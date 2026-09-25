@@ -37,6 +37,9 @@ NOT_APPLICABLE = "N/A"
 
 @dataclass(frozen=True)
 class Ingested:
+    """What one run wrote. A second delivery of the ingest message finds
+    every row already there and every count here is zero (docs/04, section 3)."""
+
     respondents: int
     answers: int
     vault_rows: int
@@ -59,8 +62,14 @@ class _Question:
 @dataclass(frozen=True)
 class _Configured:
     department_id: UUID
+    status: str
     questions: tuple[_Question, ...]
     respondent_id_column: str | None
+
+
+NOTHING_WRITTEN = Ingested(
+    respondents=0, answers=0, vault_rows=0, duplicate_answers=0, duplicate_respondents=0, jobs=0
+)
 
 
 def normalised_sha256(text: str) -> bytes:
@@ -71,7 +80,8 @@ def normalised_sha256(text: str) -> bytes:
 
 def _load(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> _Configured:
     consultation = conn.execute(
-        "SELECT department_id, column_roles FROM consultation WHERE id = %s", (consultation_id,)
+        "SELECT department_id, status, column_roles FROM consultation WHERE id = %s",
+        (consultation_id,),
     ).fetchone()
     if consultation is None:
         raise LookupError(f"consultation {consultation_id} does not exist")
@@ -99,7 +109,17 @@ def _load(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> _Configur
         for row in rows
     )
     roles = consultation["column_roles"] or {}
-    return _Configured(consultation["department_id"], questions, roles.get("respondent_id"))
+    return _Configured(
+        consultation["department_id"], consultation["status"], questions, roles.get("respondent_id")
+    )
+
+
+def _staging_table_exists(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> bool:
+    found = conn.execute(
+        "SELECT 1 FROM pg_tables WHERE schemaname = 'staging' AND tablename = %s",
+        (str(consultation_id),),
+    ).fetchone()
+    return found is not None
 
 
 Answer = tuple[UUID | None, str | None, bool, bytes | None]
@@ -141,6 +161,10 @@ def ingest(
     conn: psycopg.Connection[DictRow], consultation_id: UUID, *, keep_staging: bool = False
 ) -> Ingested:
     config = _load(conn, consultation_id)
+    if config.status == "processing" and not _staging_table_exists(conn, consultation_id):
+        # The usual shape of a redelivery: the first run committed and
+        # dropped its table. Nothing to read and nothing to write.
+        return NOTHING_WRITTEN
     answered = [q for q in config.questions if q.kind != "identity"]
     identity = [q for q in config.questions if q.kind == "identity"]
     respondents = 0
@@ -168,16 +192,17 @@ def ingest(
                     values = [value for _option, value, blank, _sha in cells if not blank and value]
                     if values:
                         attrs[question.column_ref] = values
-            respondent_id = _respondent(
+            respondent_id, inserted = _respondent(
                 conn, config, consultation_id, row["row_no"], external_id or None, attrs
             )
-            respondents += 1
+            respondents += inserted
             batch = [
                 (config.department_id, consultation_id, respondent_id, question.id, *answer)
                 for question, cells in per_question
                 for answer in cells
             ]
-            conn.cursor().executemany(
+            cursor = conn.cursor()
+            cursor.executemany(
                 """
                 INSERT INTO answer (department_id, consultation_id, respondent_id, question_id,
                                     option_id, value_text, is_blank, text_sha256)
@@ -186,7 +211,7 @@ def ingest(
                 """,
                 batch,
             )
-            answers += len(batch)
+            answers += cursor.rowcount
             vault_rows += _vault(conn, config, respondent_id, row, identity)
         duplicate_answers, duplicate_respondents = _flag_duplicates(conn, consultation_id)
         jobs = _queue_find_themes(conn, consultation_id)
@@ -312,7 +337,9 @@ def _respondent(
     row_no: int,
     external_id: str | None,
     attrs: dict[str, list[str]],
-) -> int:
+) -> tuple[int, bool]:
+    """The respondent's id and whether this run made the row. A replay hits
+    the (consultation_id, source_row_no) key and reads the id back instead."""
     inserted = conn.execute(
         """
         INSERT INTO respondent (department_id, consultation_id, external_id, source_row_no, attrs)
@@ -323,11 +350,11 @@ def _respondent(
         (config.department_id, consultation_id, external_id, row_no, Jsonb(attrs)),
     ).fetchone()
     if inserted is not None:
-        return int(inserted["id"])
+        return int(inserted["id"]), True
     existing = conn.execute(
         "SELECT id FROM respondent WHERE consultation_id = %s AND source_row_no = %s",
         (consultation_id, row_no),
     ).fetchone()
     if existing is None:
         raise LookupError(f"consultation {consultation_id}: row {row_no} vanished mid-ingest")
-    return int(existing["id"])
+    return int(existing["id"]), False
