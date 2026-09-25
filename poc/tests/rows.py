@@ -29,16 +29,20 @@ def make_department(
 
 
 def make_consultation(
-    conn: psycopg.Connection[DictRow], department_id: UUID, name: str = "Riverside cycle route"
+    conn: psycopg.Connection[DictRow],
+    department_id: UUID,
+    name: str = "Riverside cycle route",
+    *,
+    status: str = "draft",
 ) -> UUID:
     return _returning_id(
         conn,
         """
-        INSERT INTO consultation (department_id, name, source, created_by)
-        VALUES (%s, %s, 'generic', gen_random_uuid())
+        INSERT INTO consultation (department_id, name, source, created_by, status)
+        VALUES (%s, %s, 'generic', gen_random_uuid(), %s)
         RETURNING id
         """,
-        (department_id, name),
+        (department_id, name, status),
     )
 
 
