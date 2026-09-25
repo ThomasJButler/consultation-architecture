@@ -47,7 +47,11 @@ pull requests add that take more than a few seconds. `pytest.ini` sets
 | `test_fakes.py` | `RecordingLLM` keeps every prompt and answers well; `FakeLLM` answers with what it was told to, including each fault in `THREAT_MODEL.md` row 3, and raises when its script runs out | nothing |
 | `test_store.py` | A failed job stores an error code and a provider request id; every column of `job` that can hold a string is on a named allow-list and `params` is held to a JSON object; the code vocabulary is a `CHECK` that names exactly the enum's values; a stale fence writes nothing | Postgres |
 | `test_logs.py` | The formatter keeps ids, counts, durations, states and codes and drops everything else by name and by shape; a sentence as a message becomes a marker; an exception contributes its class and never its message | nothing |
-| `test_repo_rules.py` | Every test module that needs a database is marked `db`, and only those | nothing |
+| `test_repo_rules.py` | Every test module that needs a database is marked `db`, and only those; nothing outside `transitions.py` writes `consultation.status` | nothing |
+| `test_jobs.py` | The claim returns the fence and refuses a live lease; a lease stale for ten minutes can be taken over and the fence moves on; a zombie's heartbeat, checkpoint and failure record are all refused; checkpoints are idempotent and a worker resumes from the last one | Postgres |
+| `test_transitions.py` | Fan-in 1 flips the consultation behind the row lock and writes one `themes_ready` row naming the pass; its predicate waits for configured and finding questions and not for failed or signed-off ones; fan-in 2 needs every question complete; the sign-off guard admits one reviewer, freezes v2 with the fallbacks and queues one map job; a reopen mints a run id so the second email has its own row | Postgres |
+| `test_fan_in_race.py` | Twenty threaded finishers on twenty connections flip the consultation exactly once with one email row (marked `slow`); and without the row lock two finishers lose the update, hand-stepped on two connections, which the reconciler's fourth statement then frees | Postgres |
+| `test_tags.py` | A replayed batch inserts nothing, a retracted tag stays retracted through the replay, a human re-add clears the retraction rather than duplicating the row, and the insert is fenced | Postgres |
 | `test_definition.py` | The workbook parses into the three kinds of question in `docs/00`; the three response types are the vocabulary `docs/02` 3.2 names; `-` or blank means no related question; every problem is reported together and a bad response type doesn't cascade into a second problem | nothing |
 | `test_responses.py` | CSV and XLSX read the same, one row at a time (the first row arrives before the row cap refuses the second), with `-` and `N/A` kept as written; short rows are padded and long ones cut to the header; the csv module's field limit is put back after a read | nothing |
 | `test_tokenise.py` | A multi-select cell is matched by longest match against the vocabulary, never split on commas, and a token outside it is reported rather than guessed | nothing |
@@ -56,12 +60,12 @@ pull requests add that take more than a few seconds. `pytest.ini` sets
 | `test_cost.py` | The estimate reproduces `docs/05` section 2 (2.83M tokens, £3.97 cached, £5.09 uncached per 5,000 open answers), the rates are settings, and the assumptions print with the number | nothing |
 | `test_cli_validate.py` | `consult validate` prints the report and exits 0, 1 on an error, 2 on a refusal, and never quotes an open answer; a newline or an escape sequence in a cell can't forge a line of the report; `--json` prints the report as a document with the same counts, warnings and estimate | nothing |
 
-## What is not proved yet
+## What is proved, and what is not yet
 
-The four mechanics the design rests on (`docs/02`, section 13) are not
-tested here: the fan-in transaction, lease takeover with a fence, idempotent
-tag inserts and the indexed filter query. The fan-in transaction, lease
-takeover with a fence and idempotent tag inserts are PR-05; the indexed
-filter query is PR-09 (`plans/00-plan.md`). The vault refusal for the
-pipeline role is PR-06. PR-04 added parsing and the validator, all of it
-pure: `pytest -m 'not db'` runs every one of those tests.
+Three of the four mechanics the design rests on (`docs/02`, section 13)
+are proved here, each by a named test: the fan-in transaction
+(`test_fan_in_race.py`), lease takeover with a fence (`test_jobs.py`) and
+idempotent tag inserts (`test_tags.py`). The fourth, the indexed filter
+query, is PR-09 (`plans/00-plan.md`). The vault refusal for the pipeline
+role is PR-06. PR-04's parsing and validator tests are all pure:
+`pytest -m 'not db'` runs every one of them.
