@@ -39,7 +39,9 @@ def test_the_fan_in_flips_exactly_once_under_twenty_threaded_finishers(
     # Committed, so the other connections can see the rows.
     db.commit()
 
-    barrier = threading.Barrier(FINISHERS)
+    # With a timeout, a thread that fails before the barrier breaks it for
+    # the rest and the test fails loudly instead of the pool joining for ever.
+    barrier = threading.Barrier(FINISHERS, timeout=30)
 
     def finish(index: int, question_id: UUID, job_id: UUID) -> Advance:
         with store.connect(db_settings) as conn:
@@ -52,7 +54,12 @@ def test_the_fan_in_flips_exactly_once_under_twenty_threaded_finishers(
             return advance
 
     with ThreadPoolExecutor(max_workers=FINISHERS) as pool:
-        advances = list(pool.map(lambda item: finish(item[0], *item[1]), enumerate(work)))
+        futures = [pool.submit(finish, index, *pair) for index, pair in enumerate(work)]
+    # Every failure, not just the first future's, so the root cause shows
+    # rather than the BrokenBarrierError the others raise after it.
+    failures = [f.exception() for f in futures if f.exception() is not None]
+    assert failures == []
+    advances = [f.result() for f in futures]
 
     assert sum(advance.themes_ready for advance in advances) == 1
     row = db.execute("SELECT status FROM consultation WHERE id = %s", (consultation_id,)).fetchone()
