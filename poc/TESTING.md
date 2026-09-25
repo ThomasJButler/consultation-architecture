@@ -48,6 +48,13 @@ pull requests add that take more than a few seconds. `pytest.ini` sets
 | `test_store.py` | A failed job stores an error code and a provider request id; every column of `job` that can hold a string is on a named allow-list and `params` is held to a JSON object; the code vocabulary is a `CHECK` that names exactly the enum's values; a stale fence writes nothing | Postgres |
 | `test_logs.py` | The formatter keeps ids, counts, durations, states and codes and drops everything else by name and by shape; a sentence as a message becomes a marker; an exception contributes its class and never its message | nothing |
 | `test_repo_rules.py` | Every test module that needs a database is marked `db`, and only those | nothing |
+| `test_definition.py` | The workbook parses into the three kinds of question in `docs/00`; the three response types are the vocabulary `docs/02` 3.2 names; `-` or blank means no related question; every problem is reported together and a bad response type doesn't cascade into a second problem | nothing |
+| `test_responses.py` | CSV and XLSX read the same, one row at a time, with `-` and `N/A` kept as written; short rows are padded and long ones cut to the header | nothing |
+| `test_tokenise.py` | A multi-select cell is matched by longest match against the vocabulary, never split on commas, and a token outside it is reported rather than guessed | nothing |
+| `test_validate.py` | The whole report for the fixtures, with counts read from the CSV: no errors; the `Unsure` rows, the `N/A` column, the two options that never appear apart, the three unmatched headers with their default roles; a missing column is an error; a repeated respondent id is a warning with two resolutions and no row dropped | nothing |
+| `test_inputs.py` | A file over the size cap, a zip that declares far more than it holds, an XLSX that isn't a zip, an entity declaration in the workbook's XML, a cell over the length cap and a file over the row cap are each refused with a reason and a count and never the content (`THREAT_MODEL.md`, row 1) | nothing |
+| `test_cost.py` | The estimate reproduces `docs/05` section 2 (2.83M tokens, £3.97 cached, £5.09 uncached per 5,000 open answers), the rates are settings, and the assumptions print with the number | nothing |
+| `test_cli_validate.py` | `consult validate` prints the report and exits 0, 1 on an error, 2 on a refusal, and never quotes an open answer; `--json` gives the same report as a document | nothing |
 
 ## What is not proved yet
 
@@ -56,6 +63,5 @@ tested here: the fan-in transaction, lease takeover with a fence, idempotent
 tag inserts and the indexed filter query. The fan-in transaction, lease
 takeover with a fence and idempotent tag inserts are PR-05; the indexed
 filter query is PR-09 (`plans/00-plan.md`). The vault refusal for the
-pipeline role is PR-06. Parsing and the validator are
-PR-04. This pull request proves the scaffold those will stand on and
-nothing more.
+pipeline role is PR-06. PR-04 added parsing and the validator, all of it
+pure: `pytest -m 'not db'` runs every one of those tests.
