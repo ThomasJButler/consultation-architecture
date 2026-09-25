@@ -56,3 +56,15 @@ def test_pure_tests_run_without_a_database() -> None:
         assert needs_db == marked, (
             f"{path.name}: {'needs a database but is not marked db' if needs_db else 'is marked db but needs no database'}"
         )
+
+
+def test_advance_consultation_is_the_only_writer_of_consultation_status() -> None:
+    # docs/02 section 6: there is no second way to change the column, which
+    # is what stops a reopen racing a worker's fan-in. transitions.py holds
+    # the routine and the reopen; nothing else may UPDATE consultation.
+    consult_dir = TESTS_DIR.parent / "consult"
+    for path in sorted(consult_dir.glob("*.py")):
+        if path.name == "transitions.py":
+            continue
+        source = path.read_text(encoding="utf-8").lower()
+        assert "update consultation" not in source, f"{path.name} writes consultation"
