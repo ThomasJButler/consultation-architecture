@@ -7,11 +7,13 @@ Every expectation here is read from the fixture CSV, not from the code.
 
 from __future__ import annotations
 
+from uuid import UUID
+
 import psycopg
 import pytest
 from psycopg.rows import DictRow
 
-from consult.ingest import ingest
+from consult.ingest import Ingested, ingest
 from consult.tokenise import tokenise
 from tests.pipeline import NOT_ANSWERED, fixture_rows, staged_fixture
 
@@ -292,3 +294,56 @@ def test_ingest_inserts_one_find_themes_job_per_open_question(
     kept = staged_fixture(db)
     ingest(db, kept.consultation_id, keep_staging=True)
     assert staging_tables(db) == [str(kept.consultation_id)]
+
+
+def snapshot(db: psycopg.Connection[DictRow], consultation_id: UUID) -> dict[str, list[DictRow]]:
+    """Every row ingest is responsible for, in a stable order, so two runs
+    can be compared whole."""
+    queries = {
+        "respondents": """
+            SELECT id, external_id, source_row_no, attrs, duplicate_of
+              FROM respondent WHERE consultation_id = %s ORDER BY id""",
+        "answers": """
+            SELECT id, respondent_id, question_id, option_id, value_text, is_blank, text_sha256,
+                   duplicate_of_answer_id
+              FROM answer WHERE consultation_id = %s ORDER BY id""",
+        "identity": """
+            SELECT v.respondent_id, v.column_ref, v.value_text
+              FROM vault.respondent_identity v JOIN respondent r ON r.id = v.respondent_id
+             WHERE r.consultation_id = %s ORDER BY 1, 2""",
+        "jobs": """
+            SELECT id, question_id, kind, status, run_id
+              FROM job WHERE consultation_id = %s ORDER BY id""",
+        "consultation": "SELECT status, run_id FROM consultation WHERE id = %s",
+    }
+    return {
+        name: db.execute(query, (consultation_id,)).fetchall() for name, query in queries.items()
+    }
+
+
+def test_ingest_is_idempotent_on_replay(db: psycopg.Connection[DictRow]) -> None:
+    staged = staged_fixture(db)
+    nothing_written = Ingested(
+        respondents=0,
+        answers=0,
+        vault_rows=0,
+        duplicate_answers=0,
+        duplicate_respondents=0,
+        jobs=0,
+    )
+
+    first = ingest(db, staged.consultation_id, keep_staging=True)
+    assert (first.respondents, first.vault_rows, first.jobs) == (240, 240, 2)
+    written = snapshot(db, staged.consultation_id)
+
+    # Delivered again with the table still there: the same rows, and the
+    # counts say nothing was written (docs/04, section 3).
+    assert ingest(db, staged.consultation_id, keep_staging=True) == nothing_written
+    assert snapshot(db, staged.consultation_id) == written
+    # Delivered again after the drop, which is what a redelivery after the
+    # first run's commit looks like: the consultation is already processing
+    # and the table is gone, so the job finishes quietly.
+    assert ingest(db, staged.consultation_id) == nothing_written
+    assert staging_tables(db) == []
+    assert ingest(db, staged.consultation_id) == nothing_written
+    assert snapshot(db, staged.consultation_id) == written
