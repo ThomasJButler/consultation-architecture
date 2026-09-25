@@ -156,3 +156,32 @@ def test_malformed_xml_a_bad_encoding_and_a_missing_file_are_refused_too(tmp_pat
 
     assert refusal_of(Responses, tmp_path / "absent.csv", SMALL).reason is Refusal.NOT_FOUND
     assert refusal_of(read_definition, tmp_path / "absent.xlsx", SMALL).reason is Refusal.NOT_FOUND
+
+
+def test_a_row_with_more_fields_than_the_column_cap_is_refused(tmp_path: Path) -> None:
+    # A million distinct header names is a small file and a very large
+    # report; the cap on a row's width is the third of the CSV caps
+    # THREAT_MODEL.md row 1 names, beside cells and rows.
+    caps = Caps(
+        max_upload_bytes=100_000_000,
+        max_rows=1_000,
+        max_cell_chars=2_000,
+        max_zip_ratio=100,
+        max_columns=3,
+    )
+    wide = tmp_path / "wide.csv"
+    wide.write_text("a,b,c,d\n1,2,3,4\n", encoding="utf-8")
+    error = refusal_of(Responses, wide, caps)
+    assert error.reason is Refusal.TOO_MANY_COLUMNS
+    assert error.count == 4
+    assert (
+        refusal_of(Responses, FIXTURES / "responses.csv", caps).reason is Refusal.TOO_MANY_COLUMNS
+    )
+
+    workbook = Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    sheet.append(["a", "b", "c"])
+    sheet.append([1, 2, 3, 4])
+    workbook.save(tmp_path / "wide.xlsx")
+    assert refusal_of(Responses, tmp_path / "wide.xlsx", caps).reason is Refusal.TOO_MANY_COLUMNS
