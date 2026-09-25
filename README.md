@@ -36,15 +36,19 @@ The brief and the sample data for this task were received under a recruitment
 process and are marked OFFICIAL. They are not in this repository and never will
 be. Everything here is my own work or synthetic data in the same shape.
 
-## Status (19 September 2026)
+## Status (25 September 2026)
 
 Built: the plan, the scaffold, the design documents (brief, research,
 architecture, seven decision records, data model, cost model, security notes
 and threat model), both diagrams and a first draft of the submission with a
-rendered PDF. Reconciled: fifteen inconsistencies a review of the design
-documents found, corrected in PR-02b before the schema is typed from
-`docs/04`. Planned: the proof-of-concept (PR-03 to PR-09), final polish
-(PR-10). Deliberately not built: see above.
+rendered PDF, reconciled in PR-02b before the schema was typed from `docs/04`.
+In review: the proof-of-concept scaffold (PR-03): the Python project under
+`poc/`, the schema typed from `docs/04` with its four roles, `consult init`
+(`poc/README.md` says how to run it), the test harness on a real Postgres, a fictional fixture consultation in the
+real file format, the model fakes, the logging policy pinned by a test, and
+CI running the whole gate against Postgres 17. Planned: parsing and
+validation (PR-04), the mechanics (PR-05 to PR-09), final polish (PR-10).
+Deliberately not built: see above.
 
 ## How it was built
 

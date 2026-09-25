@@ -1,0 +1,24 @@
+# Postgres 17 for the tests and the command line, bound to loopback only. The
+# names and the password come from .env (copy .env.example), which Compose
+# reads from this directory. Postgres 17 matches docs/02 (RDS Postgres 17)
+# and the service container in .github/workflows/ci.yml.
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${CONSULT_DB_USER}
+      POSTGRES_PASSWORD: ${CONSULT_DB_PASSWORD}
+      POSTGRES_DB: ${CONSULT_DB_NAME}
+    ports:
+      - "127.0.0.1:${CONSULT_DB_PORT}:5432"
+    healthcheck:
+      # $$ so the container's own environment is read, not this file's.
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - consult-db:/var/lib/postgresql/data
+
+volumes:
+  consult-db:

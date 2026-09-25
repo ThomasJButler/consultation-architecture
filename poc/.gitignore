@@ -1,0 +1,3 @@
+# Local outputs from `consult` runs; the repo-level .gitignore covers the rest.
+.venv/
+*.egg-info/

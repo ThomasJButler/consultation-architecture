@@ -19,6 +19,8 @@ written for. Find the row that matches your question and start there.
 | `SECURITY.md` | How to report a problem, what's in scope, and how the brief is kept out of the tree | Anyone who finds a problem; anyone wondering where the sample data went |
 | `SUBMISSION.md` | Source of the submitted document: both diagrams and the bullets | Everyone. It's the deliverable |
 | `submission/index.html`, `submission/*.svg`, `submission/*.pdf` | The rendered submission: the page the PDF is printed from, the diagram renders and the PDF itself | Anyone who wants the document exactly as submitted |
+| `poc/README.md` | What the proof-of-concept is, how to run it, what it does and does not prove | Anyone about to run `make check`; anyone asking what the code shows |
+| `poc/TESTING.md` | What each test file proves, how the harness works, which pull request proves each mechanic | Anyone reading a test, or writing the next one |
 
 ## Conventions
 

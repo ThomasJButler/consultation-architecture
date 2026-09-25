@@ -1,7 +1,7 @@
-# Until the proof-of-concept lands (PR-03) the only job is the brief guard: it
-# proves no filename or marker from the received brief is anywhere in the tree.
-# The Python job (ruff, mypy, pytest against a Postgres service, pip-audit,
-# bandit) is added with the code it checks.
+# Two jobs. The brief guard proves no filename or marker from the received
+# brief is anywhere in the tree. The Python job runs `make check` under poc/
+# (ruff, mypy, pytest against a real Postgres 17, pip-audit, bandit), the same
+# command a clone runs locally, so CI and a laptop can't drift.
 name: ci
 on:
   push:
@@ -15,3 +15,38 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - run: sh scripts/brief-guard.sh --all
+  python:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: poc
+    services:
+      db:
+        # Postgres 17 to match docs/02 (RDS Postgres 17) and docker-compose.yml.
+        image: postgres:17
+        env:
+          POSTGRES_USER: consult
+          POSTGRES_PASSWORD: ci-only-not-a-secret
+          POSTGRES_DB: consult
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U consult"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      CONSULT_DB_HOST: 127.0.0.1
+      CONSULT_DB_PORT: "5432"
+      CONSULT_DB_NAME: consult
+      CONSULT_DB_USER: consult
+      CONSULT_DB_PASSWORD: ci-only-not-a-secret
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: poc/pyproject.toml
+      - run: python -m pip install -e '.[dev]'
+      - run: make check

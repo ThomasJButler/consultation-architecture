@@ -85,4 +85,4 @@ sh scripts/brief-guard.sh --all       # what CI runs
 
 ## Status
 
-19 September 2026: design frozen, first PDF built. See the Status block in `README.md`.
+25 September 2026: proof-of-concept scaffold in review (PR-03). See the Status block in `README.md`.
