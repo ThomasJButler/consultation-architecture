@@ -153,7 +153,10 @@ def test_a_duplicated_respondent_id_is_a_warning_with_two_resolutions(tmp_path: 
     )
     report = validate(definition, Responses(path))
     (duplicate,) = warnings_of(report, WarningKind.DUPLICATE_RESPONDENT_ID)
-    assert (duplicate.column_ref, duplicate.value, duplicate.count) == ("respondent_ref", "R-1", 3)
+    # The rows say which id, so the value itself stays out of the report: a
+    # column named like an id can hold email addresses (docs/02, 3.2, the
+    # identity role), and the report shouldn't print those.
+    assert (duplicate.column_ref, duplicate.value, duplicate.count) == ("respondent_ref", None, 3)
     assert duplicate.example_rows == (2, 4, 6)
     assert duplicate.resolutions == (Resolution.IGNORE_COLUMN, Resolution.KEEP_FIRST_BLANK_REST)
     assert duplicate.default is Resolution.KEEP_FIRST_BLANK_REST
@@ -217,7 +220,7 @@ def test_every_id_like_column_gets_its_own_duplicate_check(tmp_path: Path) -> No
     )
     report = validate(definition, Responses(path))
     (duplicate,) = warnings_of(report, WarningKind.DUPLICATE_RESPONDENT_ID)
-    assert (duplicate.column_ref, duplicate.value, duplicate.count) == ("submission_id", "S-1", 3)
+    assert (duplicate.column_ref, duplicate.value, duplicate.count) == ("submission_id", None, 3)
 
 
 def test_two_options_chosen_together_once_are_not_flagged_to_merge(tmp_path: Path) -> None:
