@@ -4,10 +4,10 @@ A small, runnable proof-of-concept of the parts of the design that are easy
 to claim and hard to get right: the job pipeline's claim, lease and fan-in
 mechanics on a real Postgres, with a fake model so it runs offline. The
 design is `docs/02-architecture.md`; the schema is typed from
-`docs/04-data-model.md`. PR-03 laid the scaffold those proofs stand on
-and PR-04 the parsing and validation in front of them; the section "What
-it does not prove" says what is proved so far, and `TESTING.md` which pull
-request proves the rest. This is not the product, and `../README.md` says
+`docs/04-data-model.md`. PR-03 laid the scaffold, PR-04 the parsing and
+validation in front of it, and PR-05 proves three of the four mechanics
+with named tests; the section "What it does not prove" says what is left,
+and `TESTING.md` which pull request proves it. This is not the product, and `../README.md` says
 what it deliberately leaves out.
 
 ## Run it
@@ -25,7 +25,7 @@ make validate                   # consult validate on the fixtures
 and applies it again. There is no migration tool: a proof-of-concept
 changes its schema by rewriting `consult/schema.sql` and resetting.
 
-## What is here (PR-03 and PR-04)
+## What is here (PR-03 to PR-05)
 
 | Path | What it is |
 |---|---|
@@ -39,6 +39,9 @@ changes its schema by rewriting `consult/schema.sql` and resetting.
 | `consult/inputs.py` | The input guards from `THREAT_MODEL.md` row 1, with the caps as settings |
 | `consult/cost.py` | The token and cost estimate from `docs/05`, with its assumptions printed |
 | `consult/report.py` | The report rendered for a terminal or as JSON |
+| `consult/jobs.py` | The claim with its fence, the heartbeat, the checkpoint, the failure record and the success mark, every write fenced (`docs/02`, step 5; ADR-002) |
+| `consult/transitions.py` | The only module that writes the consultation's status: `advance_consultation` for both fan-ins, the sign-off guard, the reopen (`docs/02`, steps 7, 8 and 10; ADR-001, ADR-003) |
+| `consult/tags.py` | Tags inserted on the full unique index, retracted in place, never deleted (ADR-004); a pair whose theme, answer and version don't line up writes nothing |
 | `consult/config.py` | Settings from the environment, then `.env`; held to `.env.example` by a test |
 | `consult/llm.py` | The model boundary: `Prompt`, `Completion`, the `LLM` protocol |
 | `consult/logs.py` | The log formatter that lets through ids, counts, durations, states and codes and nothing else |
@@ -79,9 +82,11 @@ proforma repeated word for word, and one answer starting with `=`.
   line.
 - Model quality. The model is a fake. What is proved is what happens to a
   reply that is wrong in each of the ways the threat model names.
-- The four mechanics themselves. PR-03 laid the scaffold and PR-04 the
-  parsing they will stand on; `TESTING.md` says which pull request proves
-  each.
+- The indexed filter query, the fourth mechanic; that's PR-09 with its
+  `EXPLAIN` at 20,000 rows. The other three are proved in `TESTING.md`'s
+  named tests.
+- That the mechanics compose into a running pipeline: the worker loop and
+  the reconciler are PR-08, and ingest is PR-06.
 
 ## Pre-commit
 
