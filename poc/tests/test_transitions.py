@@ -14,7 +14,12 @@ import pytest
 from psycopg.rows import DictRow
 
 from consult.jobs import claim
-from consult.transitions import Advance, advance_consultation, finish_find_themes
+from consult.transitions import (
+    Advance,
+    advance_consultation,
+    finish_find_themes,
+    finish_map_themes,
+)
 from tests.rows import make_consultation, make_department, make_open_question, make_queued_job
 
 pytestmark = pytest.mark.db
@@ -112,3 +117,30 @@ def test_fan_in_one_waits_for_configured_and_finding_and_not_for_failed_or_signe
     assert lease is not None
     assert finish_find_themes(db, lease, fourth, consultation_id) == Advance(True, False)
     assert consultation_row(db, consultation_id)["status"] == "awaiting_review"
+
+
+def test_fan_in_two_needs_every_open_question_complete(db: psycopg.Connection[DictRow]) -> None:
+    consultation_id = make_consultation(db, make_department(db), status="awaiting_review")
+    make_open_question(db, consultation_id, "o_done", status="complete", ordinal=1)
+    second = make_open_question(
+        db, consultation_id, "o_second", status="assigning_themes", ordinal=2
+    )
+    third = make_open_question(db, consultation_id, "o_third", status="map_failed", ordinal=3)
+
+    # A failed mapping blocks ready by design (docs/02, step 10).
+    lease = claim(db, make_queued_job(db, consultation_id, second, kind="map_themes"), "worker-1")
+    assert lease is not None
+    assert finish_map_themes(db, lease, second, consultation_id) == Advance(False, False)
+    assert consultation_row(db, consultation_id)["status"] == "awaiting_review"
+    assert outbox_rows(db, consultation_id) == []
+
+    set_status(db, third, "assigning_themes")
+    lease = claim(db, make_queued_job(db, consultation_id, third, kind="map_themes"), "worker-2")
+    assert lease is not None
+    assert finish_map_themes(db, lease, third, consultation_id) == Advance(False, True)
+
+    after = consultation_row(db, consultation_id)
+    assert after["status"] == "ready"
+    assert outbox_rows(db, consultation_id) == [
+        {"kind": "analysis_ready", "subject_id": after["run_id"], "status": "pending"}
+    ]
