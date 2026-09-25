@@ -317,10 +317,13 @@ GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO consult_ingest, c
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO consult_ingest, consult_pipeline;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO consult_export;
 GRANT SELECT, DELETE ON ALL TABLES IN SCHEMA public TO consult_admin;
--- The erasure transaction inserts the erasure job row, re-points duplicate
--- clusters and records the redacted upload's hash (docs/06, section 4).
+-- The erasure transaction is steps 1 to 5 of docs/06 section 4 as corrected:
+-- it inserts the erasure job row, re-points duplicate_of_answer_id and
+-- duplicate_of at the next-oldest member of a cluster, and deletes. The
+-- redacted upload's hash is the job's step 7, written under the pipeline
+-- role's UPDATE, so consult_admin needs no UPDATE on consultation.
 GRANT INSERT ON job TO consult_admin;
-GRANT UPDATE ON consultation, respondent, answer TO consult_admin;
+GRANT UPDATE ON respondent, answer TO consult_admin;
 
 -- The vault: insert-only for ingest, read-only for export, delete for admin,
 -- and no grant at all for the pipeline, which is what keeps "identifiers
