@@ -24,6 +24,7 @@ values of demographic and closed columns. It never carries an open answer.
 
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -114,7 +115,11 @@ class Report:
 
 
 def suggested_role(header: str) -> Resolution:
-    words = header.lower().replace("-", "_").split("_")
+    # "Response ID", "RespondentID" and "respondent_id" are the same header
+    # to a person, so a space, a hyphen, a dot or a change of case all
+    # separate words the way an underscore does.
+    spaced = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", header)
+    words = [word for word in re.split(r"[^a-z0-9]+", spaced.lower()) if word]
     if any(word in IDENTITY_WORDS for word in words):
         return Resolution.ROLE_IDENTITY
     if any(word in ID_WORDS for word in words):
