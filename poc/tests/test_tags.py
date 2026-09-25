@@ -98,3 +98,57 @@ def test_tag_inserts_are_idempotent_and_a_retracted_tag_stays_retracted(
     assert claim(db, lease.job_id, "worker-2") is not None
     with pytest.raises(LeaseLostError):
         insert_tags(db, lease, version_id, batch_no=2, tags=[Tag(second, parking)])
+
+
+def test_a_tag_insert_refuses_a_theme_or_answer_from_elsewhere(
+    db: psycopg.Connection[DictRow], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Department scope is the caller's (docs/02, section 10), but a tag row
+    # that names another department's answer would be readable under that
+    # department's row-level security, so the insert checks the version,
+    # the question and the department line up before it writes anything.
+    from consult import jobs
+
+    department = make_department(db)
+    consultation_id = make_consultation(db, department, status="awaiting_review")
+    question_id = make_open_question(db, consultation_id, status="assigning_themes")
+    version_id = make_theme_set_version(db, question_id, version_no=2, status="signed_off")
+    parking = make_theme(db, version_id, "PARKING")
+    answer = make_answer(
+        db, consultation_id, make_respondent(db, consultation_id, 2), question_id, "x"
+    )
+    lease = claim(
+        db, make_queued_job(db, consultation_id, question_id, kind="map_themes"), "worker-1"
+    )
+    assert lease is not None
+
+    other_question = make_open_question(
+        db, consultation_id, "o_other", status="assigning_themes", ordinal=2
+    )
+    other_version = make_theme_set_version(db, other_question, version_no=2, status="signed_off")
+    other_theme = make_theme(db, other_version, "OTHER_THEME")
+    other_department = make_consultation(
+        db, make_department(db, "Another"), status="awaiting_review"
+    )
+    foreign_question = make_open_question(db, other_department, status="assigning_themes")
+    foreign_answer = make_answer(
+        db, other_department, make_respondent(db, other_department, 2), foreign_question, "y"
+    )
+
+    # A theme from another version, an answer from another question, an
+    # answer from another department: none of them inserts.
+    assert insert_tags(db, lease, version_id, batch_no=1, tags=[Tag(answer, other_theme)]) == 0
+    assert insert_tags(db, lease, version_id, batch_no=1, tags=[Tag(foreign_answer, parking)]) == 0
+    assert add_human_tag(db, foreign_answer, parking, version_id, uuid4()) == 0
+    assert db.execute("SELECT count(*) AS n FROM answer_theme").fetchone() == {"n": 0}
+    # The good pair still does.
+    assert insert_tags(db, lease, version_id, batch_no=1, tags=[Tag(answer, parking)]) == 1
+
+    # And the insert carries the fence itself, not only through the heartbeat.
+    db.execute(
+        "UPDATE job SET heartbeat_at = now() - interval '11 minutes' WHERE id = %s", (lease.job_id,)
+    )
+    assert claim(db, lease.job_id, "worker-2") is not None
+    monkeypatch.setattr(jobs, "heartbeat", lambda conn, lease: None)
+    with pytest.raises(LeaseLostError):
+        insert_tags(db, lease, version_id, batch_no=2, tags=[Tag(answer, parking)])
