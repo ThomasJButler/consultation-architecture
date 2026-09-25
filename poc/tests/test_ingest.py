@@ -86,9 +86,7 @@ def test_ingest_explodes_answers_one_row_per_option(db: psycopg.Connection[DictR
     assert first == {"value_text": rows[0]["o_reason"]}
     # An identity column gets no answer rows (docs/04, section 1).
     assert count("email") == 0
-    assert (
-        result.answers
-        == db.execute(
-            "SELECT count(*) AS n FROM answer WHERE consultation_id = %s", (staged.consultation_id,)
-        ).fetchone()["n"]
-    )
+    total = db.execute(
+        "SELECT count(*) AS n FROM answer WHERE consultation_id = %s", (staged.consultation_id,)
+    ).fetchone()
+    assert total == {"n": result.answers}
