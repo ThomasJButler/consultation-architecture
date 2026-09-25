@@ -171,3 +171,12 @@ def record_failure(
             "retry_in": retry_in,
         },
     )
+
+
+def next_batch_no(conn: psycopg.Connection[DictRow], job_id: UUID) -> int:
+    """Where a worker starts: after the last checkpoint, or at 1."""
+    row = conn.execute(
+        "SELECT coalesce(max(batch_no), 0) + 1 AS next FROM job_batch WHERE job_id = %s", (job_id,)
+    ).fetchone()
+    # coalesce makes the aggregate one row always; the guard is for the type.
+    return int(row["next"]) if row else 1
