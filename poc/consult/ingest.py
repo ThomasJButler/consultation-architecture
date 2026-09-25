@@ -141,7 +141,11 @@ def _external_ids(config: _Configured, rows: list[DictRow]) -> dict[int, str | N
     repeated: set[int] = set()
     ids: dict[int, str | None] = {}
     for row in rows:
+        # Blank and `-` are both not answered here as everywhere (docs/02,
+        # section 3.2), and the validator's tally agrees.
         value = row.get(column) or None
+        if value == NO_ANSWER:
+            value = None
         if value is not None and value in first_seen:
             repeated.update((first_seen[value], row["row_no"]))
             value = None
