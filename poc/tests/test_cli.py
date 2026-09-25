@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import psycopg
 import pytest
+from psycopg import sql
 from psycopg.rows import DictRow
 
+from consult import store
 from consult.cli import main
 from consult.config import Settings
 from consult.store import connect
+from tests.rows import make_consultation, make_department, make_running_job
 
 pytestmark = pytest.mark.db
 
@@ -70,9 +73,17 @@ def test_init_creates_every_table_the_design_names(blank_database: Settings) -> 
     assert roles_in(blank_database) >= DESIGN_ROLES
 
     # Running it twice is harmless: a second `init` on a live database
-    # creates nothing and drops nothing.
+    # creates nothing, drops nothing and keeps the rows that were there.
+    with connect(blank_database) as conn:
+        department_id = make_department(conn)
+        conn.commit()
     assert main(["init"], settings=blank_database) == 0
     assert tables_in(blank_database) == DESIGN_TABLES
+    with connect(blank_database) as conn:
+        row = conn.execute(
+            "SELECT count(*) AS departments FROM department WHERE id = %s", (department_id,)
+        ).fetchone()
+    assert row == {"departments": 1}
 
 
 def shape_of(settings: Settings) -> set[tuple[object, ...]]:
@@ -96,18 +107,51 @@ def shape_of(settings: Settings) -> set[tuple[object, ...]]:
     return {tuple(row.values()) for row in columns} | {tuple(row.values()) for row in indexes}
 
 
+def oids_of(settings: Settings) -> dict[str, int]:
+    """Each table's oid: a dropped and recreated table gets a new one."""
+    with connect(settings) as conn:
+        rows = conn.execute(
+            "SELECT name, to_regclass(name)::oid AS oid FROM unnest(%s::text[]) AS t(name)",
+            (sorted(DESIGN_TABLES),),
+        ).fetchall()
+    oids = {row["name"]: row["oid"] for row in rows}
+    assert all(oid is not None for oid in oids.values())
+    return oids
+
+
+def row_counts_of(settings: Settings) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    with connect(settings) as conn:
+        for name in DESIGN_TABLES:
+            row = conn.execute(
+                sql.SQL("SELECT count(*) AS rows FROM {}").format(store.qualified(name))
+            ).fetchone()
+            assert row is not None
+            counts[name] = row["rows"]
+    return counts
+
+
 def test_init_reset_leaves_the_same_empty_schema(
     db: psycopg.Connection[DictRow], db_settings: Settings
 ) -> None:
-    db.execute("INSERT INTO department (name) VALUES ('Department of Fictional Affairs')")
+    # Rows in three tables, so a reset that forgot one would show.
+    consultation_id = make_consultation(db, make_department(db))
+    make_running_job(db, consultation_id)
     db.commit()
     before = shape_of(db_settings)
+    oids_before = oids_of(db_settings)
 
     assert main(["init", "--reset"], settings=db_settings) == 0
 
     assert shape_of(db_settings) == before
     assert tables_in(db_settings) == DESIGN_TABLES
-    with connect(db_settings) as conn:
-        row = conn.execute("SELECT count(*) AS departments FROM department").fetchone()
-    assert row is not None
-    assert row["departments"] == 0
+    oids_after = oids_of(db_settings)
+    assert all(oids_after[name] != oids_before[name] for name in DESIGN_TABLES)
+    assert row_counts_of(db_settings) == dict.fromkeys(DESIGN_TABLES, 0)
+
+
+def test_the_drop_and_truncate_list_names_the_design_tables() -> None:
+    # store.TABLES drives both reset and the harness's truncation, so it
+    # can't be allowed to drift from what schema.sql creates.
+    qualified = {name if "." in name else f"public.{name}" for name in store.TABLES}
+    assert qualified == DESIGN_TABLES
