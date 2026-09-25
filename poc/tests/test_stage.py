@@ -18,7 +18,7 @@ import pytest
 from psycopg import sql
 from psycopg.rows import DictRow
 
-from consult.stage import stage, staging_table
+from consult.stage import StageError, stage, staging_table
 from tests.rows import make_consultation, make_department
 
 pytestmark = pytest.mark.db
@@ -59,3 +59,30 @@ def test_stage_copies_the_file_into_a_logged_staging_table(db: psycopg.Connectio
         (consultation_id,),
     ).fetchone()
     assert consultation == {"status": "staged", "upload_sha256": staged.sha256, "row_count": 240}
+
+
+def test_stage_refuses_a_header_over_sixty_three_bytes(
+    db: psycopg.Connection[DictRow], tmp_path: Path
+) -> None:
+    # The validator blocks this first; stage is the backstop, so a caller
+    # that skipped validation can't lose a column to Postgres's identifier
+    # truncation. Refused before the consultation moves or a table exists.
+    consultation_id = make_consultation(db, make_department(db))
+    long_header = "email_" + "x" * 70
+    path = tmp_path / "responses.csv"
+    path.write_text(
+        f"respondent_ref,{long_header},o_reason\nR-1,a@example.org,why\n", encoding="utf-8"
+    )
+
+    with pytest.raises(StageError) as refused:
+        stage(db, consultation_id, path)
+
+    assert "63" in str(refused.value) and "a@example.org" not in str(refused.value)
+    status = db.execute(
+        "SELECT status FROM consultation WHERE id = %s", (consultation_id,)
+    ).fetchone()
+    assert status == {"status": "draft"}
+    tables = db.execute(
+        "SELECT count(*) AS n FROM pg_tables WHERE schemaname = 'staging'"
+    ).fetchone()
+    assert tables == {"n": 0}
