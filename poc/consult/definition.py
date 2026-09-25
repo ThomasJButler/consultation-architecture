@@ -20,8 +20,9 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Final
 
-from openpyxl import load_workbook
 from openpyxl.workbook.workbook import Workbook
+
+from consult.inputs import DEFAULT_CAPS, Caps, guarded, open_workbook
 
 SHEETS: Final[dict[str, tuple[str, ...]]] = {
     "Demographic questions": ("column_reference", "question_text"),
@@ -103,7 +104,7 @@ def _rows(workbook: Workbook, sheet: str, problems: list[str]) -> Iterator[dict[
         problems.append(f"{sheet}: sheet missing")
         return
     worksheet = workbook[sheet]
-    rows = worksheet.iter_rows(values_only=True)
+    rows = guarded(worksheet.iter_rows(values_only=True))
     header = tuple(_cell(value) for value in next(rows, ()))
     expected = SHEETS[sheet]
     if header[: len(expected)] != expected:
@@ -116,10 +117,9 @@ def _rows(workbook: Workbook, sheet: str, problems: list[str]) -> Iterator[dict[
         yield dict(zip(expected, values, strict=False))
 
 
-def read_definition(path: Path) -> Definition:
+def read_definition(path: Path, caps: Caps = DEFAULT_CAPS) -> Definition:
     problems: list[str] = []
-    workbook = load_workbook(path, read_only=True, data_only=True)
-    try:
+    with open_workbook(path, caps) as workbook:
         demographic = tuple(
             DemographicQuestion(row["column_reference"], row["question_text"])
             for row in _rows(workbook, "Demographic questions", problems)
@@ -157,8 +157,6 @@ def read_definition(path: Path) -> Definition:
                     None if related in ("", NO_VALUE) else related,
                 )
             )
-    finally:
-        workbook.close()
 
     definition = Definition(demographic, tuple(closed), tuple(opened))
     seen: set[str] = set()

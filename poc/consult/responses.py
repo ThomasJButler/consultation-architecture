@@ -14,7 +14,16 @@ from collections.abc import Generator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from openpyxl import load_workbook
+from consult.inputs import (
+    DEFAULT_CAPS,
+    Caps,
+    InputError,
+    Refusal,
+    check_cell,
+    check_file,
+    guarded,
+    open_workbook,
+)
 
 
 @dataclass(frozen=True)
@@ -36,8 +45,10 @@ def _fitted(header: Sequence[str], values: Sequence[str]) -> dict[str, str]:
 
 
 class Responses:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, caps: Caps = DEFAULT_CAPS) -> None:
         self.path = path
+        self.caps = caps
+        check_file(path, caps)
         self.header = self._read_header()
 
     @property
@@ -45,19 +56,23 @@ class Responses:
         return self.path.suffix.lower() == ".xlsx"
 
     def _raw_rows(self) -> Generator[tuple[str, ...], None, None]:
+        caps = self.caps
         if self.is_xlsx:
-            workbook = load_workbook(self.path, read_only=True, data_only=True)
-            try:
-                for sheet_values in workbook.worksheets[0].iter_rows(values_only=True):
-                    yield tuple(_cell(value) for value in sheet_values)
-            finally:
-                workbook.close()
+            with open_workbook(self.path, caps) as workbook:
+                sheet = workbook.worksheets[0]
+                for sheet_values in guarded(sheet.iter_rows(values_only=True)):
+                    yield tuple(check_cell(_cell(value), caps) for value in sheet_values)
         else:
             # utf-8-sig, so a byte-order mark from a spreadsheet's CSV export
-            # doesn't end up glued to the first header.
+            # doesn't end up glued to the first header. The csv module's own
+            # field limit stops it buffering a cell the size of the file.
+            csv.field_size_limit(caps.max_cell_chars + 1)
             with self.path.open(newline="", encoding="utf-8-sig") as handle:
-                for csv_values in csv.reader(handle):
-                    yield tuple(_cell(value) for value in csv_values)
+                try:
+                    for csv_values in csv.reader(handle):
+                        yield tuple(check_cell(_cell(value), caps) for value in csv_values)
+                except csv.Error as exc:
+                    raise InputError(Refusal.CELL_TOO_LONG, caps.max_cell_chars) from exc
 
     def _read_header(self) -> tuple[str, ...]:
         rows = self._raw_rows()
@@ -69,7 +84,11 @@ class Responses:
     def rows(self) -> Generator[Row, None, None]:
         raw = self._raw_rows()
         next(raw, None)
+        seen = 0
         for offset, values in enumerate(raw, start=2):
             if not any(values):
                 continue
+            seen += 1
+            if seen > self.caps.max_rows:
+                raise InputError(Refusal.TOO_MANY_ROWS, self.caps.max_rows)
             yield Row(offset, _fitted(self.header, values))

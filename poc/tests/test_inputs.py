@@ -10,7 +10,6 @@ reviewer can read them and the first real upload can move them.
 from __future__ import annotations
 
 import csv
-import io
 import shutil
 import zipfile
 from pathlib import Path
@@ -80,7 +79,9 @@ def test_an_entity_expansion_in_the_workbook_xml_is_refused(tmp_path: Path) -> N
                 doctype = (
                     b'<!DOCTYPE x [<!ENTITY a "aaaaaaaaaa"><!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;">]>'
                 )
-                data = data.replace(b"?>", b"?>" + doctype, 1)
+                # openpyxl writes the sheet without an XML declaration, so
+                # the DOCTYPE goes straight in front of the root element.
+                data = doctype + data
             target.writestr(name, data)
     assert refusal_of(read_definition, path, SMALL).reason is Refusal.XML_FORBIDDEN
     assert refusal_of(Responses, path, SMALL).reason is Refusal.XML_FORBIDDEN
@@ -130,5 +131,3 @@ def test_the_default_caps_admit_the_fixtures(tmp_path: Path) -> None:
     assert read_definition(FIXTURES / "definition.xlsx", Caps()).column_refs
     assert Caps().max_upload_bytes >= 200 * 1024 * 1024
     assert Caps().max_rows >= 250_000
-    buffer = io.StringIO()
-    assert buffer.write("") == 0
