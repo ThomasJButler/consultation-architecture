@@ -36,6 +36,7 @@ class Refusal(StrEnum):
     CELL_TOO_LONG = "cell_too_long"
     TOO_MANY_ROWS = "too_many_rows"
     UNREADABLE = "unreadable"
+    NOT_FOUND = "not_found"
 
 
 @dataclass(frozen=True)
@@ -65,7 +66,10 @@ class InputError(Exception):
 
 def check_file(path: Path, caps: Caps) -> None:
     """The checks that need no parsing: size, and for a zip, what it declares."""
-    size = path.stat().st_size
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise InputError(Refusal.NOT_FOUND, 0) from exc
     if size > caps.max_upload_bytes:
         raise InputError(Refusal.TOO_LARGE, size)
     if path.suffix.lower() != ".xlsx":
@@ -103,9 +107,17 @@ def open_workbook(path: Path, caps: Caps) -> Iterator[Workbook]:
     halfway (which is what a hostile file produces) can't leak it."""
     check_file(path, caps)
     with path.open("rb") as handle:
+        # Anything openpyxl raises on a file it can't make sense of is a
+        # refusal: a ValueError, a ParseError (a SyntaxError underneath), an
+        # AttributeError from a workbook with no worksheet. What it raises
+        # is its business; that the file is refused with a reason is ours.
         try:
             workbook = load_workbook(handle, read_only=True, data_only=True)
-        except (zipfile.BadZipFile, KeyError, ValueError) as exc:
+            if not workbook.worksheets:
+                raise InputError(Refusal.UNREADABLE, 0)
+        except InputError:
+            raise
+        except Exception as exc:
             raise _refusal(exc) from exc
         try:
             yield workbook
@@ -118,7 +130,9 @@ def guarded[T](rows: Iterator[T]) -> Iterator[T]:
     fire mid-stream; this turns it into the same refusal either way."""
     try:
         yield from rows
-    except ValueError as exc:
+    except InputError:
+        raise
+    except Exception as exc:
         raise _refusal(exc) from exc
 
 

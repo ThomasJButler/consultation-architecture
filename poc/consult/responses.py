@@ -73,6 +73,9 @@ class Responses:
                         yield tuple(check_cell(_cell(value), caps) for value in csv_values)
                 except csv.Error as exc:
                     raise InputError(Refusal.CELL_TOO_LONG, caps.max_cell_chars) from exc
+                except UnicodeDecodeError as exc:
+                    # The offset of the bad byte, never the bytes around it.
+                    raise InputError(Refusal.UNREADABLE, exc.start) from exc
 
     def _read_header(self) -> tuple[str, ...]:
         rows = self._raw_rows()
