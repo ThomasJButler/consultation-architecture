@@ -64,7 +64,8 @@ ignore = [
 python_version = "3.12"
 strict = true
 warn_unreachable = true
-files = ["consult", "tests"]
+files = ["consult", "scripts", "tests"]
+mypy_path = "scripts"
 
 [tool.coverage.run]
 source = ["consult"]
