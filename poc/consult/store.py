@@ -4,10 +4,13 @@ here or in a sibling module, parameterised and readable (CLAUDE.md, rule 10).
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from importlib import resources
 
 import psycopg
 from psycopg import sql
+from psycopg.pq import TransactionStatus
 from psycopg.rows import DictRow, dict_row
 
 from consult.config import Settings
@@ -83,3 +86,22 @@ def reset(conn: psycopg.Connection[DictRow]) -> None:
         conn.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
     conn.commit()
     init(conn)
+
+
+@contextmanager
+def as_role(conn: psycopg.Connection[DictRow], role: str) -> Iterator[None]:
+    """Run the block as one of the four NOLOGIN roles (docs/06, section 2.4).
+
+    The connection is the login user's; SET ROLE picks the grant set for
+    the stage and ingest writes, so the tests prove the grants are enough
+    and a missing one shows as a permission error rather than nothing.
+    RESET ROLE is skipped when the transaction has already failed, since
+    it would fail too and hide the real error; the rollback ends the
+    transaction and the role with it.
+    """
+    conn.execute(sql.SQL("SET ROLE {}").format(sql.Identifier(role)))
+    try:
+        yield
+    finally:
+        if conn.info.transaction_status != TransactionStatus.INERROR:
+            conn.execute("RESET ROLE")

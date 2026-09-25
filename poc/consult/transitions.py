@@ -106,6 +106,55 @@ def advance_consultation(conn: psycopg.Connection[DictRow], consultation_id: UUI
     return Advance(themes_ready, analysis_ready)
 
 
+def start_staging(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> None:
+    """Headers confirmed, stage job inserted: draft to staging (docs/02, section 6)."""
+    moved = conn.execute(
+        """
+        UPDATE consultation SET status = 'staging', status_changed_at = now()
+         WHERE id = %s AND status = 'draft'
+        """,
+        (consultation_id,),
+    ).rowcount
+    if moved != 1:
+        raise TransitionError(f"consultation {consultation_id} is not draft")
+
+
+def mark_staged(
+    conn: psycopg.Connection[DictRow],
+    consultation_id: UUID,
+    *,
+    upload_sha256: bytes,
+    row_count: int,
+) -> None:
+    """The stage job's final transaction: staging to staged, with what it
+    learned about the file (docs/04, section 1)."""
+    moved = conn.execute(
+        """
+        UPDATE consultation
+           SET status = 'staged', status_changed_at = now(),
+               upload_sha256 = %s, row_count = %s
+         WHERE id = %s AND status = 'staging'
+        """,
+        (upload_sha256, row_count, consultation_id),
+    ).rowcount
+    if moved != 1:
+        raise TransitionError(f"consultation {consultation_id} is not staging")
+
+
+def mark_processing(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> bool:
+    """The ingest job's last move: staged to processing. False rather than
+    an error when it's already there, because a second delivery of the
+    ingest message must finish quietly (docs/04, section 3)."""
+    moved = conn.execute(
+        """
+        UPDATE consultation SET status = 'processing', status_changed_at = now()
+         WHERE id = %s AND status = 'staged'
+        """,
+        (consultation_id,),
+    ).rowcount
+    return moved == 1
+
+
 def _move_question(
     conn: psycopg.Connection[DictRow], question_id: UUID, from_status: str, to_status: str
 ) -> None:
