@@ -64,8 +64,8 @@ def test_init_creates_every_table_the_design_names(blank_database: Settings) -> 
     assert main(["init"], settings=blank_database) == 0
 
     assert tables_in(blank_database) == DESIGN_TABLES
-    assert {"vault", "staging"} <= schemas_in(blank_database)
-    assert DESIGN_ROLES <= roles_in(blank_database)
+    assert schemas_in(blank_database) >= {"vault", "staging"}
+    assert roles_in(blank_database) >= DESIGN_ROLES
 
     # Running it twice is harmless: a second `init` on a live database
     # creates nothing and drops nothing.
