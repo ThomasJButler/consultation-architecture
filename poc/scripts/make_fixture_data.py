@@ -248,20 +248,24 @@ def _definition_workbook() -> Workbook:
         demographic.append([demographic_question.column_ref, demographic_question.text])
     closed = workbook.create_sheet("Closed questions")
     closed.append(["column_reference", "question_text", "response_type", "options"])
-    for question in CLOSED_QUESTIONS:
+    for closed_question in CLOSED_QUESTIONS:
         closed.append(
             [
-                question.column_ref,
-                question.text,
-                question.response_type,
-                ", ".join(question.options),
+                closed_question.column_ref,
+                closed_question.text,
+                closed_question.response_type,
+                ", ".join(closed_question.options),
             ]
         )
     opened = workbook.create_sheet("Open questions")
     opened.append(["column_reference", "question_text", "related_closed_column"])
-    for question in OPEN_QUESTIONS:
+    for open_question in OPEN_QUESTIONS:
         opened.append(
-            [question.column_ref, question.text, question.related_closed_column or NO_ANSWER]
+            [
+                open_question.column_ref,
+                open_question.text,
+                open_question.related_closed_column or NO_ANSWER,
+            ]
         )
     # Fixed so the metadata doesn't change on every run.
     stamp = datetime(2026, 9, 19, tzinfo=UTC)
