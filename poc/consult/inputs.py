@@ -43,15 +43,19 @@ class Refusal(StrEnum):
 @dataclass(frozen=True)
 class Caps:
     """The limits, with defaults that admit the largest consultations docs/02
-    section 1 assumes (over 100,000 responses) and refuse the absurd."""
+    section 1 assumes (over 100,000 responses) and refuse the absurd.
+
+    The cell and column defaults are Excel's own limits, 32,767 characters
+    and 16,384 columns (Microsoft Support, "Excel specifications and
+    limits", checked 25 September 2026; the row is in docs/01), so a file
+    Excel itself saved is never refused on either. docs/01 records single
+    answers of 4,000 words, which a lower cell cap would have turned away.
+    """
 
     max_upload_bytes: int = 200 * 1024 * 1024
     max_rows: int = 250_000
-    max_cell_chars: int = 20_000
+    max_cell_chars: int = 32_767
     max_zip_ratio: int = 100
-    # Excel's own limit on a worksheet is 16,384 columns (Microsoft Support,
-    # "Excel specifications and limits", checked 25 September 2026), so this
-    # refuses nothing a spreadsheet could have saved.
     max_columns: int = 16_384
 
 
