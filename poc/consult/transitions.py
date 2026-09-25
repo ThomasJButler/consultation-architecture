@@ -129,3 +129,16 @@ def finish_find_themes(
     advance = advance_consultation(conn, consultation_id)
     jobs.succeed(conn, lease)
     return advance
+
+
+def finish_map_themes(
+    conn: psycopg.Connection[DictRow], lease: Lease, question_id: UUID, consultation_id: UUID
+) -> Advance:
+    """The end of step 9 and the whole of step 10: same shape as the first,
+    with the other predicate inside advance_consultation."""
+    lock_consultation(conn, consultation_id)
+    jobs.heartbeat(conn, lease)
+    _move_question(conn, question_id, "assigning_themes", "complete")
+    advance = advance_consultation(conn, consultation_id)
+    jobs.succeed(conn, lease)
+    return advance
