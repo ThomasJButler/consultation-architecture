@@ -22,7 +22,7 @@ from typing import Final
 
 from openpyxl.workbook.workbook import Workbook
 
-from consult.inputs import DEFAULT_CAPS, Caps, guarded, open_workbook
+from consult.inputs import DEFAULT_CAPS, Caps, check_cell, check_width, guarded, open_workbook
 
 SHEETS: Final[dict[str, tuple[str, ...]]] = {
     "Demographic questions": ("column_reference", "question_text"),
@@ -98,20 +98,28 @@ def _cell(value: object) -> str:
     return "" if value is None else str(value).strip()
 
 
-def _rows(workbook: Workbook, sheet: str, problems: list[str]) -> Iterator[dict[str, str]]:
-    """Each data row of a sheet as a dict by header, after checking the header."""
+def _rows(
+    workbook: Workbook, sheet: str, problems: list[str], caps: Caps
+) -> Iterator[dict[str, str]]:
+    """Each data row of a sheet as a dict by header, after checking the header.
+
+    The same cell and width caps as the responses file: the workbook is
+    smaller and the policy team's own, but it's still an upload.
+    """
     if sheet not in workbook.sheetnames:
         problems.append(f"{sheet}: sheet missing")
         return
     worksheet = workbook[sheet]
-    rows = guarded(worksheet.iter_rows(values_only=True))
-    header = tuple(_cell(value) for value in next(rows, ()))
+    rows = (
+        check_width(tuple(check_cell(_cell(value), caps) for value in row), caps)
+        for row in guarded(worksheet.iter_rows(values_only=True))
+    )
+    header = next(rows, ())
     expected = SHEETS[sheet]
     if header[: len(expected)] != expected:
         problems.append(f"{sheet}: headers must be {', '.join(expected)}")
         return
-    for row in rows:
-        values = tuple(_cell(value) for value in row)
+    for values in rows:
         if not any(values):
             continue
         yield dict(zip(expected, values, strict=False))
@@ -122,14 +130,14 @@ def read_definition(path: Path, caps: Caps = DEFAULT_CAPS) -> Definition:
     with open_workbook(path, caps) as workbook:
         demographic = tuple(
             DemographicQuestion(row["column_reference"], row["question_text"])
-            for row in _rows(workbook, "Demographic questions", problems)
+            for row in _rows(workbook, "Demographic questions", problems, caps)
         )
         closed: list[ClosedQuestion] = []
         # Every closed column reference, bad response type or not, so one
         # problem doesn't cascade into a second on the open question that
         # follows it up.
         closed_refs: set[str] = set()
-        for row in _rows(workbook, "Closed questions", problems):
+        for row in _rows(workbook, "Closed questions", problems, caps):
             closed_refs.add(row["column_reference"])
             try:
                 kind = ResponseType(row["response_type"])
@@ -148,7 +156,7 @@ def read_definition(path: Path, caps: Caps = DEFAULT_CAPS) -> Definition:
                 )
             )
         opened: list[OpenQuestion] = []
-        for row in _rows(workbook, "Open questions", problems):
+        for row in _rows(workbook, "Open questions", problems, caps):
             related = row["related_closed_column"]
             opened.append(
                 OpenQuestion(
