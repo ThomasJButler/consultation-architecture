@@ -9,11 +9,21 @@ never in it, because the report never holds one.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict
 from pathlib import Path
 
 from consult.definition import Definition
 from consult.validate import ColumnKind, Report, Warning
+
+# A cell can hold a newline (any textarea) or an escape sequence (a crafted
+# file), and either would let a respondent write a line of this report or
+# a terminal command into it. Shown as their escaped form instead.
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def shown(text: str) -> str:
+    return _CONTROL.sub(lambda match: repr(match.group())[1:-1], text)
 
 
 def _resolutions(warning: Warning) -> str:
@@ -26,11 +36,11 @@ def _resolutions(warning: Warning) -> str:
 def _warning_line(warning: Warning) -> str:
     what = ""
     if warning.value is not None:
-        what = f'"{warning.value}" x{warning.count}'
+        what = f'"{shown(warning.value)}" x{warning.count}'
         if warning.example_rows:
             what += ", rows " + ", ".join(str(no) for no in warning.example_rows)
         what += ": "
-    return f"  {warning.kind.value:<24}{warning.column_ref:<16}{what}{_resolutions(warning)}"
+    return f"  {warning.kind.value:<24}{shown(warning.column_ref):<16}{what}{_resolutions(warning)}"
 
 
 def render(report: Report, responses: Path, definition: Definition, workbook: Path) -> str:
@@ -41,18 +51,18 @@ def render(report: Report, responses: Path, definition: Definition, workbook: Pa
     ]
     if report.errors:
         lines.append(f"errors: {len(report.errors)}")
-        lines.extend(f"  {error}" for error in report.errors)
+        lines.extend(f"  {shown(error)}" for error in report.errors)
     else:
         lines.append("errors: none")
     lines.append(f"warnings: {len(report.warnings)}")
     lines.extend(_warning_line(warning) for warning in report.warnings)
     lines.append("columns:")
     for column in report.columns:
-        line = f"  {column.column_ref:<16}{column.kind.value:<13}"
+        line = f"  {shown(column.column_ref):<16}{column.kind.value:<13}"
         if column.kind is not ColumnKind.UNMATCHED:
             line += f"answered {column.answered}, not answered {column.not_answered}"
         if column.values:
-            line += ": " + ", ".join(f"{value} {count}" for value, count in column.values)
+            line += ": " + ", ".join(f"{shown(value)} {count}" for value, count in column.values)
         lines.append(line)
     estimate = report.estimate
     lines.append(

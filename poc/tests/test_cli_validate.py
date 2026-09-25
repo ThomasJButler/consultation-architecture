@@ -113,4 +113,5 @@ def test_a_cell_cannot_forge_a_line_of_the_report(
     assert "\x1b" not in out
     assert "FORGED" in out
     assert "\n  FORGED" not in out
-    assert out.count("errors: ") == 1
+    # One real "errors:" line; the forged one is text inside a value now.
+    assert out.count("\nerrors: ") == 1
