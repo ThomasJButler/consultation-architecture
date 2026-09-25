@@ -42,23 +42,29 @@ Built: the plan, the scaffold, the design documents (brief, research,
 architecture, seven decision records, data model, cost model, security notes
 and threat model), both diagrams and a first draft of the submission with a
 rendered PDF, reconciled in PR-02b before the schema was typed from `docs/04`.
-In review: the proof-of-concept scaffold (PR-03): the Python project under
+Merged: the proof-of-concept scaffold (PR-03): the Python project under
 `poc/`, the schema typed from `docs/04` with its four roles, `consult init`
-(`poc/README.md` says how to run it), the test harness on a real Postgres, a fictional fixture consultation in the
-real file format, the model fakes, the logging policy pinned by a test, and
-CI running the whole gate against Postgres 17. Planned: parsing and
-validation (PR-04), the mechanics (PR-05 to PR-09), final polish (PR-10).
-Deliberately not built: see above.
+(`poc/README.md` says how to run it), the test harness on a real Postgres,
+a fictional fixture consultation in the real file format, the model fakes,
+the logging policy pinned by a test, and CI running the whole gate against
+Postgres 17. In review: parsing and validation (PR-04): the definition
+workbook and responses file readers, the validator from `docs/02` section
+3.2 with its warnings and resolutions, the input guards from the threat
+model, the cost estimate from `docs/05`, and `consult validate`. Planned:
+the mechanics (PR-05 to PR-09), final polish (PR-10). Deliberately not
+built: see above.
 
 ## How it was built
 
 Test-first, with the checks in CI: ruff, mypy, pytest against a real Postgres,
-pip-audit and bandit (from PR-03 onwards). Every pull request was reviewed
+pip-audit and bandit (from PR-03 onwards). PR-01 to PR-03 were reviewed
 before merging by [ReviewBot Protocol](https://github.com/ThomasJButler/ReviewBotProtocol),
 a code-review tool I built and run myself: several open-weight models read the
 diff independently on my own machine, their findings are compared, and nothing
-leaves the device. It scales by adding models, not by sending code anywhere.
-What each review found, and what I did about it, is in `docs/07-reviews.md`.
+leaves the device. From PR-04 the review pass is a Claude code review and a
+Claude security review, run the same way: findings verified, fixed on the
+branch or kept with a reason. What each review found, and what I did about
+it, is in `docs/07-reviews.md`.
 I used Claude throughout, to research, to stress-test alternatives and to
 draft; the decisions are mine.
 
