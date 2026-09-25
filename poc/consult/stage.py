@@ -25,13 +25,15 @@ from consult import transitions
 from consult.inputs import DEFAULT_CAPS, Caps
 from consult.responses import Responses
 from consult.store import as_role
+from consult.validate import MAX_HEADER_BYTES
 
 INGEST_ROLE = "consult_ingest"
 
 
 class StageError(Exception):
-    """The file's header can't be a table: a blank or repeated name. The
-    validator reports these as errors first; this is the backstop."""
+    """The file's header can't be a table: a blank or repeated name, or one
+    Postgres would truncate. The validator reports these as errors first;
+    this is the backstop. The message carries counts, never a cell."""
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,9 @@ def stage(
     header = responses.header
     if "" in header or len(set(header)) != len(header):
         raise StageError(f"{len(header)} headers, not all distinct and named")
+    too_long = sum(len(name.encode()) > MAX_HEADER_BYTES for name in header)
+    if too_long:
+        raise StageError(f"{too_long} headers over {MAX_HEADER_BYTES} bytes")
     transitions.start_staging(conn, consultation_id)
     table = staging_table(consultation_id)
     columns = [sql.Identifier(name) for name in header]
