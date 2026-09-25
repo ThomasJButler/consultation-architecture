@@ -7,8 +7,10 @@ commit body: the settings tests went in green with the settings they check
 (PR-03's project, PR-04's caps and rates), the repo rules with the
 documents, and PR-05's named proofs (the stale-lease takeover, the
 positive-list predicate, the fan-in race pair) after the code they prove,
-as that plan said they might. Every other test here has a `Pin ...` commit
-ahead of the code it holds.
+as that plan said they might, and PR-06's vault refusal and vault repo
+rule, which pass on the grants PR-03 wrote and were pinned so a later
+`GRANT` turns them red. Every other test here has a `Pin ...` commit ahead
+of the code it holds.
 
 ## Running
 
@@ -50,7 +52,7 @@ pull requests add that take more than a few seconds. `pytest.ini` sets
 | `test_fakes.py` | `RecordingLLM` keeps every prompt and answers well; `FakeLLM` answers with what it was told to, including each fault in `THREAT_MODEL.md` row 3, and raises when its script runs out | nothing |
 | `test_store.py` | A failed job stores an error code and a provider request id; every column of `job` that can hold a string is on a named allow-list and `params` is held to a JSON object; the code vocabulary is a `CHECK` that names exactly the enum's values; a stale fence writes nothing | Postgres |
 | `test_logs.py` | The formatter keeps ids, counts, durations, states and codes and drops everything else by name and by shape; a sentence as a message becomes a marker; an exception contributes its class and never its message | nothing |
-| `test_repo_rules.py` | Every test module that needs a database is marked `db`, and only those; nothing outside `transitions.py` writes `consultation.status` | nothing |
+| `test_repo_rules.py` | Every test module that needs a database is marked `db`, and only those; nothing outside `transitions.py` writes `consultation.status`; nothing on the pipeline path names the `vault` schema | nothing |
 | `test_jobs.py` | The claim returns the fence and refuses a live lease; a lease stale for ten minutes can be taken over and the fence moves on; a zombie's heartbeat, checkpoint and failure record are all refused, and the checkpoint INSERT refuses a stale fence on its own without the heartbeat in front; checkpoints are idempotent and a worker resumes from the last one | Postgres |
 | `test_transitions.py` | Fan-in 1 flips the consultation behind the row lock and writes one `themes_ready` row naming the pass; its predicate waits for configured and finding questions and not for failed or signed-off ones; fan-in 2 needs every question complete; the sign-off guard admits one reviewer, freezes v2 with the fallbacks and queues one map job; a reopen mints a run id so the second email has its own row; every transition stamps `status_changed_at`; a reopen of a consultation that isn't ready and a second finish of a question already moved on both refuse and change nothing | Postgres |
 | `test_fan_in_race.py` | Twenty threaded finishers on twenty connections flip the consultation exactly once with one email row (marked `slow`); and without the row lock two finishers lose the update, hand-stepped on two connections, which the reconciler's fourth statement then frees | Postgres |
@@ -62,6 +64,11 @@ pull requests add that take more than a few seconds. `pytest.ini` sets
 | `test_inputs.py` | A file over the size cap, a zip that declares far more than it holds, an XLSX that isn't a zip, an entity declaration in the workbook's XML, a cell over the length cap, a row over the width cap, a file over the row cap, XML cut short, a CSV in the wrong encoding and a missing file are each refused with a reason and a count and never the content (`THREAT_MODEL.md`, row 1); the cell and width caps default to Excel's own limits and apply to the definition workbook as well | nothing |
 | `test_cost.py` | The estimate reproduces `docs/05` section 2 (2.83M tokens, £3.97 cached, £5.09 uncached per 5,000 open answers), the rates are settings, and the assumptions print with the number | nothing |
 | `test_cli_validate.py` | `consult validate` prints the report and exits 0, 1 on an error, 2 on a refusal, and never quotes an open answer; a newline or an escape sequence in a cell can't forge a line of the report; `--json` prints the report as a document with the same counts, warnings and estimate | nothing |
+| `test_stage.py` | The file is copied into one logged table per upload in the `staging` schema, named by the consultation id, every column text plus the file's row number; the consultation records the file's sha256 and row count and moves to staged | Postgres |
+| `test_configure.py` | The fixture's questions become rows with kind, response type, ordinal and the follow-up's related question; options are rows with the comma option merged back into one; `column_roles` names the id and ignored columns; `value_policy` carries the `N/A` decision and the `Unsure` mapping | Postgres |
+| `test_ingest.py` | The long table against counts read from the CSV: one row per respondent per question, one per chosen option for the multi-select, a blank row for `-` and empty cells, open answers with their hash; `attrs` as `docs/04` section 5 describes and equal to what SQL rebuilds from the answer rows; the proforma flagged at answer and respondent level with nothing deleted; one pending `find_themes` job per open question on the consultation's run id, the consultation processing and the staging table dropped; four runs over one table leave the same rows and report zeros after the first; a repeated respondent id refused before a row is written unless the resolution keeps the first or ignores the column | Postgres |
+| `test_vault.py` | Every email lands in `vault.respondent_identity` under the right department and nowhere else; `SET ROLE consult_pipeline` then a read or a write of the vault is refused at the schema | Postgres |
+| `test_cli_ingest.py` | `consult ingest` takes the fixtures to a processing consultation another connection can see, prints counts and ids and never a value from the file, and leaves the database empty after a definition error or a refused file | Postgres |
 
 ## What is proved, and what is not yet
 
@@ -70,5 +77,6 @@ are proved here, each by a named test: the fan-in transaction
 (`test_fan_in_race.py`), lease takeover with a fence (`test_jobs.py`) and
 idempotent tag inserts (`test_tags.py`). The fourth, the indexed filter
 query, is PR-09 (`plans/00-plan.md`). The vault refusal for the pipeline
-role is PR-06. PR-04's parsing and validator tests are all pure:
-`pytest -m 'not db'` runs every one of them.
+role, promised in `docs/06` section 2.4, is `test_vault.py`. PR-04's
+parsing and validator tests are all pure: `pytest -m 'not db'` runs every
+one of them.

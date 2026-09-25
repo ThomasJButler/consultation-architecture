@@ -5,9 +5,11 @@ to claim and hard to get right: the job pipeline's claim, lease and fan-in
 mechanics on a real Postgres, with a fake model so it runs offline. The
 design is `docs/02-architecture.md`; the schema is typed from
 `docs/04-data-model.md`. PR-03 laid the scaffold, PR-04 the parsing and
-validation in front of it, and PR-05 proves three of the four mechanics
-with named tests; the section "What it does not prove" says what is left,
-and `TESTING.md` which pull request proves it. This is not the product, and `../README.md` says
+validation in front of it, PR-05 proves three of the four mechanics with
+named tests, and PR-06 takes a file into the schema end to end, so the
+minimum proof-of-concept runs from a spreadsheet to a processing
+consultation with no model yet; the section "What it does not prove" says
+what is left, and `TESTING.md` which pull request proves it. This is not the product, and `../README.md` says
 what it deliberately leaves out.
 
 ## Run it
@@ -19,24 +21,28 @@ make venv                       # Python 3.12; every dependency pinned
 make init                       # consult init: apply schema.sql
 make check                      # the gate CI runs
 make validate                   # consult validate on the fixtures
+make ingest                     # consult ingest on the fixtures: a consultation in processing
 ```
 
 `make reset` (`consult init --reset`) drops everything the schema creates
 and applies it again. There is no migration tool: a proof-of-concept
 changes its schema by rewriting `consult/schema.sql` and resetting.
 
-## What is here (PR-03 to PR-05)
+## What is here (PR-03 to PR-06)
 
 | Path | What it is |
 |---|---|
 | `consult/schema.sql` | Fourteen of the design's sixteen tables (`docs/04`, section 8 says which two stay out), the `vault` and `staging` schemas, the four roles and their grants |
 | `consult/store.py` | Connections with dict rows, `init`, `reset`, `record_failure` |
-| `consult/cli.py` | `consult init [--reset]`; `consult validate RESPONSES --definition WORKBOOK [--json]` |
+| `consult/cli.py` | `consult init [--reset]`; `consult validate RESPONSES --definition WORKBOOK [--json]`; `consult ingest RESPONSES --definition WORKBOOK --name NAME --department NAME` |
 | `consult/definition.py` | The definition workbook, read into typed questions (`docs/00`) |
 | `consult/responses.py` | The responses file, CSV or XLSX, one row at a time |
 | `consult/tokenise.py` | Multi-select cells matched by longest match against the option vocabulary, never split on commas |
 | `consult/validate.py` | The validator from `docs/02` section 3.2: errors, warnings with resolutions, distinct values with counts |
 | `consult/inputs.py` | The input guards from `THREAT_MODEL.md` row 1, with the caps as settings |
+| `consult/stage.py` | The file into one logged table per upload in the `staging` schema, by COPY, as the ingest role (`docs/02`, step 2; `docs/04`, section 2) |
+| `consult/configure.py` | Questions, options, `column_roles` and `value_policy` from the definition, the report and the reviewer's resolutions (`docs/02`, step 3) |
+| `consult/ingest.py` | The long answer table, `respondent.attrs`, the vault rows, both duplicate flags, the `find_themes` jobs and the processing edge, in one transaction that a redelivery repeats harmlessly (`docs/02`, step 3a; ADR-004) |
 | `consult/cost.py` | The token and cost estimate from `docs/05`, with its assumptions printed |
 | `consult/report.py` | The report rendered for a terminal or as JSON |
 | `consult/jobs.py` | The claim with its fence, the heartbeat, the checkpoint, the failure record and the success mark, every write fenced (`docs/02`, step 5; ADR-002) |
@@ -56,8 +62,9 @@ changes its schema by rewriting `consult/schema.sql` and resetting.
 and `consult_admin` as `NOLOGIN` roles (`docs/06`, section 2.4 as
 corrected). A connection is made as the login user in `.env` and `SET ROLE`
 picks the grant set. The pipeline role has no grant on the `vault` schema
-at all; only `consult_admin` holds `DELETE` anywhere. PR-06 will connect as
-the pipeline role and expect the vault to refuse it.
+at all; only `consult_admin` holds `DELETE` anywhere. `tests/test_vault.py`
+connects as the pipeline role and the vault refuses it, at the schema, for
+a read and for a write.
 
 ## The fixtures
 
@@ -85,8 +92,9 @@ proforma repeated word for word, and one answer starting with `=`.
 - The indexed filter query, the fourth mechanic; that's PR-09 with its
   `EXPLAIN` at 20,000 rows. The other three are proved in `TESTING.md`'s
   named tests.
-- That the mechanics compose into a running pipeline: the worker loop and
-  the reconciler are PR-08, and ingest is PR-06.
+- That the mechanics compose into a running pipeline. Ingest takes a file
+  to a processing consultation with its `find_themes` jobs pending; the
+  worker loop and the reconciler that pick them up are PR-08.
 
 ## Pre-commit
 
