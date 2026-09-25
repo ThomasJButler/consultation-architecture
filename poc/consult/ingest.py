@@ -7,8 +7,10 @@ row with is_blank set so the denominator can be counted (ADR-004). What a
 cell means is the configure step's decision, carried on the question as
 its value policy (docs/02, section 3.2): N/A kept or not answered, an
 unknown value mapped to an option or not answered. Open answers keep
-their text and a hash of it. Every insert lands on a key docs/04 section
-3 names with ON CONFLICT DO NOTHING, so a second delivery of the ingest
+their text and a hash of it. Identity columns go to the vault schema and
+nowhere else, through the ingest role's INSERT-only grant (docs/06,
+section 2.4 as corrected). Every insert lands on a key docs/04 section 3
+names with ON CONFLICT DO NOTHING, so a second delivery of the ingest
 message finds the rows already there. Runs as the ingest role. Nothing
 here commits.
 """
@@ -36,6 +38,7 @@ NOT_APPLICABLE = "N/A"
 class Ingested:
     respondents: int
     answers: int
+    vault_rows: int
     duplicate_answers: int
     duplicate_respondents: int
 
@@ -135,8 +138,10 @@ def _answers_for(question: _Question, cell: str) -> list[Answer]:
 def ingest(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> Ingested:
     config = _load(conn, consultation_id)
     answered = [q for q in config.questions if q.kind != "identity"]
+    identity = [q for q in config.questions if q.kind == "identity"]
     respondents = 0
     answers = 0
+    vault_rows = 0
     with as_role(conn, INGEST_ROLE):
         rows = conn.execute(
             sql.SQL("SELECT * FROM {} ORDER BY row_no").format(staging_table(consultation_id))
@@ -178,8 +183,49 @@ def ingest(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> Ingested
                 batch,
             )
             answers += len(batch)
+            vault_rows += _vault(conn, config, respondent_id, row, identity)
         duplicate_answers, duplicate_respondents = _flag_duplicates(conn, consultation_id)
-    return Ingested(respondents, answers, duplicate_answers, duplicate_respondents)
+    return Ingested(
+        respondents=respondents,
+        answers=answers,
+        vault_rows=vault_rows,
+        duplicate_answers=duplicate_answers,
+        duplicate_respondents=duplicate_respondents,
+    )
+
+
+def _vault(
+    conn: psycopg.Connection[DictRow],
+    config: _Configured,
+    respondent_id: int,
+    row: DictRow,
+    identity: list[_Question],
+) -> int:
+    """Identity columns to the vault and nowhere else: one row per filled
+    cell, written as the ingest role, whose only grant on the schema is
+    INSERT (docs/06, section 2.4 as corrected). Returns the rows written,
+    which on a replay is none."""
+    batch = [
+        (config.department_id, respondent_id, question.column_ref, cell)
+        for question in identity
+        if (cell := row.get(question.column_ref) or "") not in ("", NO_ANSWER)
+    ]
+    if not batch:
+        return 0
+    # No conflict target on purpose. Naming the key columns makes Postgres
+    # check SELECT on them as well as INSERT, and the ingest role holds only
+    # INSERT here; the bare form infers nothing and needs nothing more
+    # (measured in this repo on PostgreSQL 17.11, 25 September 2026).
+    cursor = conn.cursor()
+    cursor.executemany(
+        """
+        INSERT INTO vault.respondent_identity (department_id, respondent_id, column_ref, value_text)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT DO NOTHING
+        """,
+        batch,
+    )
+    return cursor.rowcount
 
 
 def _flag_duplicates(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> tuple[int, int]:
