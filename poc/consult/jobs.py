@@ -113,7 +113,12 @@ def checkpoint(
     tokens_out: int = 0,
 ) -> bool:
     """Record one batch. False means it was already there, which is what a
-    replay after takeover looks like (ADR-002)."""
+    replay after takeover looks like (ADR-002).
+
+    The INSERT selects from the job row under the fence as well, so it
+    refuses a stale lease on its own and not only through the heartbeat's
+    row lock, which lasts only as long as the caller's transaction.
+    """
     heartbeat(conn, lease)
     cursor = conn.execute(
         """
@@ -121,11 +126,15 @@ def checkpoint(
                                trace_id, tokens_in, tokens_out)
         SELECT department_id, id, %(batch_no)s, %(stage)s, %(answer_ids)s, %(status)s,
                %(trace_id)s, %(tokens_in)s, %(tokens_out)s
-          FROM job WHERE id = %(job_id)s
+          FROM job
+         WHERE id = %(job_id)s AND claimed_by = %(worker)s
+           AND attempts = %(fence)s AND status = 'running'
         ON CONFLICT (job_id, batch_no) DO NOTHING
         """,
         {
             "job_id": lease.job_id,
+            "worker": lease.worker,
+            "fence": lease.fence,
             "batch_no": batch_no,
             "stage": stage,
             "answer_ids": list(answer_ids),
@@ -135,7 +144,16 @@ def checkpoint(
             "tokens_out": tokens_out,
         },
     )
-    return cursor.rowcount == 1
+    if cursor.rowcount == 1:
+        return True
+    # Zero rows is either a replay (the batch is already there) or a lost
+    # lease (the SELECT found no job); tell them apart before answering.
+    existing = conn.execute(
+        "SELECT 1 FROM job_batch WHERE job_id = %s AND batch_no = %s", (lease.job_id, batch_no)
+    ).fetchone()
+    if existing is None:
+        raise LeaseLostError(lease)
+    return False
 
 
 def record_failure(
