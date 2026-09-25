@@ -284,3 +284,28 @@ def test_a_repeated_or_blank_header_is_an_error_and_a_column_is_listed_once(tmp_
         "o_reason",
     ]
     assert report.row_count == 1
+
+
+def test_an_unknown_multi_select_token_is_a_warning_with_the_three_resolutions(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "responses.csv"
+    path.write_text('c_modes\n"Cycle, Skateboard"\nWalk\nSkateboard\n', encoding="utf-8")
+    definition = Definition(
+        demographic=(),
+        closed=(ClosedQuestion("c_modes", "How?", ResponseType.MULTI_SELECT, ("Cycle", "Walk")),),
+        open=(),
+    )
+    (unknown,) = warnings_of(validate(definition, Responses(path)), WarningKind.UNKNOWN_VALUE)
+    assert (unknown.column_ref, unknown.value, unknown.count, unknown.example_rows) == (
+        "c_modes",
+        "Skateboard",
+        2,
+        (2, 4),
+    )
+    assert unknown.resolutions == (
+        Resolution.MAP_TO_OPTION,
+        Resolution.ADD_AS_OPTION,
+        Resolution.TREAT_AS_NOT_ANSWERED,
+    )
+    assert unknown.default is Resolution.MAP_TO_OPTION

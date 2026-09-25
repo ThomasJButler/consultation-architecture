@@ -12,8 +12,10 @@ import csv
 import inspect
 from pathlib import Path
 
+import pytest
 from openpyxl import Workbook
 
+from consult.inputs import Caps, InputError
 from consult.responses import Responses, Row
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "responses.csv"
@@ -82,6 +84,12 @@ def test_the_responses_reader_streams_rows_and_keeps_the_markers_as_written(tmp_
     assert inspect.isgenerator(rows)
     assert next(rows) == EXPECTED[0]
     rows.close()
+    # And it really is one row at a time: with a cap of one row, the first
+    # row still arrives before the cap refuses the second.
+    capped = Responses(write_csv(tmp_path / "capped.csv"), Caps(max_rows=1)).rows()
+    assert next(capped) == EXPECTED[0]
+    with pytest.raises(InputError):
+        next(capped)
 
 
 def test_a_short_row_is_padded_and_a_long_one_is_cut_to_the_header(tmp_path: Path) -> None:
