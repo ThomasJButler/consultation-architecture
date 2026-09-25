@@ -22,6 +22,7 @@ from uuid import UUID
 import psycopg
 from psycopg import sql
 from psycopg.rows import DictRow
+from psycopg.types.json import Jsonb
 
 from consult.stage import INGEST_ROLE, staging_table
 from consult.store import as_role
@@ -142,14 +143,28 @@ def ingest(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> Ingested
             external_id = (
                 row.get(config.respondent_id_column) if config.respondent_id_column else None
             )
+            per_question = [
+                (question, _answers_for(question, row.get(question.column_ref) or ""))
+                for question in answered
+            ]
+            # The filter read model, cut from the same cells as the answer
+            # rows so the two can't drift on the way in: every demographic
+            # and closed answer keyed by column, values always arrays, a
+            # blank absent (docs/04, section 5).
+            attrs: dict[str, list[str]] = {}
+            for question, cells in per_question:
+                if question.kind in ("demographic", "closed"):
+                    values = [value for _option, value, blank, _sha in cells if not blank and value]
+                    if values:
+                        attrs[question.column_ref] = values
             respondent_id = _respondent(
-                conn, config, consultation_id, row["row_no"], external_id or None
+                conn, config, consultation_id, row["row_no"], external_id or None, attrs
             )
             respondents += 1
             batch = [
                 (config.department_id, consultation_id, respondent_id, question.id, *answer)
-                for question in answered
-                for answer in _answers_for(question, row.get(question.column_ref) or "")
+                for question, cells in per_question
+                for answer in cells
             ]
             conn.cursor().executemany(
                 """
@@ -170,15 +185,16 @@ def _respondent(
     consultation_id: UUID,
     row_no: int,
     external_id: str | None,
+    attrs: dict[str, list[str]],
 ) -> int:
     inserted = conn.execute(
         """
-        INSERT INTO respondent (department_id, consultation_id, external_id, source_row_no)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO respondent (department_id, consultation_id, external_id, source_row_no, attrs)
+        VALUES (%s, %s, %s, %s, %s)
         ON CONFLICT (consultation_id, source_row_no) DO NOTHING
         RETURNING id
         """,
-        (config.department_id, consultation_id, external_id, row_no),
+        (config.department_id, consultation_id, external_id, row_no, Jsonb(attrs)),
     ).fetchone()
     if inserted is not None:
         return int(inserted["id"])
