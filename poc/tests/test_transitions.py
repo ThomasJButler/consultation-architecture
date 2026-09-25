@@ -84,3 +84,31 @@ def test_fan_in_one_flips_the_consultation_and_writes_one_outbox_row(
     # finds nothing to do: no second flip, no second row.
     assert advance_consultation(db, consultation_id) == Advance(False, False)
     assert len(outbox_rows(db, consultation_id)) == 1
+
+
+def set_status(db: psycopg.Connection[DictRow], question_id: object, status: str) -> None:
+    db.execute("UPDATE question SET status = %s WHERE id = %s", (status, question_id))
+
+
+def test_fan_in_one_waits_for_configured_and_finding_and_not_for_failed_or_signed_off(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    consultation_id = make_consultation(db, make_department(db), status="processing")
+    make_open_question(db, consultation_id, "o_quick", status="signed_off", ordinal=1)
+    make_open_question(db, consultation_id, "o_failed", status="find_failed", ordinal=2)
+    third = make_open_question(db, consultation_id, "o_third", ordinal=3)
+    fourth = make_open_question(db, consultation_id, "o_fourth", status="configured", ordinal=4)
+
+    # A sibling still configured holds the milestone back.
+    lease = claim(db, make_queued_job(db, consultation_id, third), "worker-1")
+    assert lease is not None
+    assert finish_find_themes(db, lease, third, consultation_id) == Advance(False, False)
+
+    # Once it has run, the failed sibling and the one a quick reviewer has
+    # already signed off don't: four ready questions shouldn't wait on an
+    # operator, and the signed-off one is past the milestone (docs/02, step 7).
+    set_status(db, fourth, "finding_themes")
+    lease = claim(db, make_queued_job(db, consultation_id, fourth), "worker-1")
+    assert lease is not None
+    assert finish_find_themes(db, lease, fourth, consultation_id) == Advance(True, False)
+    assert consultation_row(db, consultation_id)["status"] == "awaiting_review"
