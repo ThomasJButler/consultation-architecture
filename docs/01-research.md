@@ -150,3 +150,4 @@ The shape that matters: the median consultation is small, the tail is enormous, 
 | GRA: 103,833 / 102,818, 28 open questions, ~860,000 answers, 37M+ words, 4,000-word answers, 64% third-party forms | https://assets.publishing.service.gov.uk/media/5f69ba7ee90e077f5b8be9cd/Analysis_of_responses_Gender_Recognition_Act.pdf | 19 Sep 2026 | verified by fetch today (PDF text extracted locally) |
 | GRA average answer length ~43 words | 37 million words over 860,000 answers | 19 Sep 2026 | rounded |
 | IWC campaign share "nine in ten" | 45,169 of 50,114 | 19 Sep 2026 | rounded |
+| Excel limits: 32,767 characters a cell, 16,384 columns a worksheet (the proof-of-concept's cell and width caps) | https://support.microsoft.com/en-us/office/excel-specifications-and-limits-1672b34d-7043-467e-8e27-269d656771c3 | 25 Sep 2026 | verified by fetch today |

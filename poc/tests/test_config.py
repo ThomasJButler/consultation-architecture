@@ -39,3 +39,23 @@ def test_a_dotenv_line_without_an_equals_sign_is_refused(tmp_path: Path) -> None
     dotenv.write_text("CONSULT_DB_PASSWORD\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="KEY=value"):
         read_dotenv(dotenv)
+
+
+def test_the_caps_and_rates_come_from_settings(tmp_path: Path) -> None:
+    settings = load(
+        env={
+            "CONSULT_DB_PASSWORD": "x",
+            "CONSULT_MAX_ROWS": "12",
+            "CONSULT_TOKENS_PER_ANSWER": "60",
+            "CONSULT_GBP_PER_USD": "0.8",
+        },
+        dotenv_path=tmp_path / "absent",
+    )
+    assert settings.caps.max_rows == 12
+    assert settings.rates.tokens_per_answer == 60
+    assert settings.rates.gbp_per_usd == 0.8
+    with pytest.raises(ConfigError, match="CONSULT_GBP_PER_USD"):
+        load(
+            env={"CONSULT_DB_PASSWORD": "x", "CONSULT_GBP_PER_USD": "free"},
+            dotenv_path=tmp_path / "absent",
+        )

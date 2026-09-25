@@ -3,7 +3,7 @@
 # on the path (CI installs into the runner's interpreter).
 PY ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python)
 
-.PHONY: check lint type test test-pure audit venv init reset fixtures
+.PHONY: check lint type test test-pure audit venv init reset fixtures validate
 
 check: lint type test audit
 
@@ -38,3 +38,6 @@ reset:
 
 fixtures:
 	$(PY) scripts/make_fixture_data.py
+
+validate:
+	$(PY) -m consult.cli validate tests/fixtures/responses.csv --definition tests/fixtures/definition.xlsx
