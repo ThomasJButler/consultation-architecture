@@ -188,12 +188,25 @@ def _never_apart(tally: _Tally, options: tuple[str, ...]) -> Iterable[Warning]:
 
 
 def validate(definition: Definition, responses: Responses, rates: Rates = DEFAULT_RATES) -> Report:
-    header = responses.header
+    # Cells are keyed by header (consult.responses), so a repeated name
+    # would lose a column without a trace and a blank one has no key at
+    # all. Both block, and every column is described once, in file order.
     errors = [
+        f"column {position} of the responses file has no name"
+        for position, name in enumerate(responses.header, start=1)
+        if not name
+    ]
+    errors.extend(
+        f"header {name} appears twice in the responses file"
+        for name, count in Counter(responses.header).items()
+        if name and count > 1
+    )
+    header = tuple(name for name in dict.fromkeys(responses.header) if name)
+    errors.extend(
         f"column {ref} is in the definition but not in the responses file"
         for ref in definition.column_refs
         if ref not in header
-    ]
+    )
     demographic = {q.column_ref for q in definition.demographic}
     closed = definition.closed_by_ref
     opened = {q.column_ref for q in definition.open}
@@ -219,6 +232,8 @@ def validate(definition: Definition, responses: Responses, rates: Rates = DEFAUL
     for row in responses.rows():
         row_count += 1
         for ref, cell in row.cells.items():
+            if ref not in tallies:
+                continue
             tally = tallies[ref]
             if tally.kind is ColumnKind.UNMATCHED:
                 if ref in id_columns and cell not in ("", NO_ANSWER):
