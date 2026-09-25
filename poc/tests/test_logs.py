@@ -15,6 +15,8 @@ import sys
 import time
 from uuid import UUID
 
+import pytest
+
 from consult.logs import Formatter, configure, log_event
 
 JOB_ID = UUID("0b6a5f3c-2d1e-4f7a-9c8b-1a2b3c4d5e6f")
@@ -93,10 +95,52 @@ def test_the_formatter_drops_a_value_shaped_like_prose_whatever_its_name() -> No
         "job_failed",
         error_code="502 Bad Gateway while sending the prompt",
         status="failed_retryable",
-        worker_id="worker-1@ip-10-0-0-7",
+        worker_id="worker-1.ip-10-0-0-7",
         answer_ids=[1, 2, 3],
+        # An identifier column in an upload is an email address often enough
+        # (docs/00) that an id-named field can carry one; the shape rule, not
+        # the name rule, is what has to drop it.
+        external_id="jane.doe@example.org",
     )
-    assert line.endswith("job_failed status=failed_retryable worker_id=worker-1@ip-10-0-0-7")
+    assert line.endswith("job_failed status=failed_retryable worker_id=worker-1.ip-10-0-0-7")
+    assert "@" not in line
+
+
+def test_the_formatter_keeps_to_one_line_whatever_arrives() -> None:
+    # `$` in a Python regex also matches before a trailing newline, so a
+    # value read from a header or a file with its newline still on would
+    # split the entry in two unless the match is a full match.
+    line = render(
+        Formatter(),
+        "job_failed\n",
+        job_id=JOB_ID,
+        provider_request_id="req_01J8ZW4\n",
+        attempts=1,
+    )
+    assert "\n" not in line
+    assert line.endswith(f"message_dropped attempts=1 job_id={JOB_ID}")
+
+
+def test_a_mismatched_call_logs_a_marker_and_prints_nothing_to_stderr(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # logging.Handler.emit catches an exception from format() and, with the
+    # stdlib default raiseExceptions, prints the message and its arguments
+    # to stderr. That path would carry an answer past the formatter.
+    stream = io.StringIO()
+    logger = logging.getLogger("consult.test_logs.mismatch")
+    logger.propagate = False
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(Formatter())
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    try:
+        logger.error("failed %s %s", "The towpath is underwater, said respondent042@example.org")
+    finally:
+        logger.removeHandler(handler)
+    assert capsys.readouterr().err == ""
+    assert stream.getvalue().rstrip().endswith("ERROR consult.test_logs.mismatch message_dropped")
+    assert "towpath" not in stream.getvalue()
 
 
 def test_the_formatter_names_an_exception_class_and_never_its_message() -> None:
