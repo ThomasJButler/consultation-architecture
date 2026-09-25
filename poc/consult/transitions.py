@@ -19,11 +19,13 @@ second finisher's NOT EXISTS runs after the first has committed.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
 import psycopg
 from psycopg.rows import DictRow
+from psycopg.types.json import Jsonb
 
 from consult import jobs
 from consult.jobs import Lease
@@ -153,6 +155,18 @@ def mark_processing(conn: psycopg.Connection[DictRow], consultation_id: UUID) ->
         (consultation_id,),
     ).rowcount
     return moved == 1
+
+
+def record_column_roles(
+    conn: psycopg.Connection[DictRow], consultation_id: UUID, roles: Mapping[str, object]
+) -> None:
+    """The columns that aren't questions: the respondent id and the ignored
+    ones (docs/04, section 1). Here rather than in configure.py because this
+    module is the only one that writes the consultation row."""
+    conn.execute(
+        "UPDATE consultation SET column_roles = %s WHERE id = %s",
+        (Jsonb(dict(roles)), consultation_id),
+    )
 
 
 def _move_question(
