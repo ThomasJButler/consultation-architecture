@@ -226,7 +226,10 @@ def test_two_options_chosen_together_once_are_not_flagged_to_merge(tmp_path: Pat
     # options from elsewhere in the list that one respondent picked
     # together are not that, however often it happens.
     path = tmp_path / "responses.csv"
-    path.write_text("c_modes\nRun, Push a pram\nCycle\nWalk\nRun, Push a pram\n", encoding="utf-8")
+    # Quoted, as a CSV export writes a cell with a comma in it.
+    path.write_text(
+        'c_modes\n"Run, Push a pram"\nCycle\nWalk\n"Run, Push a pram"\n', encoding="utf-8"
+    )
     definition = Definition(
         demographic=(),
         closed=(
@@ -234,7 +237,7 @@ def test_two_options_chosen_together_once_are_not_flagged_to_merge(tmp_path: Pat
                 "c_modes",
                 "How?",
                 ResponseType.MULTI_SELECT,
-                ("Cycle", "Walk", "Run", "Push a pram"),
+                ("Run", "Cycle", "Walk", "Push a pram"),
             ),
         ),
         open=(),

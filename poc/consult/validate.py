@@ -29,6 +29,7 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
+from itertools import pairwise
 
 from consult.cost import DEFAULT_RATES, Estimate, Rates, estimate
 from consult.definition import ClosedQuestion, Definition, ResponseType
@@ -167,8 +168,13 @@ def _count_closed(tally: _Tally, question: ClosedQuestion, cell: str, row_no: in
         tally.note_unknown(cell, row_no)
 
 
-def _never_apart(tally: _Tally) -> Iterable[Warning]:
+def _never_apart(tally: _Tally, options: tuple[str, ...]) -> Iterable[Warning]:
+    # Only a pair that sits next to each other in the option list can be the
+    # two halves of one comma option (that's how split_options made them).
+    adjacent_in_definition = set(pairwise(options))
     for (first, second), together in sorted(tally.adjacent.items()):
+        if (first, second) not in adjacent_in_definition:
+            continue
         if together and tally.values[first] == together and tally.values[second] == together:
             yield Warning(
                 WarningKind.OPTIONS_NEVER_APART,
@@ -287,7 +293,8 @@ def validate(definition: Definition, responses: Responses, rates: Rates = DEFAUL
                     Resolution.MAP_TO_OPTION,
                 )
             )
-        for warning in _never_apart(tally):
+        options = closed[ref].options if ref in closed else ()
+        for warning in _never_apart(tally, options):
             warnings.append(
                 Warning(
                     warning.kind,
