@@ -202,3 +202,19 @@ def test_a_header_named_like_an_id_gets_the_role_however_it_is_spelt() -> None:
     assert suggested_role("email_id") is Resolution.ROLE_IDENTITY
     assert suggested_role("Full name") is Resolution.ROLE_IDENTITY
     assert suggested_role("notes_internal") is Resolution.ROLE_IGNORE
+
+
+def test_every_id_like_column_gets_its_own_duplicate_check(tmp_path: Path) -> None:
+    # Two candidates for the respondent id, and the one the reviewer might
+    # pick at configure time has the duplicates. Both are checked.
+    path = tmp_path / "responses.csv"
+    path.write_text(
+        "respondent_ref,submission_id,o_reason\nR-1,S-1,one\nR-2,S-1,two\nR-3,S-1,three\n",
+        encoding="utf-8",
+    )
+    definition = Definition(
+        demographic=(), closed=(), open=(OpenQuestion("o_reason", "Why?", None),)
+    )
+    report = validate(definition, Responses(path))
+    (duplicate,) = warnings_of(report, WarningKind.DUPLICATE_RESPONDENT_ID)
+    assert (duplicate.column_ref, duplicate.value, duplicate.count) == ("submission_id", "S-1", 3)
