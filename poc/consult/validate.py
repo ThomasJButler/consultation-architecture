@@ -204,9 +204,9 @@ def validate(definition: Definition, responses: Responses, rates: Rates = DEFAUL
         else:
             tallies[ref] = _Tally(ColumnKind.UNMATCHED)
             roles[ref] = suggested_role(ref)
-    id_column = next(
-        (ref for ref, role in roles.items() if role is Resolution.ROLE_RESPONDENT_ID), None
-    )
+    # Every column that could be the respondent id gets the check, since the
+    # configure step hasn't picked one yet (docs/02, correction 8).
+    id_columns = {ref for ref, role in roles.items() if role is Resolution.ROLE_RESPONDENT_ID}
 
     row_count = 0
     open_answers = 0
@@ -215,7 +215,7 @@ def validate(definition: Definition, responses: Responses, rates: Rates = DEFAUL
         for ref, cell in row.cells.items():
             tally = tallies[ref]
             if tally.kind is ColumnKind.UNMATCHED:
-                if ref == id_column and cell not in ("", NO_ANSWER):
+                if ref in id_columns and cell not in ("", NO_ANSWER):
                     tally.ids[cell].append(row.no)
                 continue
             if cell in ("", NO_ANSWER) or (
