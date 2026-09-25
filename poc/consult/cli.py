@@ -51,7 +51,7 @@ def _validate(args: argparse.Namespace, settings: Settings) -> int:
             print(json.dumps({"errors": list(exc.problems)}, indent=2))
         else:
             print(f"errors: {len(exc.problems)}")
-            print("\n".join(f"  {problem}" for problem in exc.problems))
+            print("\n".join(f"  {report.shown(problem)}" for problem in exc.problems))
         return 1
     print(
         report.as_json(result)
