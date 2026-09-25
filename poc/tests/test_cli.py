@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import psycopg
 import pytest
+from psycopg.rows import DictRow
 
 from consult.cli import main
 from consult.config import Settings
@@ -71,3 +73,41 @@ def test_init_creates_every_table_the_design_names(blank_database: Settings) -> 
     # creates nothing and drops nothing.
     assert main(["init"], settings=blank_database) == 0
     assert tables_in(blank_database) == DESIGN_TABLES
+
+
+def shape_of(settings: Settings) -> set[tuple[object, ...]]:
+    """Every column and every index, so "the same schema" means the same DDL."""
+    with connect(settings) as conn:
+        columns = conn.execute(
+            """
+            SELECT table_schema, table_name, column_name, data_type, is_nullable,
+                   column_default, identity_generation
+              FROM information_schema.columns
+             WHERE table_schema IN ('public', 'vault')
+            """
+        ).fetchall()
+        indexes = conn.execute(
+            """
+            SELECT schemaname, tablename, indexname, indexdef
+              FROM pg_indexes
+             WHERE schemaname IN ('public', 'vault')
+            """
+        ).fetchall()
+    return {tuple(row.values()) for row in columns} | {tuple(row.values()) for row in indexes}
+
+
+def test_init_reset_leaves_the_same_empty_schema(
+    db: psycopg.Connection[DictRow], db_settings: Settings
+) -> None:
+    db.execute("INSERT INTO department (name) VALUES ('Department of Fictional Affairs')")
+    db.commit()
+    before = shape_of(db_settings)
+
+    assert main(["init", "--reset"], settings=db_settings) == 0
+
+    assert shape_of(db_settings) == before
+    assert tables_in(db_settings) == DESIGN_TABLES
+    with connect(db_settings) as conn:
+        row = conn.execute("SELECT count(*) AS departments FROM department").fetchone()
+    assert row is not None
+    assert row["departments"] == 0
