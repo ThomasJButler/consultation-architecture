@@ -131,3 +131,28 @@ def test_the_default_caps_admit_the_fixtures(tmp_path: Path) -> None:
     assert read_definition(FIXTURES / "definition.xlsx", Caps()).column_refs
     assert Caps().max_upload_bytes >= 200 * 1024 * 1024
     assert Caps().max_rows >= 250_000
+
+
+def test_malformed_xml_a_bad_encoding_and_a_missing_file_are_refused_too(tmp_path: Path) -> None:
+    # "A file that isn't what its extension says" (THREAT_MODEL.md, row 1)
+    # covers more than a zip bomb: a workbook whose XML is cut short, a CSV
+    # in the encoding Excel on Windows writes, and a path that isn't there.
+    source = FIXTURES / "definition.xlsx"
+    truncated = tmp_path / "truncated.xlsx"
+    with zipfile.ZipFile(source) as archive, zipfile.ZipFile(truncated, "w") as target:
+        for name in archive.namelist():
+            data = archive.read(name)
+            if name == "xl/worksheets/sheet1.xml":
+                data = data[: len(data) // 2]
+            target.writestr(name, data)
+    assert refusal_of(read_definition, truncated, SMALL).reason is Refusal.UNREADABLE
+    assert refusal_of(Responses, truncated, SMALL).reason is Refusal.UNREADABLE
+
+    cp1252 = tmp_path / "windows.csv"
+    cp1252.write_bytes("respondent_ref,o_reason\r\nR-1,costs £4\r\n".encode("cp1252"))
+    error = refusal_of(Responses, cp1252, SMALL)
+    assert error.reason is Refusal.UNREADABLE
+    assert "costs" not in str(error)
+
+    assert refusal_of(Responses, tmp_path / "absent.csv", SMALL).reason is Refusal.NOT_FOUND
+    assert refusal_of(read_definition, tmp_path / "absent.xlsx", SMALL).reason is Refusal.NOT_FOUND
