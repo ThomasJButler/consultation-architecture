@@ -29,7 +29,11 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("CONSULT_DB_PORT", "5432", "Postgres port"),
     Setting("CONSULT_DB_NAME", "consult", "The database `consult init` applies the schema to"),
     Setting("CONSULT_DB_USER", "consult", "The login role; the four grant roles hang off it"),
-    Setting("CONSULT_DB_PASSWORD", None, "Required, so a blank password can't be the default"),
+    Setting(
+        "CONSULT_DB_PASSWORD",
+        None,
+        "Required, and blank counts as missing, so an empty password can't be the default",
+    ),
 )
 
 

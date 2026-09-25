@@ -13,9 +13,10 @@ from enum import StrEnum
 
 
 class ErrorCode(StrEnum):
-    # The gateway said no, in the four ways docs/02 section 9 handles: a
-    # timeout or a 5xx retries with backoff, a 429 retries or pages a
-    # person if it's the spend cap, any other 4xx is the request's fault.
+    # The gateway said no. docs/02 section 9 handles a 429 or a 5xx with
+    # backoff, and a spend-cap 429 pages a person. A timeout is treated
+    # like a 5xx and any other 4xx as the request's fault: that reading is
+    # this module's, not the design's.
     GATEWAY_TIMEOUT = "gateway_timeout"
     GATEWAY_RATE_LIMITED = "gateway_rate_limited"
     GATEWAY_UNAVAILABLE = "gateway_unavailable"

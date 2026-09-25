@@ -6,7 +6,7 @@
 # (CLAUDE.md, rule 2). gitleaks looks for secrets. The brief guard is the
 # tracked half of the check SECURITY.md describes; `pre-commit install`
 # keeps an existing .git/hooks/pre-commit as pre-commit.legacy and runs it
-# after these, so the private half keeps running too.
+# ahead of these, so the private half keeps running too.
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.9

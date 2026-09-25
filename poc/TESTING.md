@@ -2,7 +2,10 @@
 
 What each test file proves, how the harness works, and how to run it. The
 rule is CLAUDE.md rule 2: a behaviour gets a red commit that pins it before
-the green commit that makes it pass, so every test here was red once.
+the green commit that makes it pass. The settings test went in green with
+the project it checks (plan step 1) and the repo rule with the documents
+(step 12); every other test file here has a `Pin ...` commit ahead of the
+code it holds.
 
 ## Running
 
@@ -50,7 +53,9 @@ pull requests add that take more than a few seconds. `pytest.ini` sets
 
 The four mechanics the design rests on (`docs/02`, section 13) are not
 tested here: the fan-in transaction, lease takeover with a fence, idempotent
-tag inserts and the indexed filter query. They are PR-05 and PR-09. The
-vault refusal for the pipeline role is PR-06. Parsing and the validator are
+tag inserts and the indexed filter query. The fan-in transaction, lease
+takeover with a fence and idempotent tag inserts are PR-05; the indexed
+filter query is PR-09 (`plans/00-plan.md`). The vault refusal for the
+pipeline role is PR-06. Parsing and the validator are
 PR-04. This pull request proves the scaffold those will stand on and
 nothing more.

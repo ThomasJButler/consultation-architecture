@@ -1,11 +1,13 @@
 # Proof-of-concept
 
-A small, runnable proof of the parts of the design that are easy to claim
-and hard to get right: the job pipeline's claim, lease and fan-in mechanics
-on a real Postgres, with a fake model so it runs offline. The design it
-proves is `docs/02-architecture.md`; the schema is typed from
-`docs/04-data-model.md`. This is not the product, and `../README.md` says
-what it deliberately leaves out.
+A small, runnable proof-of-concept of the parts of the design that are easy
+to claim and hard to get right: the job pipeline's claim, lease and fan-in
+mechanics on a real Postgres, with a fake model so it runs offline. The
+design is `docs/02-architecture.md`; the schema is typed from
+`docs/04-data-model.md`. This pull request (PR-03) lays the scaffold those
+proofs stand on; the last section says what is proved so far, and
+`TESTING.md` which pull request proves the rest. This is not the product,
+and `../README.md` says what it deliberately leaves out.
 
 ## Run it
 
@@ -76,5 +78,5 @@ proforma repeated word for word, and one answer starting with `=`.
 From the repository root, once: `poc/.venv/bin/pre-commit install`. It runs
 ruff, mypy on `consult/` only (so a red test can still be committed),
 gitleaks and the brief guard. An existing `.git/hooks/pre-commit` is kept
-as `pre-commit.legacy` and still runs, so the private half of the guard in
-`SECURITY.md` carries on.
+as `pre-commit.legacy` and runs it first, so the private half of the guard
+in `SECURITY.md` carries on.

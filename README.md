@@ -43,8 +43,8 @@ architecture, seven decision records, data model, cost model, security notes
 and threat model), both diagrams and a first draft of the submission with a
 rendered PDF, reconciled in PR-02b before the schema was typed from `docs/04`.
 In review: the proof-of-concept scaffold (PR-03): the Python project under
-`poc/`, the schema typed from `docs/04` with its four roles, `consult init`,
-the test harness on a real Postgres, a fictional fixture consultation in the
+`poc/`, the schema typed from `docs/04` with its four roles, `consult init`
+(`poc/README.md` says how to run it), the test harness on a real Postgres, a fictional fixture consultation in the
 real file format, the model fakes, the logging policy pinned by a test, and
 CI running the whole gate against Postgres 17. Planned: parsing and
 validation (PR-04), the mechanics (PR-05 to PR-09), final polish (PR-10).
