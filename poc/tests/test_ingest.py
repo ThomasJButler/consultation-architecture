@@ -147,3 +147,87 @@ def test_ingest_builds_attrs_that_match_the_answer_rows(db: psycopg.Connection[D
         ).fetchall()
     }
     assert {r["respondent_id"]: r["attrs"] for r in rebuilt} == stored
+
+
+def normalised(text: str) -> str:
+    return " ".join(text.split()).casefold()
+
+
+def test_ingest_flags_duplicates_at_answer_and_respondent_level(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    rows = fixture_rows()
+    staged = staged_fixture(db)
+    questions = staged.configured.questions
+
+    result = ingest(db, staged.consultation_id)
+
+    # Answer level: same question, identical normalised text; every copy but
+    # the first points at the first (docs/02, step 3a).
+    expected_answer_duplicates: dict[tuple[str, int], int] = {}
+    for ref in ("o_reason", "o_safety"):
+        firsts: dict[str, int] = {}
+        for no, row in enumerate(rows, start=2):
+            text = row[ref]
+            if text in NOT_ANSWERED | {"N/A"}:
+                continue
+            key = normalised(text)
+            if key in firsts:
+                expected_answer_duplicates[ref, no] = firsts[key]
+            else:
+                firsts[key] = no
+    written = db.execute(
+        """
+        SELECT q.column_ref, r.source_row_no, f.source_row_no AS first_row_no
+          FROM answer a
+          JOIN question q ON q.id = a.question_id
+          JOIN respondent r ON r.id = a.respondent_id
+          JOIN answer d ON d.id = a.duplicate_of_answer_id
+          JOIN respondent f ON f.id = d.respondent_id
+         WHERE a.consultation_id = %s
+        """,
+        (staged.consultation_id,),
+    ).fetchall()
+    assert {
+        (w["column_ref"], w["source_row_no"]): w["first_row_no"] for w in written
+    } == expected_answer_duplicates
+    assert result.duplicate_answers == len(expected_answer_duplicates)
+    assert len(expected_answer_duplicates) >= 11, (
+        "the proforma alone gives eleven copies per column"
+    )
+
+    # Respondent level: every open answer identical to an earlier
+    # respondent's, blanks and all, and not all blank: a campaign proforma.
+    expected_respondent_duplicates: dict[int, int] = {}
+    seen: dict[tuple[str, ...], int] = {}
+    for no, row in enumerate(rows, start=2):
+        signature = tuple(
+            "" if row[ref] in NOT_ANSWERED | {"N/A"} else normalised(row[ref])
+            for ref in ("o_reason", "o_safety")
+        )
+        if not any(signature):
+            continue
+        if signature in seen:
+            expected_respondent_duplicates[no] = seen[signature]
+        else:
+            seen[signature] = no
+    flagged = db.execute(
+        """
+        SELECT r.source_row_no, f.source_row_no AS first_row_no
+          FROM respondent r JOIN respondent f ON f.id = r.duplicate_of
+         WHERE r.consultation_id = %s
+        """,
+        (staged.consultation_id,),
+    ).fetchall()
+    assert {
+        f["source_row_no"]: f["first_row_no"] for f in flagged
+    } == expected_respondent_duplicates
+    assert result.duplicate_respondents == len(expected_respondent_duplicates)
+    assert len(expected_respondent_duplicates) >= 11
+
+    # Nothing deleted: counted both ways, kept both ways.
+    kept = db.execute(
+        "SELECT count(*) AS n FROM respondent WHERE consultation_id = %s", (staged.consultation_id,)
+    ).fetchone()
+    assert kept == {"n": 240}
+    assert questions["o_reason"] is not None
