@@ -9,12 +9,11 @@ from __future__ import annotations
 from uuid import UUID
 
 import psycopg
-from psycopg.abc import Query
 from psycopg.rows import DictRow
 
 
 def _returning_id(
-    conn: psycopg.Connection[DictRow], query: Query, params: tuple[object, ...]
+    conn: psycopg.Connection[DictRow], query: str, params: tuple[object, ...]
 ) -> UUID:
     row = conn.execute(query, params).fetchone()
     assert row is not None

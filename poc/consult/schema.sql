@@ -208,7 +208,11 @@ CREATE TABLE IF NOT EXISTS job (
   tokens_cached       bigint NOT NULL DEFAULT 0,
   tokens_out          bigint NOT NULL DEFAULT 0,
   cost_pence          integer NOT NULL DEFAULT 0,
-  error_code          text,
+  -- The vocabulary in consult/errors.py; a test holds the two lists to each
+  -- other. A message body in this column is refused, not just discouraged.
+  error_code          text CHECK (error_code IN ('gateway_timeout', 'gateway_rate_limited',
+                        'gateway_unavailable', 'gateway_rejected', 'model_output_invalid',
+                        'lease_lost', 'input_invalid', 'worker_error')),
   provider_request_id text
 );
 -- One job per (consultation, open question, kind, run), enforced by the index

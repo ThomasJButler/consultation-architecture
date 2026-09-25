@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import logging
 import sys
+import time
 from uuid import UUID
 
 from consult.logs import Formatter, configure, log_event
@@ -21,14 +22,24 @@ JOB_ID = UUID("0b6a5f3c-2d1e-4f7a-9c8b-1a2b3c4d5e6f")
 
 def render(
     formatter: Formatter,
-    message: str,
+    event: str,
+    /,
     *,
     level: int = logging.INFO,
     exc_info: tuple[type[BaseException], BaseException, None] | None = None,
     **fields: object,
 ) -> str:
-    record = logging.LogRecord("consult.worker", level, __file__, 1, message, None, exc_info)
-    record.fields = fields
+    record = logging.makeLogRecord(
+        {
+            "name": "consult.worker",
+            "levelno": level,
+            "levelname": logging.getLevelName(level),
+            "msg": event,
+            "created": time.time(),
+            "exc_info": exc_info,
+            "fields": fields,
+        }
+    )
     return formatter.format(record)
 
 
