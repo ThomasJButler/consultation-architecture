@@ -37,6 +37,9 @@ def _warning_line(warning: Warning) -> str:
     what = ""
     if warning.value is not None:
         what = f'"{shown(warning.value)}" x{warning.count}'
+    elif warning.count:
+        what = f"x{warning.count}"
+    if what:
         if warning.example_rows:
             what += ", rows " + ", ".join(str(no) for no in warning.example_rows)
         what += ": "

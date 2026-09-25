@@ -270,13 +270,15 @@ def validate(definition: Definition, responses: Responses, rates: Rates = DEFAUL
                     WarningKind.UNMATCHED_HEADER, ref, None, 0, (), ROLE_RESOLUTIONS, roles[ref]
                 )
             )
-            for value, rows in sorted(tally.ids.items()):
+            # The rows name the duplicate; the value itself stays out, since
+            # a column named like an id can hold email addresses.
+            for _value, rows in sorted(tally.ids.items()):
                 if len(rows) > 1:
                     warnings.append(
                         Warning(
                             WarningKind.DUPLICATE_RESPONDENT_ID,
                             ref,
-                            value,
+                            None,
                             len(rows),
                             tuple(rows[:EXAMPLE_ROWS]),
                             DUPLICATE_ID_RESOLUTIONS,
