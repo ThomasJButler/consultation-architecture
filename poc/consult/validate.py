@@ -76,6 +76,12 @@ UNKNOWN_VALUE_RESOLUTIONS = (
 )
 NOT_APPLICABLE_RESOLUTIONS = (Resolution.KEEP_AS_VALUE, Resolution.TREAT_AS_NOT_ANSWERED)
 ROLE_RESOLUTIONS = (Resolution.ROLE_RESPONDENT_ID, Resolution.ROLE_IDENTITY, Resolution.ROLE_IGNORE)
+# A header becomes a column name in the staging table. Postgres keeps the
+# first NAMEDATALEN - 1 = 63 bytes of an identifier and drops the rest with
+# a NOTICE the driver doesn't surface (PostgreSQL 17 manual, section 4.1.1,
+# checked 26 September 2026), so a longer header would silently lose its
+# column between COPY and ingest. It blocks here, before spend.
+MAX_HEADER_BYTES = 63
 DUPLICATE_ID_RESOLUTIONS = (Resolution.IGNORE_COLUMN, Resolution.KEEP_FIRST_BLANK_REST)
 
 # Header words that say what an unmatched column is (docs/02, section 3.2:
@@ -200,6 +206,11 @@ def validate(definition: Definition, responses: Responses, rates: Rates = DEFAUL
         f"header {name} appears twice in the responses file"
         for name, count in Counter(responses.header).items()
         if name and count > 1
+    )
+    errors.extend(
+        f"header {name} is over {MAX_HEADER_BYTES} bytes and Postgres would cut it short"
+        for name in dict.fromkeys(responses.header)
+        if len(name.encode()) > MAX_HEADER_BYTES
     )
     header = tuple(name for name in dict.fromkeys(responses.header) if name)
     errors.extend(
