@@ -133,3 +133,30 @@ def test_checkpoints_are_idempotent_and_resume_from_the_last_batch(
         "SELECT batch_no, answer_ids FROM job_batch WHERE job_id = %s ORDER BY batch_no", (job_id,)
     ).fetchall()
     assert [(row["batch_no"], row["answer_ids"]) for row in rows] == [(1, [1, 2, 3]), (2, [4, 5])]
+
+
+def test_the_checkpoint_insert_carries_the_fence_itself(
+    db: psycopg.Connection[DictRow], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The heartbeat in front of the insert holds the job row lock until the
+    # caller commits, which is what keeps a zombie out. That leans on the
+    # caller's transaction discipline; the INSERT should refuse a stale
+    # fence on its own, so this test takes the heartbeat away.
+    from consult import jobs
+
+    consultation_id = make_consultation(db, make_department(db))
+    job_id = make_queued_job(db, consultation_id, make_open_question(db, consultation_id))
+    zombie = claim(db, job_id, "worker-1")
+    assert zombie is not None
+    db.execute(
+        "UPDATE job SET heartbeat_at = now() - interval '11 minutes' WHERE id = %s", (job_id,)
+    )
+    assert claim(db, job_id, "worker-2") is not None
+    monkeypatch.setattr(jobs, "heartbeat", lambda conn, lease: None)
+
+    with pytest.raises(LeaseLostError):
+        checkpoint(db, zombie, batch_no=1, stage="generate", answer_ids=[1])
+    batches = db.execute(
+        "SELECT count(*) AS n FROM job_batch WHERE job_id = %s", (job_id,)
+    ).fetchone()
+    assert batches == {"n": 0}
