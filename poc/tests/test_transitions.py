@@ -20,7 +20,7 @@ from tests.rows import make_consultation, make_department, make_open_question, m
 pytestmark = pytest.mark.db
 
 
-def consultation_row(db: psycopg.Connection[DictRow], consultation_id: object) -> dict[str, object]:
+def consultation_row(db: psycopg.Connection[DictRow], consultation_id: object) -> DictRow:
     row = db.execute(
         """
         SELECT status, run_id, awaiting_review_at IS NOT NULL AS awaiting_stamped,
@@ -63,7 +63,9 @@ def test_fan_in_one_flips_the_consultation_and_writes_one_outbox_row(
     after = consultation_row(db, consultation_id)
     assert after["status"] == "awaiting_review"
     assert after["awaiting_stamped"] is True
-    assert after["status_changed_at"] > before["status_changed_at"]
+    # now() is the transaction's start, and this test is one transaction,
+    # so the stamp can only be shown not to go backwards here.
+    assert after["status_changed_at"] >= before["status_changed_at"]
     # One email, for this pass: the row names the run id (docs/04, section 2).
     assert outbox_rows(db, consultation_id) == [
         {"kind": "themes_ready", "subject_id": after["run_id"], "status": "pending"}

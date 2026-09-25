@@ -180,3 +180,17 @@ def next_batch_no(conn: psycopg.Connection[DictRow], job_id: UUID) -> int:
     ).fetchone()
     # coalesce makes the aggregate one row always; the guard is for the type.
     return int(row["next"]) if row else 1
+
+
+def succeed(conn: psycopg.Connection[DictRow], lease: Lease) -> None:
+    """The job's last write, fenced like the rest."""
+    _fenced(
+        conn,
+        lease,
+        """
+        UPDATE job SET status = 'succeeded', heartbeat_at = now()
+         WHERE id = %(job_id)s AND claimed_by = %(worker)s
+           AND attempts = %(fence)s AND status = 'running'
+        """,
+        {},
+    )
