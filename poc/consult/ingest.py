@@ -30,9 +30,17 @@ from consult import transitions
 from consult.stage import INGEST_ROLE, staging_table
 from consult.store import as_role
 from consult.tokenise import tokenise
+from consult.validate import Resolution
 
 NO_ANSWER = "-"
 NOT_APPLICABLE = "N/A"
+# How many of the offending rows a refusal names before it says "and more".
+SHOWN_ROWS = 20
+
+
+class IngestError(Exception):
+    """The staging table can't be ingested as configured. The message names
+    row numbers and counts, never a value from the file."""
 
 
 @dataclass(frozen=True)
@@ -65,6 +73,7 @@ class _Configured:
     status: str
     questions: tuple[_Question, ...]
     respondent_id_column: str | None
+    duplicate_ids: str | None
 
 
 NOTHING_WRITTEN = Ingested(
@@ -110,8 +119,41 @@ def _load(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> _Configur
     )
     roles = consultation["column_roles"] or {}
     return _Configured(
-        consultation["department_id"], consultation["status"], questions, roles.get("respondent_id")
+        consultation["department_id"],
+        consultation["status"],
+        questions,
+        roles.get("respondent_id"),
+        roles.get("duplicate_ids"),
     )
+
+
+def _external_ids(config: _Configured, rows: list[DictRow]) -> dict[int, str | None]:
+    """The respondent id per file row, after the repeated-id resolution
+    (docs/02, section 3.2 as corrected, row 8): the column ignored, or the
+    id kept on its first occurrence and blanked on the rest, or, with no
+    resolution recorded, a refusal before anything is written. The unique
+    index on (consultation_id, external_id) would catch it too, but as a
+    UniqueViolation halfway through, which is not a refusal."""
+    column = config.respondent_id_column
+    if column is None or config.duplicate_ids == Resolution.IGNORE_COLUMN:
+        return {row["row_no"]: None for row in rows}
+    first_seen: dict[str, int] = {}
+    repeated: set[int] = set()
+    ids: dict[int, str | None] = {}
+    for row in rows:
+        value = row.get(column) or None
+        if value is not None and value in first_seen:
+            repeated.update((first_seen[value], row["row_no"]))
+            value = None
+        elif value is not None:
+            first_seen[value] = row["row_no"]
+        ids[row["row_no"]] = value
+    if repeated and config.duplicate_ids != Resolution.KEEP_FIRST_BLANK_REST:
+        shown = sorted(repeated)[:SHOWN_ROWS]
+        more = len(repeated) - len(shown)
+        listed = ", ".join(str(no) for no in shown) + (f" and {more} more" if more else "")
+        raise IngestError(f"respondent id repeated at rows {listed}")
+    return ids
 
 
 def _staging_table_exists(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> bool:
@@ -174,10 +216,8 @@ def ingest(
         rows = conn.execute(
             sql.SQL("SELECT * FROM {} ORDER BY row_no").format(staging_table(consultation_id))
         ).fetchall()
+        external_ids = _external_ids(config, rows)
         for row in rows:
-            external_id = (
-                row.get(config.respondent_id_column) if config.respondent_id_column else None
-            )
             per_question = [
                 (question, _answers_for(question, row.get(question.column_ref) or ""))
                 for question in answered
@@ -193,7 +233,7 @@ def ingest(
                     if values:
                         attrs[question.column_ref] = values
             respondent_id, inserted = _respondent(
-                conn, config, consultation_id, row["row_no"], external_id or None, attrs
+                conn, config, consultation_id, row["row_no"], external_ids[row["row_no"]], attrs
             )
             respondents += inserted
             batch = [
