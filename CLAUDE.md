@@ -85,4 +85,4 @@ sh scripts/brief-guard.sh --all       # what CI runs
 
 ## Status
 
-25 September 2026: parsing and validation in review (PR-04); the scaffold (PR-03) merged. See the Status block in `README.md`.
+25 September 2026: store mechanics in review (PR-05); PR-03 and PR-04 merged. See the Status block in `README.md`.
