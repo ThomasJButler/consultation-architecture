@@ -36,6 +36,8 @@ NOT_APPLICABLE = "N/A"
 class Ingested:
     respondents: int
     answers: int
+    duplicate_answers: int
+    duplicate_respondents: int
 
 
 @dataclass(frozen=True)
@@ -176,7 +178,52 @@ def ingest(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> Ingested
                 batch,
             )
             answers += len(batch)
-    return Ingested(respondents, answers)
+        duplicate_answers, duplicate_respondents = _flag_duplicates(conn, consultation_id)
+    return Ingested(respondents, answers, duplicate_answers, duplicate_respondents)
+
+
+def _flag_duplicates(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> tuple[int, int]:
+    """Exact duplicates, flagged and counted, never deleted (docs/02,
+    section 7, decision 9). At answer level: same question, same normalised
+    text, every copy pointing at the first. At respondent level: every open
+    answer identical to an earlier respondent's, blanks and all, and not
+    all blank: the shape of a campaign proforma. Both computed over the rows
+    just written, so a replay finds them already flagged and does nothing."""
+    answers = conn.execute(
+        """
+        UPDATE answer a SET duplicate_of_answer_id = f.first_id
+          FROM (SELECT question_id, text_sha256, min(id) AS first_id
+                  FROM answer
+                 WHERE consultation_id = %(id)s AND text_sha256 IS NOT NULL
+                 GROUP BY question_id, text_sha256
+                HAVING count(*) > 1) f
+         WHERE a.consultation_id = %(id)s AND a.question_id = f.question_id
+           AND a.text_sha256 = f.text_sha256 AND a.id <> f.first_id
+           AND a.duplicate_of_answer_id IS NULL
+        """,
+        {"id": consultation_id},
+    ).rowcount
+    respondents = conn.execute(
+        """
+        WITH signatures AS (
+            SELECT a.respondent_id,
+                   string_agg(coalesce(encode(a.text_sha256, 'hex'), ''), '|' ORDER BY q.ordinal)
+                       AS signature,
+                   bool_or(a.text_sha256 IS NOT NULL) AS answered
+              FROM answer a JOIN question q ON q.id = a.question_id
+             WHERE a.consultation_id = %(id)s AND q.kind = 'open'
+             GROUP BY a.respondent_id),
+        firsts AS (
+            SELECT signature, min(respondent_id) AS first_id
+              FROM signatures WHERE answered
+             GROUP BY signature HAVING count(*) > 1)
+        UPDATE respondent r SET duplicate_of = f.first_id
+          FROM signatures s JOIN firsts f ON f.signature = s.signature
+         WHERE r.id = s.respondent_id AND r.id <> f.first_id AND r.duplicate_of IS NULL
+        """,
+        {"id": consultation_id},
+    ).rowcount
+    return answers, respondents
 
 
 def _respondent(
