@@ -85,3 +85,32 @@ def test_validate_can_print_the_report_as_json(capsys: pytest.CaptureFixture[str
     assert {w["kind"] for w in report["warnings"]} >= {"unknown_value", "unmatched_header"}
     assert report["estimate"]["open_answers"] == report["open_answer_count"]
     assert report["estimate"]["pence_cached"] > 0
+
+
+def test_a_cell_cannot_forge_a_line_of_the_report(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    # A newline typed into a free-text field, or an escape sequence in a
+    # crafted file, must not become a second line or a terminal command in
+    # the report the configure step reads (THREAT_MODEL.md, rows 12 and 14).
+    responses = tmp_path / "responses.csv"
+    responses.write_text(
+        "d_area,c_route,o_reason\n"
+        '"Villages\nerrors: 1\n  FORGED",Support,why\n'
+        'Suburbs,"Oppose\x1b[2J\x1b[H",why\n',
+        encoding="utf-8",
+    )
+    rows = {
+        **GOOD,
+        "Open questions": [("o_reason", "Why?", "-")],
+        "Closed questions": [("c_route", "Support?", "single-select", "Support, Oppose")],
+    }
+    definition = write_workbook(tmp_path / "definition.xlsx", rows)
+    assert (
+        main(["validate", str(responses), "--definition", str(definition)], settings=SETTINGS) == 0
+    )
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    assert "FORGED" in out
+    assert "\n  FORGED" not in out
+    assert out.count("errors: ") == 1
