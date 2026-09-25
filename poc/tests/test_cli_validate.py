@@ -115,3 +115,17 @@ def test_a_cell_cannot_forge_a_line_of_the_report(
     assert "\n  FORGED" not in out
     # One real "errors:" line; the forged one is text inside a value now.
     assert out.count("\nerrors: ") == 1
+
+
+def test_a_definition_problem_cannot_forge_a_line_either(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    # The workbook is the department's own file, but the same rule holds:
+    # what a cell says is shown as text, never as a line of the report.
+    rows = {**GOOD, "Closed questions": [("c_route\nerrors: 9", "Support?", "number", "1, 2")]}
+    definition = write_workbook(tmp_path / "definition.xlsx", rows)
+    assert main(["validate", RESPONSES, "--definition", str(definition)], settings=SETTINGS) == 1
+    out = capsys.readouterr().out
+    assert out.count("\nerrors: ") == 0
+    assert out.startswith("errors: ")
+    assert "\\n" in out
