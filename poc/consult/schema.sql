@@ -290,22 +290,38 @@ CREATE INDEX IF NOT EXISTS notification_outbox_pending ON notification_outbox (i
 -- The four roles (docs/06, section 2.4 as corrected). CREATE ROLE is
 -- cluster-wide and has no IF NOT EXISTS, so each is guarded by a pg_roles
 -- lookup; the tests apply this file to a fresh database each session and the
--- roles are already there from the last one. NOLOGIN: a connection is made
--- as the login user and SET ROLE picks the grant set, which is how PR-06's
--- test will connect as the pipeline role and expect the vault to refuse it.
+-- roles are already there from the last one. Two sessions initialising a
+-- fresh cluster at once can both pass a lookup, and the second's CREATE ROLE
+-- then fails on pg_authid's unique index; the handler on each lets it lose
+-- that race harmlessly, since the role it wanted now exists. NOLOGIN: a
+-- connection is made as the login user and SET ROLE picks the grant set,
+-- which is how PR-06's test will connect as the pipeline role and expect the
+-- vault to refuse it.
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'consult_ingest') THEN
-    CREATE ROLE consult_ingest NOLOGIN;
+    BEGIN
+      CREATE ROLE consult_ingest NOLOGIN;
+    EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL;
+    END;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'consult_pipeline') THEN
-    CREATE ROLE consult_pipeline NOLOGIN;
+    BEGIN
+      CREATE ROLE consult_pipeline NOLOGIN;
+    EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL;
+    END;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'consult_export') THEN
-    CREATE ROLE consult_export NOLOGIN;
+    BEGIN
+      CREATE ROLE consult_export NOLOGIN;
+    EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL;
+    END;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'consult_admin') THEN
-    CREATE ROLE consult_admin NOLOGIN;
+    BEGIN
+      CREATE ROLE consult_admin NOLOGIN;
+    EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL;
+    END;
   END IF;
 END
 $$;
