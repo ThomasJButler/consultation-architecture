@@ -312,3 +312,27 @@ def test_an_unknown_multi_select_token_is_a_warning_with_the_three_resolutions(
         Resolution.TREAT_AS_NOT_ANSWERED,
     )
     assert unknown.default is Resolution.MAP_TO_OPTION
+
+
+def test_a_header_over_sixty_three_bytes_is_an_error(tmp_path: Path) -> None:
+    # Postgres keeps the first 63 bytes of an identifier and drops the rest
+    # with a NOTICE the driver doesn't surface, so the staging table would
+    # have the column under a shorter name and ingest, looking it up by the
+    # full header, would find nothing and lose every cell in it. So it blocks.
+    long_header = "email_" + "x" * 70
+    path = tmp_path / "responses.csv"
+    path.write_text(
+        f"respondent_ref,{long_header},o_reason\nR-1,a@example.org,why\n", encoding="utf-8"
+    )
+    definition = Definition(
+        demographic=(), closed=(), open=(OpenQuestion("o_reason", "Why?", None),)
+    )
+    report = validate(definition, Responses(path))
+    assert len(report.errors) == 1
+    assert long_header in report.errors[0] and "63 bytes" in report.errors[0]
+    assert "a@example.org" not in report.errors[0]
+    assert [column.column_ref for column in report.columns] == [
+        "respondent_ref",
+        long_header,
+        "o_reason",
+    ]
