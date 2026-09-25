@@ -218,3 +218,42 @@ def test_every_id_like_column_gets_its_own_duplicate_check(tmp_path: Path) -> No
     report = validate(definition, Responses(path))
     (duplicate,) = warnings_of(report, WarningKind.DUPLICATE_RESPONDENT_ID)
     assert (duplicate.column_ref, duplicate.value, duplicate.count) == ("submission_id", "S-1", 3)
+
+
+def test_two_options_chosen_together_once_are_not_flagged_to_merge(tmp_path: Path) -> None:
+    # The never-apart warning is for a comma option the workbook split in
+    # two, and those halves sit next to each other in the option list. Two
+    # options from elsewhere in the list that one respondent picked
+    # together are not that, however often it happens.
+    path = tmp_path / "responses.csv"
+    path.write_text("c_modes\nRun, Push a pram\nCycle\nWalk\nRun, Push a pram\n", encoding="utf-8")
+    definition = Definition(
+        demographic=(),
+        closed=(
+            ClosedQuestion(
+                "c_modes",
+                "How?",
+                ResponseType.MULTI_SELECT,
+                ("Cycle", "Walk", "Run", "Push a pram"),
+            ),
+        ),
+        open=(),
+    )
+    assert warnings_of(validate(definition, Responses(path)), WarningKind.OPTIONS_NEVER_APART) == []
+
+    # The same two, adjacent in the option list as a split comma option
+    # would be, are flagged.
+    definition = Definition(
+        demographic=(),
+        closed=(
+            ClosedQuestion(
+                "c_modes",
+                "How?",
+                ResponseType.MULTI_SELECT,
+                ("Cycle", "Run", "Push a pram", "Walk"),
+            ),
+        ),
+        open=(),
+    )
+    (flagged,) = warnings_of(validate(definition, Responses(path)), WarningKind.OPTIONS_NEVER_APART)
+    assert (flagged.value, flagged.count) == ("Run, Push a pram", 2)
