@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from openpyxl import Workbook
+from openpyxl.writer.excel import ExcelWriter
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "tests" / "fixtures"
 SEED = 19
@@ -296,7 +297,11 @@ def write_fixtures(out_dir: Path) -> Written:
     out_dir.mkdir(parents=True, exist_ok=True)
     definition = out_dir / "definition.xlsx"
     responses = out_dir / "responses.csv"
-    _definition_workbook().save(definition)
+    # ExcelWriter directly: Workbook.save and save_workbook both re-stamp
+    # `modified` with the wall clock, and a file that changes on every run
+    # can't be held to its committed copy.
+    with zipfile.ZipFile(definition, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+        ExcelWriter(_definition_workbook(), archive).save()
     _fix_zip_timestamps(definition)
     rng = random.Random(SEED)
     columns = response_columns()
