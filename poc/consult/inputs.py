@@ -37,6 +37,7 @@ class Refusal(StrEnum):
     TOO_MANY_ROWS = "too_many_rows"
     UNREADABLE = "unreadable"
     NOT_FOUND = "not_found"
+    TOO_MANY_COLUMNS = "too_many_columns"
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,10 @@ class Caps:
     max_rows: int = 250_000
     max_cell_chars: int = 20_000
     max_zip_ratio: int = 100
+    # Excel's own limit on a worksheet is 16,384 columns (Microsoft Support,
+    # "Excel specifications and limits", checked 25 September 2026), so this
+    # refuses nothing a spreadsheet could have saved.
+    max_columns: int = 16_384
 
 
 DEFAULT_CAPS = Caps()
@@ -134,6 +139,12 @@ def guarded[T](rows: Iterator[T]) -> Iterator[T]:
         raise
     except Exception as exc:
         raise _refusal(exc) from exc
+
+
+def check_width(values: tuple[str, ...], caps: Caps) -> tuple[str, ...]:
+    if len(values) > caps.max_columns:
+        raise InputError(Refusal.TOO_MANY_COLUMNS, len(values))
+    return values
 
 
 def check_cell(cell: str, caps: Caps) -> str:

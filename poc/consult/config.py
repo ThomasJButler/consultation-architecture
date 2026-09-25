@@ -49,6 +49,7 @@ SETTINGS: tuple[Setting, ...] = (
     Setting(
         "CONSULT_MAX_ZIP_RATIO", str(DEFAULT_CAPS.max_zip_ratio), "Refuse an XLSX inflating by more"
     ),
+    Setting("CONSULT_MAX_COLUMNS", str(DEFAULT_CAPS.max_columns), "Refuse a row with more fields"),
     # The cost estimate's assumptions (docs/05, section 1), printed with the number.
     Setting(
         "CONSULT_TOKENS_PER_ANSWER", str(DEFAULT_RATES.tokens_per_answer), "Tokens per open answer"
@@ -135,6 +136,7 @@ def load(env: Mapping[str, str] | None = None, dotenv_path: Path = DOTENV_PATH) 
             max_rows=_integer(values, "CONSULT_MAX_ROWS"),
             max_cell_chars=_integer(values, "CONSULT_MAX_CELL_CHARS"),
             max_zip_ratio=_integer(values, "CONSULT_MAX_ZIP_RATIO"),
+            max_columns=_integer(values, "CONSULT_MAX_COLUMNS"),
         ),
         rates=Rates(
             tokens_per_answer=_integer(values, "CONSULT_TOKENS_PER_ANSWER"),

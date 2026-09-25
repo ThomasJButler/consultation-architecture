@@ -21,6 +21,7 @@ from consult.inputs import (
     Refusal,
     check_cell,
     check_file,
+    check_width,
     guarded,
     open_workbook,
 )
@@ -61,7 +62,9 @@ class Responses:
             with open_workbook(self.path, caps) as workbook:
                 sheet = workbook.worksheets[0]
                 for sheet_values in guarded(sheet.iter_rows(values_only=True)):
-                    yield tuple(check_cell(_cell(value), caps) for value in sheet_values)
+                    yield check_width(
+                        tuple(check_cell(_cell(value), caps) for value in sheet_values), caps
+                    )
         else:
             # utf-8-sig, so a byte-order mark from a spreadsheet's CSV export
             # doesn't end up glued to the first header. The csv module's own
@@ -70,7 +73,9 @@ class Responses:
             with self.path.open(newline="", encoding="utf-8-sig") as handle:
                 try:
                     for csv_values in csv.reader(handle):
-                        yield tuple(check_cell(_cell(value), caps) for value in csv_values)
+                        yield check_width(
+                            tuple(check_cell(_cell(value), caps) for value in csv_values), caps
+                        )
                 except csv.Error as exc:
                     raise InputError(Refusal.CELL_TOO_LONG, caps.max_cell_chars) from exc
                 except UnicodeDecodeError as exc:
