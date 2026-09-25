@@ -68,19 +68,23 @@ class Responses:
         else:
             # utf-8-sig, so a byte-order mark from a spreadsheet's CSV export
             # doesn't end up glued to the first header. The csv module's own
-            # field limit stops it buffering a cell the size of the file.
-            csv.field_size_limit(caps.max_cell_chars + 1)
-            with self.path.open(newline="", encoding="utf-8-sig") as handle:
-                try:
-                    for csv_values in csv.reader(handle):
-                        yield check_width(
-                            tuple(check_cell(_cell(value), caps) for value in csv_values), caps
-                        )
-                except csv.Error as exc:
-                    raise InputError(Refusal.CELL_TOO_LONG, caps.max_cell_chars) from exc
-                except UnicodeDecodeError as exc:
-                    # The offset of the bad byte, never the bytes around it.
-                    raise InputError(Refusal.UNREADABLE, exc.start) from exc
+            # field limit stops it buffering a cell the size of the file; it's
+            # process-wide, so it goes back to what it was afterwards.
+            previous = csv.field_size_limit(caps.max_cell_chars + 1)
+            try:
+                with self.path.open(newline="", encoding="utf-8-sig") as handle:
+                    try:
+                        for csv_values in csv.reader(handle):
+                            yield check_width(
+                                tuple(check_cell(_cell(value), caps) for value in csv_values), caps
+                            )
+                    except csv.Error as exc:
+                        raise InputError(Refusal.CELL_TOO_LONG, caps.max_cell_chars) from exc
+                    except UnicodeDecodeError as exc:
+                        # The offset of the bad byte, never the bytes around it.
+                        raise InputError(Refusal.UNREADABLE, exc.start) from exc
+            finally:
+                csv.field_size_limit(previous)
 
     def _read_header(self) -> tuple[str, ...]:
         rows = self._raw_rows()
