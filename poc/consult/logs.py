@@ -3,9 +3,10 @@
 THREAT_MODEL.md section 2 is the policy and docs/06 section 2.5 tags it a
 MUST. This module is the control on the one path that's ours to control,
 and it works by refusal: a field reaches a line only if its name says what
-it is and its value has the shape of a token, the message has to be an
-event name rather than a sentence, and an exception contributes its class
-and never its message. So `log_event(log, "batch_rejected", answer=text)`
+it is and its value has the shape of a token (no whitespace and no `@`, so
+an email address can't pass as an id), the message has to be an event name
+rather than a sentence, and an exception contributes its class and never
+its message. So `log_event(log, "batch_rejected", answer=text)`
 logs nothing rather than an answer, and a stray
 `logger.error("failed: %s", body)` logs a marker and the logger's name,
 which is enough to go and find the line.
@@ -25,19 +26,21 @@ from uuid import UUID
 
 # What a field's name has to say for the field to be rendered.
 _ALLOWED_NAME = re.compile(
-    r"^(?:"
+    r"(?:"
     r"[a-z0-9_]*_id|[a-z0-9_]*_ids"
     r"|[a-z0-9_]*_count|count|[a-z0-9_]*_no|attempts|version|ordinal"
     r"|[a-z0-9_]*_ms|[a-z0-9_]*_seconds"
     r"|status|from_status|to_status|kind|stage"
     r"|[a-z0-9_]*_code|exception"
     r"|tokens_in|tokens_out|tokens_cached|cost_pence"
-    r")$"
+    r")"
 )
-# What a value has to look like: a token, never a sentence. Sixty-four
-# characters holds a uuid, a request id and a worker name with room over.
-_ALLOWED_VALUE = re.compile(r"^[A-Za-z0-9_.:@/-]{1,64}$")
-_EVENT_NAME = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
+# What a value has to look like: a token, never a sentence and never an
+# address. Sixty-four characters holds a uuid, a request id and a worker
+# name with room over. Matched with fullmatch throughout, because `$` alone
+# also matches before a trailing newline and would let one on to the line.
+_ALLOWED_VALUE = re.compile(r"[A-Za-z0-9_.:/-]{1,64}")
+_EVENT_NAME = re.compile(r"[a-z][a-z0-9_.]{0,63}")
 MESSAGE_DROPPED = "message_dropped"
 
 
@@ -48,7 +51,7 @@ def _render(value: object) -> str | None:
         return str(value)
     if isinstance(value, datetime):
         return value.isoformat(timespec="milliseconds")
-    if isinstance(value, str) and _ALLOWED_VALUE.match(value):
+    if isinstance(value, str) and _ALLOWED_VALUE.fullmatch(value):
         return value
     return None
 
@@ -59,8 +62,14 @@ class Formatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         stamp = datetime.fromtimestamp(record.created, tz=UTC).isoformat(timespec="milliseconds")
-        message = record.getMessage()
-        event = message if _EVENT_NAME.match(message) else MESSAGE_DROPPED
+        try:
+            message = record.getMessage()
+        except Exception:
+            # A printf-style call with the wrong argument count. Left to
+            # raise, the stdlib's handleError prints the message and its
+            # arguments to stderr, past this formatter.
+            message = MESSAGE_DROPPED
+        event = message if _EVENT_NAME.fullmatch(message) else MESSAGE_DROPPED
         fields: dict[str, object] = {}
         given = getattr(record, "fields", None)
         if isinstance(given, Mapping):
@@ -69,7 +78,7 @@ class Formatter(logging.Formatter):
             fields["exception"] = record.exc_info[0].__name__
         parts = [stamp.replace("+00:00", "Z"), record.levelname, record.name, event]
         for name, value in sorted(fields.items()):
-            rendered = _render(value) if _ALLOWED_NAME.match(name) else None
+            rendered = _render(value) if _ALLOWED_NAME.fullmatch(name) else None
             if rendered is not None:
                 parts.append(f"{name}={rendered}")
         return " ".join(parts)
