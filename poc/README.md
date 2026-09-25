@@ -70,8 +70,8 @@ proforma repeated word for word, and one answer starting with `=`.
   line.
 - Model quality. The model is a fake. What is proved is what happens to a
   reply that is wrong in each of the ways the threat model names.
-- The four mechanics themselves, yet. `TESTING.md` says which pull request
-  proves each.
+- The four mechanics themselves. This pull request is the scaffold they
+  will stand on; `TESTING.md` says which pull request proves each.
 
 ## Pre-commit
 
