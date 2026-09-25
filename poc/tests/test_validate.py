@@ -260,3 +260,27 @@ def test_two_options_chosen_together_once_are_not_flagged_to_merge(tmp_path: Pat
     )
     (flagged,) = warnings_of(validate(definition, Responses(path)), WarningKind.OPTIONS_NEVER_APART)
     assert (flagged.value, flagged.count) == ("Run, Push a pram", 2)
+
+
+def test_a_repeated_or_blank_header_is_an_error_and_a_column_is_listed_once(tmp_path: Path) -> None:
+    # Cells are keyed by header, so a repeated name would silently lose a
+    # column and a blank one has nothing to key by; both block, once each.
+    path = tmp_path / "responses.csv"
+    path.write_text(
+        "respondent_ref,d_area,d_area,,o_reason\nR-1,Town,Suburbs,x,why\n", encoding="utf-8"
+    )
+    definition = Definition(
+        demographic=(DemographicQuestion("d_area", "Area?"),),
+        closed=(),
+        open=(OpenQuestion("o_reason", "Why?", None),),
+    )
+    report = validate(definition, Responses(path))
+    assert len(report.errors) == 2
+    assert any("d_area" in error and "twice" in error for error in report.errors)
+    assert any("column 4" in error and "no name" in error for error in report.errors)
+    assert [column.column_ref for column in report.columns] == [
+        "respondent_ref",
+        "d_area",
+        "o_reason",
+    ]
+    assert report.row_count == 1
