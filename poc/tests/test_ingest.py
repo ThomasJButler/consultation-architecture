@@ -231,3 +231,64 @@ def test_ingest_flags_duplicates_at_answer_and_respondent_level(
     ).fetchone()
     assert kept == {"n": 240}
     assert questions["o_reason"] is not None
+
+
+def staging_tables(db: psycopg.Connection[DictRow]) -> list[str]:
+    return [
+        r["tablename"]
+        for r in db.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname = 'staging' ORDER BY 1"
+        ).fetchall()
+    ]
+
+
+def test_ingest_inserts_one_find_themes_job_per_open_question(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    staged = staged_fixture(db)
+    before = db.execute(
+        "SELECT status FROM consultation WHERE id = %s", (staged.consultation_id,)
+    ).fetchone()
+    assert before == {"status": "staged"}
+
+    result = ingest(db, staged.consultation_id)
+
+    # One pending find_themes job per open question, carrying the pass id
+    # the consultation row holds (docs/04, section 2), nothing claimed:
+    # dispatch to queued is PR-08's.
+    jobs = db.execute(
+        """
+        SELECT q.column_ref, j.kind, j.status, j.run_id = c.run_id AS this_pass, j.attempts,
+               j.claimed_by, j.department_id = c.department_id AS scoped
+          FROM job j
+          JOIN question q ON q.id = j.question_id
+          JOIN consultation c ON c.id = j.consultation_id
+         WHERE j.consultation_id = %s
+         ORDER BY q.ordinal
+        """,
+        (staged.consultation_id,),
+    ).fetchall()
+    assert jobs == [
+        {
+            "column_ref": ref,
+            "kind": "find_themes",
+            "status": "pending",
+            "this_pass": True,
+            "attempts": 0,
+            "claimed_by": None,
+            "scoped": True,
+        }
+        for ref in ("o_reason", "o_safety")
+    ]
+    assert result.jobs == 2
+    # The consultation is processing and its staging table is gone, in the
+    # same transaction (docs/02, step 3a).
+    after = db.execute(
+        "SELECT status FROM consultation WHERE id = %s", (staged.consultation_id,)
+    ).fetchone()
+    assert after == {"status": "processing"}
+    assert staging_tables(db) == []
+    # A caller that wants to look at the table afterwards can keep it.
+    kept = staged_fixture(db)
+    ingest(db, kept.consultation_id, keep_staging=True)
+    assert staging_tables(db) == [str(kept.consultation_id)]
