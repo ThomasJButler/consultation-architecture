@@ -18,7 +18,18 @@ import psycopg
 from psycopg.rows import DictRow
 
 from consult import jobs
-from consult.jobs import Lease
+from consult.jobs import Lease, LeaseLostError
+
+
+def _lease_holds(conn: psycopg.Connection[DictRow], lease: Lease) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1 FROM job
+         WHERE id = %s AND claimed_by = %s AND attempts = %s AND status = 'running'
+        """,
+        (lease.job_id, lease.worker, lease.fence),
+    ).fetchone()
+    return row is not None
 
 
 @dataclass(frozen=True)
@@ -35,7 +46,15 @@ def insert_tags(
     batch_no: int,
     tags: Sequence[Tag],
 ) -> int:
-    """Insert one batch's tags; the count is how many were new."""
+    """Insert one batch's tags; the count is how many were new.
+
+    A pair only goes in if the theme belongs to the version and the answer
+    to the version's question and department: a row naming another
+    department's answer would be readable under that department's
+    row-level security (docs/06, section 2.4), so the insert checks rather
+    than trusting the caller to have. The job row is read under the fence
+    too, so a stale lease inserts nothing on its own account.
+    """
     jobs.heartbeat(conn, lease)
     if not tags:
         return 0
@@ -43,20 +62,28 @@ def insert_tags(
         """
         INSERT INTO answer_theme (department_id, answer_id, theme_id, theme_set_version_id,
                                   job_id, batch_no, source)
-        SELECT v.department_id, pair.answer_id, pair.theme_id, v.id, %(job_id)s, %(batch_no)s, 'ai'
-          FROM theme_set_version v,
-               unnest(%(answer_ids)s::bigint[], %(theme_ids)s::uuid[]) AS pair(answer_id, theme_id)
-         WHERE v.id = %(version_id)s
+        SELECT v.department_id, a.id, t.id, v.id, j.id, %(batch_no)s, 'ai'
+          FROM unnest(%(answer_ids)s::bigint[], %(theme_ids)s::uuid[]) AS pair(answer_id, theme_id)
+          JOIN theme_set_version v ON v.id = %(version_id)s
+          JOIN theme t ON t.id = pair.theme_id AND t.theme_set_version_id = v.id
+          JOIN answer a ON a.id = pair.answer_id
+                       AND a.question_id = v.question_id AND a.department_id = v.department_id
+          JOIN job j ON j.id = %(job_id)s AND j.claimed_by = %(worker)s
+                    AND j.attempts = %(fence)s AND j.status = 'running'
         ON CONFLICT (answer_id, theme_id, theme_set_version_id) DO NOTHING
         """,
         {
             "job_id": lease.job_id,
+            "worker": lease.worker,
+            "fence": lease.fence,
             "batch_no": batch_no,
             "version_id": version_id,
             "answer_ids": [tag.answer_id for tag in tags],
             "theme_ids": [tag.theme_id for tag in tags],
         },
     )
+    if cursor.rowcount == 0 and not _lease_holds(conn, lease):
+        raise LeaseLostError(lease)
     return cursor.rowcount
 
 
@@ -94,13 +121,18 @@ def add_human_tag(
     user_id: UUID,
 ) -> int:
     """A tag a person adds. On the row that already exists, retracted or
-    not, this clears the retraction rather than making a second row."""
+    not, this clears the retraction rather than making a second row. The
+    same line-up check as the worker's insert; 0 means nothing matched."""
     row = conn.execute(
         """
         INSERT INTO answer_theme (department_id, answer_id, theme_id, theme_set_version_id,
                                   source, user_id)
-        SELECT department_id, %(answer_id)s, %(theme_id)s, id, 'human', %(user_id)s
-          FROM theme_set_version WHERE id = %(version_id)s
+        SELECT v.department_id, a.id, t.id, v.id, 'human', %(user_id)s
+          FROM theme_set_version v
+          JOIN theme t ON t.id = %(theme_id)s AND t.theme_set_version_id = v.id
+          JOIN answer a ON a.id = %(answer_id)s
+                       AND a.question_id = v.question_id AND a.department_id = v.department_id
+         WHERE v.id = %(version_id)s
         ON CONFLICT (answer_id, theme_id, theme_set_version_id)
         DO UPDATE SET retracted_at = NULL, retracted_by = NULL
         RETURNING id
