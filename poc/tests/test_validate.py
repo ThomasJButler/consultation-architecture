@@ -187,3 +187,18 @@ def test_a_header_no_sheet_mentions_gets_a_role_prompt() -> None:
             Resolution.ROLE_IGNORE,
         )
         assert warning.value is None
+
+
+def test_a_header_named_like_an_id_gets_the_role_however_it_is_spelt() -> None:
+    # Survey tools export headers with spaces and capitals, and a column
+    # that says both "email" and "id" is an identity column first: it goes
+    # to the vault rather than becoming the key (docs/02, section 3.2).
+    from consult.validate import suggested_role
+
+    assert suggested_role("Response ID") is Resolution.ROLE_RESPONDENT_ID
+    assert suggested_role("RespondentID") is Resolution.ROLE_RESPONDENT_ID
+    assert suggested_role("ref") is Resolution.ROLE_RESPONDENT_ID
+    assert suggested_role("Email Address") is Resolution.ROLE_IDENTITY
+    assert suggested_role("email_id") is Resolution.ROLE_IDENTITY
+    assert suggested_role("Full name") is Resolution.ROLE_IDENTITY
+    assert suggested_role("notes_internal") is Resolution.ROLE_IGNORE
