@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "consult"
+version = "0.1.0"
+description = "Proof-of-concept of the consultation-analysis job pipeline on Postgres"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{ name = "Thomas Butler" }]
+dependencies = [
+  # The store. psycopg 3 with row factories gives typed query results without
+  # an ORM in the way of the SQL the design argues from (CLAUDE.md, rule 7).
+  "psycopg[binary]==3.3.6",
+  # Reads and writes the definition workbook, whose format docs/00 describes.
+  "openpyxl==3.1.5",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==9.1.1",
+  "pytest-cov==7.1.0",
+  "ruff==0.16.9",
+  "mypy==2.3.1",
+  # Typed stubs rather than ignore_missing_imports (CLAUDE.md, rule 7).
+  "types-openpyxl==3.1.5.20260827",
+  "pip-audit==2.10.1",
+  "bandit==1.9.4",
+  "pre-commit==4.6.2",
+]
+
+[project.scripts]
+consult = "consult.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["consult*"]
+
+[tool.setuptools.package-data]
+consult = ["schema.sql"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+  "E", "W", "F", "I", "UP", "B", "N", "S", "SIM", "RUF", "C4", "PIE", "PTH", "ERA", "T20",
+]
+ignore = [
+  # The formatter owns line length inside strings and comments.
+  "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert and spell out test passwords; the fixture generator uses a seeded random for fictional data.
+"tests/*" = ["S101", "S105", "S106"]
+"scripts/*" = ["S311", "T201"]
+# The command line prints its result; that is its output, not a stray debug line.
+"consult/cli.py" = ["T201"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+files = ["consult", "tests"]
+
+[tool.coverage.run]
+source = ["consult"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = true
