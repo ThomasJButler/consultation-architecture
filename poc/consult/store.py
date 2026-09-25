@@ -12,8 +12,8 @@ from psycopg.rows import DictRow, dict_row
 
 from consult.config import Settings
 
-# The fourteen tables schema.sql creates, in dependency order, so the test
-# harness can truncate them between tests (docs/04, section 8).
+# The fourteen tables schema.sql creates, in dependency order, so a reset can
+# drop them and the test harness can truncate them (docs/04, section 8).
 TABLES: tuple[str, ...] = (
     "department",
     "consultation",
@@ -30,6 +30,8 @@ TABLES: tuple[str, ...] = (
     "answer_theme",
     "notification_outbox",
 )
+
+SCHEMAS: tuple[str, ...] = ("vault", "staging")
 
 
 def qualified(name: str) -> sql.Composable:
@@ -66,3 +68,18 @@ def init(conn: psycopg.Connection[DictRow]) -> None:
     """Apply schema.sql. Idempotent: every statement in it is IF NOT EXISTS."""
     conn.execute(schema_sql())
     conn.commit()
+
+
+def reset(conn: psycopg.Connection[DictRow]) -> None:
+    """Drop everything schema.sql creates, then apply it again.
+
+    Roles are cluster-wide and left alone: a role another database's grants
+    hang off isn't this database's to drop, and the guarded DO block in
+    schema.sql finds them already there.
+    """
+    for table in reversed(TABLES):
+        conn.execute(sql.SQL("DROP TABLE IF EXISTS {} CASCADE").format(qualified(table)))
+    for schema in SCHEMAS:
+        conn.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
+    conn.commit()
+    init(conn)
