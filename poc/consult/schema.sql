@@ -182,9 +182,10 @@ CREATE TABLE IF NOT EXISTS theme_example (
 
 -- The unit of work and the ledger. claimed_by, attempts and heartbeat_at are
 -- the lease and the fence (docs/02, step 5). error_code and
--- provider_request_id are all a failure stores: there is no column a message
--- body could go in, and a test holds the table to that (THREAT_MODEL.md,
--- section 2).
+-- provider_request_id are all a failure stores: every column that can hold
+-- a string is on the allow-list a test holds the table to, and params is
+-- held to a JSON object so a bare string can't land there either
+-- (THREAT_MODEL.md, section 2).
 CREATE TABLE IF NOT EXISTS job (
   id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   department_id       uuid NOT NULL REFERENCES department (id),
@@ -203,13 +204,13 @@ CREATE TABLE IF NOT EXISTS job (
   sent_at             timestamptz,
   model_alias         text,
   prompt_sha256       bytea,
-  params              jsonb NOT NULL DEFAULT '{}',
+  params              jsonb NOT NULL DEFAULT '{}' CHECK (jsonb_typeof(params) = 'object'),
   tokens_in           bigint NOT NULL DEFAULT 0,
   tokens_cached       bigint NOT NULL DEFAULT 0,
   tokens_out          bigint NOT NULL DEFAULT 0,
   cost_pence          integer NOT NULL DEFAULT 0,
-  -- The vocabulary in consult/errors.py; a test holds the two lists to each
-  -- other. A message body in this column is refused, not just discouraged.
+  -- The vocabulary in consult/errors.py; a test holds the two lists equal
+  -- in both directions. A message body here is refused, not just discouraged.
   error_code          text CHECK (error_code IN ('gateway_timeout', 'gateway_rate_limited',
                         'gateway_unavailable', 'gateway_rejected', 'model_output_invalid',
                         'lease_lost', 'input_invalid', 'worker_error')),

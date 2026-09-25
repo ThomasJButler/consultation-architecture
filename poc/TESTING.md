@@ -42,7 +42,7 @@ pull requests add that take more than a few seconds. `pytest.ini` sets
 | `test_cli.py` | `consult init` creates the fourteen tables, the `vault` and `staging` schemas and the four roles from `docs/04` and `docs/06`, and running it twice is harmless; `--reset` drops and recreates the same schema with no rows surviving | Postgres |
 | `test_fixtures.py` | The generator writes the three sheets with the headers in `docs/00`, comma-joined options including one containing a comma, one follow-up question with a placeholder, `-` and `N/A`; the committed fixtures are byte for byte what it writes | nothing |
 | `test_fakes.py` | `RecordingLLM` keeps every prompt and answers well; `FakeLLM` answers with what it was told to, including each fault in `THREAT_MODEL.md` row 3, and raises when its script runs out | nothing |
-| `test_store.py` | A failed job stores an error code and a provider request id, `job` has no text column a message body could go in, the code vocabulary is a `CHECK`, a stale fence writes nothing | Postgres |
+| `test_store.py` | A failed job stores an error code and a provider request id; every column of `job` that can hold a string is on a named allow-list and `params` is held to a JSON object; the code vocabulary is a `CHECK` that names exactly the enum's values; a stale fence writes nothing | Postgres |
 | `test_logs.py` | The formatter keeps ids, counts, durations, states and codes and drops everything else by name and by shape; a sentence as a message becomes a marker; an exception contributes its class and never its message | nothing |
 | `test_repo_rules.py` | Every test module that needs a database is marked `db`, and only those | nothing |
 

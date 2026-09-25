@@ -4,7 +4,7 @@ THREAT_MODEL.md section 2, line 3: a failed job stores a code from a fixed
 vocabulary and the provider's request id, and there is no column for a
 message body. A CHECK in schema.sql holds the column to this same list, so
 a message body in the code column is refused by the database and not just
-by convention; a test holds the two lists to each other.
+by convention; a test holds the two lists equal in both directions.
 """
 
 from __future__ import annotations
