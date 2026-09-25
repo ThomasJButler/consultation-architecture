@@ -101,3 +101,18 @@ def test_the_fixture_reads_as_the_generator_wrote_it() -> None:
     assert rows[0].no == 2
     assert rows[0].cells["respondent_ref"] == "R-0001"
     assert rows[-1].no == 241
+
+
+def test_the_csv_field_limit_is_put_back_after_a_read(tmp_path: Path) -> None:
+    # csv.field_size_limit is process-wide. A reader that lowered it and
+    # left it there would refuse cells for every other reader in the
+    # process, the worker's included.
+    import csv
+
+    from consult.inputs import Caps
+
+    before = csv.field_size_limit()
+    path = tmp_path / "small.csv"
+    path.write_text("a\n1\n", encoding="utf-8")
+    list(Responses(path, Caps(max_cell_chars=50)).rows())
+    assert csv.field_size_limit() == before
