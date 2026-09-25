@@ -18,6 +18,7 @@ from psycopg.rows import DictRow
 from consult.jobs import claim
 from consult.transitions import (
     Advance,
+    TransitionError,
     advance_consultation,
     finish_find_themes,
     finish_map_themes,
@@ -34,6 +35,15 @@ from tests.rows import (
 )
 
 pytestmark = pytest.mark.db
+
+
+def backdate(db: psycopg.Connection[DictRow], consultation_id: object) -> None:
+    """Push the stamp a day into the past, so a transition that stamps it
+    with now() shows as a move even inside one transaction."""
+    db.execute(
+        "UPDATE consultation SET status_changed_at = now() - interval '1 day' WHERE id = %s",
+        (consultation_id,),
+    )
 
 
 def consultation_row(db: psycopg.Connection[DictRow], consultation_id: object) -> DictRow:
@@ -64,6 +74,7 @@ def test_fan_in_one_flips_the_consultation_and_writes_one_outbox_row(
     consultation_id = make_consultation(db, make_department(db), status="processing")
     first = make_open_question(db, consultation_id, "o_reason")
     second = make_open_question(db, consultation_id, "o_safety", ordinal=2)
+    backdate(db, consultation_id)
     before = consultation_row(db, consultation_id)
 
     first_lease = claim(db, make_queued_job(db, consultation_id, first), "worker-1")
@@ -79,9 +90,7 @@ def test_fan_in_one_flips_the_consultation_and_writes_one_outbox_row(
     after = consultation_row(db, consultation_id)
     assert after["status"] == "awaiting_review"
     assert after["awaiting_stamped"] is True
-    # now() is the transaction's start, and this test is one transaction,
-    # so the stamp can only be shown not to go backwards here.
-    assert after["status_changed_at"] >= before["status_changed_at"]
+    assert after["status_changed_at"] > before["status_changed_at"]
     # One email, for this pass: the row names the run id (docs/04, section 2).
     assert outbox_rows(db, consultation_id) == [
         {"kind": "themes_ready", "subject_id": after["run_id"], "status": "pending"}
@@ -146,12 +155,15 @@ def test_fan_in_two_needs_every_open_question_complete(db: psycopg.Connection[Di
     assert outbox_rows(db, consultation_id) == []
 
     set_status(db, third, "assigning_themes")
+    backdate(db, consultation_id)
+    before = consultation_row(db, consultation_id)
     lease = claim(db, make_queued_job(db, consultation_id, third, kind="map_themes"), "worker-2")
     assert lease is not None
     assert finish_map_themes(db, lease, third, consultation_id) == Advance(False, True)
 
     after = consultation_row(db, consultation_id)
     assert after["status"] == "ready"
+    assert after["status_changed_at"] > before["status_changed_at"]
     assert outbox_rows(db, consultation_id) == [
         {"kind": "analysis_ready", "subject_id": after["run_id"], "status": "pending"}
     ]
@@ -231,12 +243,16 @@ def test_a_reopen_mints_a_run_id_so_the_second_email_has_its_own_row(
     assert lease is not None
     assert finish_map_themes(db, lease, question_id, consultation_id) == Advance(False, True)
     first_pass = consultation_row(db, consultation_id)["run_id"]
+    backdate(db, consultation_id)
+    before = consultation_row(db, consultation_id)
     reviewer = uuid4()
 
     reopened = reopen_for_correction(db, question_id, reviewer)
 
     after = consultation_row(db, consultation_id)
     assert after["status"] == "awaiting_review"
+    assert after["status_changed_at"] > before["status_changed_at"]
+    assert after["awaiting_stamped"] is True
     assert after["run_id"] == reopened.run_id != first_pass
     question = db.execute("SELECT status FROM question WHERE id = %s", (question_id,)).fetchone()
     assert question == {"status": "themes_ready"}
@@ -266,3 +282,32 @@ def test_a_reopen_mints_a_run_id_so_the_second_email_has_its_own_row(
         ("analysis_ready", first_pass),
         ("analysis_ready", reopened.run_id),
     ]
+
+
+def test_the_guards_refuse_a_row_in_the_wrong_state_and_change_nothing(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    # The guard is the design's mutex idiom: zero rows means the row moved
+    # on already, and the routine says so rather than carrying on.
+    consultation_id = make_consultation(db, make_department(db), status="awaiting_review")
+    question_id = make_open_question(db, consultation_id, status="themes_ready")
+    make_theme_set_version(db, question_id, version_no=2, status="signed_off")
+    before = consultation_row(db, consultation_id)
+
+    # A reopen needs a ready consultation.
+    with pytest.raises(TransitionError):
+        reopen_for_correction(db, question_id, uuid4())
+    assert consultation_row(db, consultation_id) == before
+    versions = db.execute(
+        "SELECT count(*) AS n FROM theme_set_version WHERE question_id = %s", (question_id,)
+    ).fetchone()
+    assert versions == {"n": 1}
+
+    # A second delivery of a find_themes message, after the first finished
+    # the question: the move from finding_themes finds nothing to move.
+    lease = claim(db, make_queued_job(db, consultation_id, question_id), "worker-1")
+    assert lease is not None
+    with pytest.raises(TransitionError):
+        finish_find_themes(db, lease, question_id, consultation_id)
+    assert outbox_rows(db, consultation_id) == []
+    assert consultation_row(db, consultation_id)["status"] == "awaiting_review"
