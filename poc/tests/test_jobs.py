@@ -15,7 +15,8 @@ import psycopg
 import pytest
 from psycopg.rows import DictRow
 
-from consult.jobs import Lease, claim
+from consult.errors import ErrorCode
+from consult.jobs import Lease, LeaseLostError, checkpoint, claim, heartbeat, record_failure
 from tests.rows import make_consultation, make_department, make_open_question, make_queued_job
 
 pytestmark = pytest.mark.db
@@ -70,3 +71,36 @@ def test_a_stale_lease_can_be_taken_over_and_the_fence_moves_on(
         "SELECT claimed_by, attempts, status FROM job WHERE id = %s", (job_id,)
     ).fetchone()
     assert row == {"claimed_by": "worker-2", "attempts": 2, "status": "running"}
+
+
+def test_a_zombie_with_a_stale_fence_writes_nothing(db: psycopg.Connection[DictRow]) -> None:
+    consultation_id = make_consultation(db, make_department(db))
+    job_id = make_queued_job(db, consultation_id, make_open_question(db, consultation_id))
+    zombie = claim(db, job_id, "worker-1")
+    assert zombie is not None
+    db.execute(
+        "UPDATE job SET heartbeat_at = now() - interval '11 minutes' WHERE id = %s", (job_id,)
+    )
+    successor = claim(db, job_id, "worker-2")
+    assert successor == Lease(job_id, "worker-2", 2)
+
+    # The old process wakes up. Every write it tries starts with the fence
+    # and every one is refused (ADR-002's walk-through of the failure).
+    with pytest.raises(LeaseLostError):
+        heartbeat(db, zombie)
+    with pytest.raises(LeaseLostError):
+        checkpoint(db, zombie, batch_no=1, stage="generate", answer_ids=[1, 2])
+    with pytest.raises(LeaseLostError):
+        record_failure(db, zombie, ErrorCode.GATEWAY_TIMEOUT)
+
+    row = db.execute(
+        "SELECT status, attempts, claimed_by, error_code FROM job WHERE id = %s", (job_id,)
+    ).fetchone()
+    assert row == {"status": "running", "attempts": 2, "claimed_by": "worker-2", "error_code": None}
+    batches = db.execute(
+        "SELECT count(*) AS n FROM job_batch WHERE job_id = %s", (job_id,)
+    ).fetchone()
+    assert batches == {"n": 0}
+    # And the successor carries on as if nothing happened.
+    heartbeat(db, successor)
+    assert checkpoint(db, successor, batch_no=1, stage="generate", answer_ids=[1, 2]) is True
