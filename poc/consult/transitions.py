@@ -230,3 +230,75 @@ def sign_off(
     if job is None:
         raise TransitionError(f"question {question_id}: the map_themes job was not written")
     return SignOff(version_id, job["id"])
+
+
+@dataclass(frozen=True)
+class Reopen:
+    run_id: UUID
+    candidate_version_id: UUID
+
+
+def reopen_for_correction(
+    conn: psycopg.Connection[DictRow], question_id: UUID, reviewer: UUID
+) -> Reopen:
+    """Reopen one question's themes for correction (docs/04, section 2).
+
+    Under the row lock: the consultation goes ready to awaiting_review with
+    a new run_id, so the pass's later email has a row of its own; the
+    question goes complete to themes_ready; a new candidate version is cut
+    from the signed-off one, with lineage, for the reviewer to edit.
+    """
+    owner = conn.execute(
+        "SELECT consultation_id FROM question WHERE id = %s", (question_id,)
+    ).fetchone()
+    if owner is None:
+        raise TransitionError(f"question {question_id} does not exist")
+    consultation_id: UUID = owner["consultation_id"]
+    lock_consultation(conn, consultation_id)
+    minted = conn.execute(
+        """
+        UPDATE consultation
+           SET status = 'awaiting_review', run_id = gen_random_uuid(),
+               status_changed_at = now(), awaiting_review_at = now()
+         WHERE id = %s AND status = 'ready'
+        RETURNING run_id
+        """,
+        (consultation_id,),
+    ).fetchone()
+    if minted is None:
+        raise TransitionError(f"consultation {consultation_id} is not ready")
+    _move_question(conn, question_id, "complete", "themes_ready")
+    signed = conn.execute(
+        """
+        SELECT id FROM theme_set_version
+         WHERE question_id = %s AND status = 'signed_off'
+         ORDER BY version_no DESC LIMIT 1
+        """,
+        (question_id,),
+    ).fetchone()
+    if signed is None:
+        raise TransitionError(f"question {question_id} has no signed-off version to reopen")
+    candidate = conn.execute(
+        """
+        INSERT INTO theme_set_version (department_id, question_id, version_no, status, parent_version_id)
+        SELECT department_id, question_id,
+               (SELECT max(version_no) + 1 FROM theme_set_version WHERE question_id = %(question)s),
+               'candidate', id
+          FROM theme_set_version WHERE id = %(signed)s
+        RETURNING id
+        """,
+        {"question": question_id, "signed": signed["id"]},
+    ).fetchone()
+    if candidate is None:
+        raise TransitionError(f"question {question_id}: the new candidate was not written")
+    conn.execute(
+        """
+        INSERT INTO theme (department_id, theme_set_version_id, key, label, description,
+                           is_longlist, is_fallback, lineage_theme_id, preview_count)
+        SELECT department_id, %(candidate)s, key, label, description,
+               is_longlist, is_fallback, id, preview_count
+          FROM theme WHERE theme_set_version_id = %(signed)s
+        """,
+        {"candidate": candidate["id"], "signed": signed["id"]},
+    )
+    return Reopen(minted["run_id"], candidate["id"])

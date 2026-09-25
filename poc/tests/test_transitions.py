@@ -255,6 +255,8 @@ def test_a_reopen_mints_a_run_id_so_the_second_email_has_its_own_row(
     # because the row's subject is the pass (docs/04, section 2).
     second = sign_off(db, question_id, reviewer)
     assert second is not None
+    # Dispatch (pending to queued) is the reconciler's, PR-08; done by hand here.
+    db.execute("UPDATE job SET status = 'queued', sent_at = now() WHERE id = %s", (second.job_id,))
     lease = claim(db, second.job_id, "worker-2")
     assert lease is not None
     set_status(db, question_id, "assigning_themes")
