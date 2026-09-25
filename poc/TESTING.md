@@ -2,10 +2,10 @@
 
 What each test file proves, how the harness works, and how to run it. The
 rule is CLAUDE.md rule 2: a behaviour gets a red commit that pins it before
-the green commit that makes it pass. The settings test went in green with
-the project it checks (plan step 1) and the repo rule with the documents
-(step 12); every other test file here has a `Pin ...` commit ahead of the
-code it holds.
+the green commit that makes it pass. The settings tests went in green with
+the settings they check (PR-03's project, PR-04's caps and rates) and the
+repo rule with the documents; every other test here has a `Pin ...` commit
+ahead of the code it holds.
 
 ## Running
 
@@ -41,7 +41,7 @@ pull requests add that take more than a few seconds. `pytest.ini` sets
 
 | File | Proves | Needs |
 |---|---|---|
-| `test_config.py` | `.env.example` and `consult/config.py` name the same settings; the environment wins over `.env`; a missing password is named, not defaulted | nothing |
+| `test_config.py` | `.env.example` and `consult/config.py` name the same settings; the environment wins over `.env`; a missing password is named, not defaulted; the input caps and the cost rates load from the environment and a rate that isn't a number is refused by name | nothing |
 | `test_cli.py` | `consult init` creates the fourteen tables, the `vault` and `staging` schemas and the four roles from `docs/04` and `docs/06`, and running it twice is harmless; `--reset` drops and recreates the same schema with no rows surviving | Postgres |
 | `test_fixtures.py` | The generator writes the three sheets with the headers in `docs/00`, comma-joined options including one containing a comma, one follow-up question with a placeholder, `-` and `N/A`; the committed fixtures are byte for byte what it writes | nothing |
 | `test_fakes.py` | `RecordingLLM` keeps every prompt and answers well; `FakeLLM` answers with what it was told to, including each fault in `THREAT_MODEL.md` row 3, and raises when its script runs out | nothing |
@@ -49,12 +49,12 @@ pull requests add that take more than a few seconds. `pytest.ini` sets
 | `test_logs.py` | The formatter keeps ids, counts, durations, states and codes and drops everything else by name and by shape; a sentence as a message becomes a marker; an exception contributes its class and never its message | nothing |
 | `test_repo_rules.py` | Every test module that needs a database is marked `db`, and only those | nothing |
 | `test_definition.py` | The workbook parses into the three kinds of question in `docs/00`; the three response types are the vocabulary `docs/02` 3.2 names; `-` or blank means no related question; every problem is reported together and a bad response type doesn't cascade into a second problem | nothing |
-| `test_responses.py` | CSV and XLSX read the same, one row at a time, with `-` and `N/A` kept as written; short rows are padded and long ones cut to the header | nothing |
+| `test_responses.py` | CSV and XLSX read the same, one row at a time (the first row arrives before the row cap refuses the second), with `-` and `N/A` kept as written; short rows are padded and long ones cut to the header; the csv module's field limit is put back after a read | nothing |
 | `test_tokenise.py` | A multi-select cell is matched by longest match against the vocabulary, never split on commas, and a token outside it is reported rather than guessed | nothing |
-| `test_validate.py` | The whole report for the fixtures, with counts read from the CSV: no errors; the `Unsure` rows, the `N/A` column, the two options that never appear apart, the three unmatched headers with their default roles; a missing column is an error; a repeated respondent id is a warning with two resolutions and no row dropped | nothing |
-| `test_inputs.py` | A file over the size cap, a zip that declares far more than it holds, an XLSX that isn't a zip, an entity declaration in the workbook's XML, a cell over the length cap and a file over the row cap are each refused with a reason and a count and never the content (`THREAT_MODEL.md`, row 1) | nothing |
+| `test_validate.py` | The whole report for the fixtures, with counts read from the CSV: no errors; the `Unsure` rows, the `N/A` column, the two options that never appear apart (and only when they sit together in the option list), the three unmatched headers with their default roles however the header is spelt; a missing, repeated or blank column is an error; a repeated respondent id is a warning with two resolutions, on every id-like column, and no row dropped; an unknown multi-select token gets the three resolutions | nothing |
+| `test_inputs.py` | A file over the size cap, a zip that declares far more than it holds, an XLSX that isn't a zip, an entity declaration in the workbook's XML, a cell over the length cap, a row over the width cap, a file over the row cap, XML cut short, a CSV in the wrong encoding and a missing file are each refused with a reason and a count and never the content (`THREAT_MODEL.md`, row 1); the cell and width caps default to Excel's own limits | nothing |
 | `test_cost.py` | The estimate reproduces `docs/05` section 2 (2.83M tokens, £3.97 cached, £5.09 uncached per 5,000 open answers), the rates are settings, and the assumptions print with the number | nothing |
-| `test_cli_validate.py` | `consult validate` prints the report and exits 0, 1 on an error, 2 on a refusal, and never quotes an open answer; `--json` gives the same report as a document | nothing |
+| `test_cli_validate.py` | `consult validate` prints the report and exits 0, 1 on an error, 2 on a refusal, and never quotes an open answer; `--json` prints the report as a document with the same counts, warnings and estimate | nothing |
 
 ## What is not proved yet
 

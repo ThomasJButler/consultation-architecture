@@ -1,8 +1,10 @@
 # Review log
 
-One row per pull request. The review pass is ReviewBot Protocol running on my
-own machine, with a Claude review pass before it. "Fixed" means a follow-up
-commit on the same branch; "kept" means I disagreed and say why.
+One row per pull request. For PR-01 to PR-03 the review pass was ReviewBot
+Protocol running on my own machine, with a Claude review pass before it;
+from PR-04 it is a Claude code review and a Claude security review, each
+finding verified before it counts. "Fixed" means a follow-up commit on the
+same branch; "kept" means I disagreed and say why.
 
 | PR | Branch | Reviewed by | Findings | Fixed | Kept, and why |
 |---|---|---|---|---|---|

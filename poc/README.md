@@ -4,10 +4,11 @@ A small, runnable proof-of-concept of the parts of the design that are easy
 to claim and hard to get right: the job pipeline's claim, lease and fan-in
 mechanics on a real Postgres, with a fake model so it runs offline. The
 design is `docs/02-architecture.md`; the schema is typed from
-`docs/04-data-model.md`. This pull request (PR-03) lays the scaffold those
-proofs stand on; the last section says what is proved so far, and
-`TESTING.md` which pull request proves the rest. This is not the product,
-and `../README.md` says what it deliberately leaves out.
+`docs/04-data-model.md`. PR-03 laid the scaffold those proofs stand on
+and PR-04 the parsing and validation in front of them; the section "What
+it does not prove" says what is proved so far, and `TESTING.md` which pull
+request proves the rest. This is not the product, and `../README.md` says
+what it deliberately leaves out.
 
 ## Run it
 
