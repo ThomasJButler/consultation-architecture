@@ -40,8 +40,8 @@ changes its schema by rewriting `consult/schema.sql` and resetting.
 | `consult/cost.py` | The token and cost estimate from `docs/05`, with its assumptions printed |
 | `consult/report.py` | The report rendered for a terminal or as JSON |
 | `consult/jobs.py` | The claim with its fence, the heartbeat, the checkpoint, the failure record and the success mark, every write fenced (`docs/02`, step 5; ADR-002) |
-| `consult/transitions.py` | `advance_consultation`, the one writer of the consultation's status; both fan-ins; the sign-off guard; the reopen (`docs/02`, steps 7, 8 and 10; ADR-001, ADR-003) |
-| `consult/tags.py` | Tags inserted on the full unique index, retracted in place, never deleted (ADR-004) |
+| `consult/transitions.py` | The only module that writes the consultation's status: `advance_consultation` for both fan-ins, the sign-off guard, the reopen (`docs/02`, steps 7, 8 and 10; ADR-001, ADR-003) |
+| `consult/tags.py` | Tags inserted on the full unique index, retracted in place, never deleted (ADR-004); a pair whose theme, answer and version don't line up writes nothing |
 | `consult/config.py` | Settings from the environment, then `.env`; held to `.env.example` by a test |
 | `consult/llm.py` | The model boundary: `Prompt`, `Completion`, the `LLM` protocol |
 | `consult/logs.py` | The log formatter that lets through ids, counts, durations, states and codes and nothing else |

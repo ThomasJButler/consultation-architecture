@@ -5,13 +5,14 @@ docs/02 section 2 in code. A worker finishing a question locks the
 consultation row first, in its own statement, then moves the question on,
 then calls advance_consultation, which runs both guarded UPDATEs and
 writes the outbox row for whichever fired, all in the caller's
-transaction. Section 6 says there is no second way to change the column,
-and a repo rule pins that.
+transaction. The reopen takes the same lock and writes its own guarded
+UPDATE, in this module: section 6 says there is no second way to change
+the column, and the repo rule pins it as "no module but this one".
 
 Why the lock comes first: under READ COMMITTED a blocked UPDATE
 re-evaluates only its own WHERE clause against the row it blocked on and
 "does not see effects of those commands on other rows" (PostgreSQL 17
-manual, 13.2.1, in docs/01). Two finishers each see the other's question
+manual, 13.2.1, quoted in docs/02 step 7). Two finishers each see the other's question
 still running and neither flips. The row lock serialises them, so the
 second finisher's NOT EXISTS runs after the first has committed.
 """
@@ -60,7 +61,8 @@ def _outbox(conn: psycopg.Connection[DictRow], consultation_id: UUID, kind: str)
 def advance_consultation(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> Advance:
     """Take the row lock, run both guarded UPDATEs, write the outbox row for
     whichever fired. The worker's completing transaction calls it; so will
-    the reconciler's fourth statement, a reopen and an operator retry."""
+    the reconciler's fourth statement and an operator retry (PR-08). The
+    reopen has its own guarded UPDATE below, under the same lock."""
     lock_consultation(conn, consultation_id)
     # The predicate is a positive list of the states a question hasn't got
     # past yet, so a question a quick reviewer has already signed off

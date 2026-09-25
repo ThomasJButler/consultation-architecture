@@ -3,8 +3,9 @@
 A worker finishing a question locks the consultation row, moves the
 question on, checks whether every open question has reached the
 milestone, flips the consultation if so and writes the email row, in one
-commit. One routine, advance_consultation, is the only writer of the
-consultation's status.
+commit. One module, transitions.py, is the only writer of the
+consultation's status: advance_consultation for the milestones and the
+reopen's own guarded UPDATE for the way back.
 """
 
 from __future__ import annotations

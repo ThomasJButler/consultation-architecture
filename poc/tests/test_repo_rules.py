@@ -58,7 +58,7 @@ def test_pure_tests_run_without_a_database() -> None:
         )
 
 
-def test_advance_consultation_is_the_only_writer_of_consultation_status() -> None:
+def test_nothing_outside_transitions_writes_consultation_status() -> None:
     # docs/02 section 6: there is no second way to change the column, which
     # is what stops a reopen racing a worker's fan-in. transitions.py holds
     # the routine and the reopen; nothing else may UPDATE consultation.
