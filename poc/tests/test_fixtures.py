@@ -12,9 +12,10 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-from make_fixture_data import CLOSED_QUESTIONS, FIXTURES_DIR, OPEN_QUESTIONS, write_fixtures
 from openpyxl import load_workbook
 from openpyxl.workbook.workbook import Workbook
+
+from make_fixture_data import CLOSED_QUESTIONS, FIXTURES_DIR, OPEN_QUESTIONS, write_fixtures
 
 SHEETS = {
     "Demographic questions": ["column_reference", "question_text"],

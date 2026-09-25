@@ -15,7 +15,7 @@ import json
 import pytest
 
 from consult.llm import LLM, Completion, Prompt
-from tests.fakes import FakeLLM, Fault, RecordingLLM, ScriptExhausted
+from tests.fakes import FakeLLM, Fault, RecordingLLM, ScriptExhaustedError
 
 PROMPT = Prompt(
     model_alias="fake-model",
@@ -36,8 +36,13 @@ def assignments_in(completion: Completion) -> list[dict[str, object]]:
     return assignments
 
 
-def ids_in(completion: Completion) -> list[object]:
-    return [assignment["answer_id"] for assignment in assignments_in(completion)]
+def ids_in(completion: Completion) -> list[int]:
+    ids: list[int] = []
+    for assignment in assignments_in(completion):
+        answer_id = assignment["answer_id"]
+        assert isinstance(answer_id, int)
+        ids.append(answer_id)
+    return ids
 
 
 def keys_in(completion: Completion) -> set[object]:
@@ -76,7 +81,7 @@ def test_the_scripted_fake_returns_literal_text_in_order() -> None:
     assert llm.complete(PROMPT).text == '{"assignments": []}'
     assert llm.complete(PROMPT).text == "second"
     assert llm.prompts == [PROMPT, PROMPT]
-    with pytest.raises(ScriptExhausted):
+    with pytest.raises(ScriptExhaustedError):
         llm.complete(PROMPT)
 
 
