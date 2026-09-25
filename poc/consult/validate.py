@@ -29,6 +29,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from consult.cost import DEFAULT_RATES, Estimate, Rates, estimate
 from consult.definition import ClosedQuestion, Definition, ResponseType
 from consult.responses import Responses
 from consult.tokenise import tokenise
@@ -109,6 +110,7 @@ class Report:
     columns: tuple[ColumnSummary, ...]
     row_count: int
     open_answer_count: int
+    estimate: Estimate
 
 
 def suggested_role(header: str) -> Resolution:
@@ -174,7 +176,7 @@ def _never_apart(tally: _Tally) -> Iterable[Warning]:
             )
 
 
-def validate(definition: Definition, responses: Responses) -> Report:
+def validate(definition: Definition, responses: Responses, rates: Rates = DEFAULT_RATES) -> Report:
     header = responses.header
     errors = [
         f"column {ref} is in the definition but not in the responses file"
@@ -295,4 +297,11 @@ def validate(definition: Definition, responses: Responses) -> Report:
 
     order = {kind: index for index, kind in enumerate(WarningKind)}
     warnings.sort(key=lambda w: (order[w.kind], w.column_ref, -w.count, w.value or ""))
-    return Report(tuple(errors), tuple(warnings), tuple(columns), row_count, open_answers)
+    return Report(
+        tuple(errors),
+        tuple(warnings),
+        tuple(columns),
+        row_count,
+        open_answers,
+        estimate(open_answers, rates),
+    )
