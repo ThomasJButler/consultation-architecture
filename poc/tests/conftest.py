@@ -54,10 +54,15 @@ def db_settings() -> Iterator[Settings]:
     base = _base_settings()
     name = f"consult_test_{secrets.token_hex(4)}"
     settings = _create_database(base, name)
-    with store.connect(settings) as conn:
-        store.init(conn)
-    yield settings
-    _drop_database(base, name)
+    # The drop is in a finally, because a schema.sql that fails to apply is
+    # exactly what a red schema commit produces, and each such run would
+    # otherwise leave a database behind.
+    try:
+        with store.connect(settings) as conn:
+            store.init(conn)
+        yield settings
+    finally:
+        _drop_database(base, name)
 
 
 @pytest.fixture
