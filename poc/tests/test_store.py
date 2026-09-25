@@ -19,8 +19,8 @@ from psycopg.errors import CheckViolation
 from psycopg.rows import DictRow
 
 from consult.errors import ErrorCode
+from consult.jobs import Lease, LeaseLostError, record_failure
 from consult.logs import Formatter
-from consult.store import record_failure
 from tests.rows import make_consultation, make_department, make_running_job
 from tests.test_logs import render
 
@@ -77,17 +77,14 @@ def test_job_error_and_log_lines_carry_ids_and_codes_only(
     consultation_id = make_consultation(db, make_department(db))
     job_id = make_running_job(db, consultation_id, claimed_by="worker-1", attempts=1)
 
-    written = record_failure(
+    record_failure(
         db,
-        job_id,
-        claimed_by="worker-1",
-        fence=1,
-        error_code=ErrorCode.GATEWAY_TIMEOUT,
+        Lease(job_id, "worker-1", 1),
+        ErrorCode.GATEWAY_TIMEOUT,
         provider_request_id="req_01J8ZW4",
         retry_in=timedelta(minutes=5),
     )
 
-    assert written
     row = db.execute(
         """
         SELECT status, error_code, provider_request_id, attempts,
@@ -149,11 +146,9 @@ def test_a_stale_fence_records_nothing(db: psycopg.Connection[DictRow]) -> None:
     job_id = make_running_job(db, consultation_id, claimed_by="worker-1", attempts=2)
 
     # A worker whose lease was taken over holds fence 1; the job is on 2.
-    written = record_failure(
-        db, job_id, claimed_by="worker-1", fence=1, error_code=ErrorCode.LEASE_LOST
-    )
+    with pytest.raises(LeaseLostError):
+        record_failure(db, Lease(job_id, "worker-1", 1), ErrorCode.LEASE_LOST)
 
-    assert not written
     row = db.execute("SELECT status, error_code FROM job WHERE id = %s", (job_id,)).fetchone()
     assert row == {"status": "running", "error_code": None}
 
@@ -167,7 +162,7 @@ def test_the_schema_check_and_the_enum_name_the_same_codes(
     consultation_id = make_consultation(db, make_department(db))
     for code in ErrorCode:
         job_id = make_running_job(db, consultation_id, kind="preview_themes")
-        assert record_failure(db, job_id, claimed_by="worker-1", fence=1, error_code=code)
+        record_failure(db, Lease(job_id, "worker-1", 1), code)
 
 
 def test_job_params_must_be_an_object(db: psycopg.Connection[DictRow]) -> None:
@@ -184,6 +179,5 @@ def test_job_params_must_be_an_object(db: psycopg.Connection[DictRow]) -> None:
 
 
 def test_an_unknown_job_records_nothing(db: psycopg.Connection[DictRow]) -> None:
-    assert not record_failure(
-        db, uuid4(), claimed_by="worker-1", fence=1, error_code=ErrorCode.WORKER_ERROR
-    )
+    with pytest.raises(LeaseLostError):
+        record_failure(db, Lease(uuid4(), "worker-1", 1), ErrorCode.WORKER_ERROR)

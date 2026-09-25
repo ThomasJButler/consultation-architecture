@@ -10,12 +10,15 @@ step 5). Nothing here commits; the caller owns the transaction.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from uuid import UUID
 
 import psycopg
 from psycopg.rows import DictRow
+
+from consult.errors import ErrorCode
 
 # Ten minutes of silence and a lease can be taken over (docs/02, step 5;
 # ADR-002 says why not shorter: a false takeover costs a batch).
@@ -58,3 +61,113 @@ def claim(
     if row is None:
         return None
     return Lease(job_id, worker, row["attempts"])
+
+
+class LeaseLostError(Exception):
+    """A write with a stale fence: another worker holds the lease now. The
+    worker stops at the next batch boundary and writes nothing more."""
+
+    code = ErrorCode.LEASE_LOST
+
+    def __init__(self, lease: Lease) -> None:
+        self.lease = lease
+        super().__init__(f"{self.code.value} job={lease.job_id} fence={lease.fence}")
+
+
+def _fenced(
+    conn: psycopg.Connection[DictRow], lease: Lease, sql: str, params: dict[str, object]
+) -> None:
+    """Run a job update under the fence and refuse it if the lease has gone."""
+    cursor = conn.execute(
+        sql,
+        {**params, "job_id": lease.job_id, "worker": lease.worker, "fence": lease.fence},
+    )
+    if cursor.rowcount != 1:
+        raise LeaseLostError(lease)
+
+
+def heartbeat(conn: psycopg.Connection[DictRow], lease: Lease) -> None:
+    """The write every later write starts with (docs/02, step 5)."""
+    _fenced(
+        conn,
+        lease,
+        """
+        UPDATE job SET heartbeat_at = now()
+         WHERE id = %(job_id)s AND claimed_by = %(worker)s
+           AND attempts = %(fence)s AND status = 'running'
+        """,
+        {},
+    )
+
+
+def checkpoint(
+    conn: psycopg.Connection[DictRow],
+    lease: Lease,
+    *,
+    batch_no: int,
+    stage: str,
+    answer_ids: Sequence[int],
+    status: str = "done",
+    trace_id: str | None = None,
+    tokens_in: int = 0,
+    tokens_out: int = 0,
+) -> bool:
+    """Record one batch. False means it was already there, which is what a
+    replay after takeover looks like (ADR-002)."""
+    heartbeat(conn, lease)
+    cursor = conn.execute(
+        """
+        INSERT INTO job_batch (department_id, job_id, batch_no, stage, answer_ids, status,
+                               trace_id, tokens_in, tokens_out)
+        SELECT department_id, id, %(batch_no)s, %(stage)s, %(answer_ids)s, %(status)s,
+               %(trace_id)s, %(tokens_in)s, %(tokens_out)s
+          FROM job WHERE id = %(job_id)s
+        ON CONFLICT (job_id, batch_no) DO NOTHING
+        """,
+        {
+            "job_id": lease.job_id,
+            "batch_no": batch_no,
+            "stage": stage,
+            "answer_ids": list(answer_ids),
+            "status": status,
+            "trace_id": trace_id,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+        },
+    )
+    return cursor.rowcount == 1
+
+
+def record_failure(
+    conn: psycopg.Connection[DictRow],
+    lease: Lease,
+    error_code: ErrorCode,
+    *,
+    provider_request_id: str | None = None,
+    retry_in: timedelta = timedelta(minutes=1),
+) -> None:
+    """Record a failure as a code and a request id, never a message.
+
+    The job goes to failed_retryable with a time to retry; whether it
+    retries or is marked failed at five attempts is the reconciler's call
+    (docs/02, section 5). Fenced like every other write.
+    """
+    _fenced(
+        conn,
+        lease,
+        """
+        UPDATE job
+           SET status = 'failed_retryable',
+               error_code = %(error_code)s,
+               provider_request_id = %(provider_request_id)s,
+               next_attempt_at = now() + %(retry_in)s,
+               heartbeat_at = now()
+         WHERE id = %(job_id)s AND claimed_by = %(worker)s
+           AND attempts = %(fence)s AND status = 'running'
+        """,
+        {
+            "error_code": error_code.value,
+            "provider_request_id": provider_request_id,
+            "retry_in": retry_in,
+        },
+    )
