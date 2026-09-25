@@ -26,6 +26,7 @@ from psycopg import sql
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 
+from consult import transitions
 from consult.stage import INGEST_ROLE, staging_table
 from consult.store import as_role
 from consult.tokenise import tokenise
@@ -41,6 +42,7 @@ class Ingested:
     vault_rows: int
     duplicate_answers: int
     duplicate_respondents: int
+    jobs: int
 
 
 @dataclass(frozen=True)
@@ -135,7 +137,9 @@ def _answers_for(question: _Question, cell: str) -> list[Answer]:
     return [(question.options[label], label, False, None)]
 
 
-def ingest(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> Ingested:
+def ingest(
+    conn: psycopg.Connection[DictRow], consultation_id: UUID, *, keep_staging: bool = False
+) -> Ingested:
     config = _load(conn, consultation_id)
     answered = [q for q in config.questions if q.kind != "identity"]
     identity = [q for q in config.questions if q.kind == "identity"]
@@ -185,13 +189,42 @@ def ingest(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> Ingested
             answers += len(batch)
             vault_rows += _vault(conn, config, respondent_id, row, identity)
         duplicate_answers, duplicate_respondents = _flag_duplicates(conn, consultation_id)
+        jobs = _queue_find_themes(conn, consultation_id)
+        transitions.mark_processing(conn, consultation_id)
+        if not keep_staging:
+            # Dropped by the role that created it, in the transaction that
+            # emptied it (docs/06, section 2.4 as corrected).
+            conn.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(staging_table(consultation_id)))
+    # docs/02 step 3a ends with ANALYZE, so the first filter query after an
+    # ingest plans on statistics for the rows it just wrote. Outside the
+    # role block: ANALYZE takes the MAINTAIN privilege in Postgres 17, which
+    # the login user has as owner and the ingest role needn't be given.
+    conn.execute("ANALYZE respondent, answer")
     return Ingested(
         respondents=respondents,
         answers=answers,
         vault_rows=vault_rows,
         duplicate_answers=duplicate_answers,
         duplicate_respondents=duplicate_respondents,
+        jobs=jobs,
     )
+
+
+def _queue_find_themes(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> int:
+    """One find_themes job per open question, pending, on the pass id the
+    consultation row holds (docs/04, section 2). job_one_per_run is the
+    arbiter, so a replay inserts none; pending to queued is dispatch (PR-08)."""
+    return conn.execute(
+        """
+        INSERT INTO job (department_id, consultation_id, question_id, kind, run_id, status)
+        SELECT q.department_id, q.consultation_id, q.id, 'find_themes', c.run_id, 'pending'
+          FROM question q JOIN consultation c ON c.id = q.consultation_id
+         WHERE q.consultation_id = %s AND q.kind = 'open'
+         ORDER BY q.ordinal
+        ON CONFLICT DO NOTHING
+        """,
+        (consultation_id,),
+    ).rowcount
 
 
 def _vault(
