@@ -21,6 +21,7 @@ from consult.transitions import (
     advance_consultation,
     finish_find_themes,
     finish_map_themes,
+    reopen_for_correction,
     sign_off,
 )
 from tests.rows import (
@@ -214,3 +215,52 @@ def test_sign_off_is_a_guarded_update_that_admits_one_reviewer(
         ("map_themes", "pending", True)
     ]
     assert jobs_[0]["id"] == signed.job_id
+
+
+def test_a_reopen_mints_a_run_id_so_the_second_email_has_its_own_row(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    consultation_id = make_consultation(db, make_department(db), status="awaiting_review")
+    question_id = make_open_question(db, consultation_id, status="assigning_themes")
+    make_theme_set_version(db, question_id, version_no=1, status="superseded")
+    signed = make_theme_set_version(db, question_id, version_no=2, status="signed_off")
+    parking = make_theme(db, signed, "PARKING")
+    lease = claim(
+        db, make_queued_job(db, consultation_id, question_id, kind="map_themes"), "worker-1"
+    )
+    assert lease is not None
+    assert finish_map_themes(db, lease, question_id, consultation_id) == Advance(False, True)
+    first_pass = consultation_row(db, consultation_id)["run_id"]
+    reviewer = uuid4()
+
+    reopened = reopen_for_correction(db, question_id, reviewer)
+
+    after = consultation_row(db, consultation_id)
+    assert after["status"] == "awaiting_review"
+    assert after["run_id"] == reopened.run_id != first_pass
+    question = db.execute("SELECT status FROM question WHERE id = %s", (question_id,)).fetchone()
+    assert question == {"status": "themes_ready"}
+    candidate = db.execute(
+        "SELECT version_no, status, parent_version_id FROM theme_set_version WHERE id = %s",
+        (reopened.candidate_version_id,),
+    ).fetchone()
+    assert candidate == {"version_no": 3, "status": "candidate", "parent_version_id": signed}
+    lineage = db.execute(
+        "SELECT key, lineage_theme_id FROM theme WHERE theme_set_version_id = %s",
+        (reopened.candidate_version_id,),
+    ).fetchall()
+    assert [(t["key"], t["lineage_theme_id"]) for t in lineage] == [("PARKING", parking)]
+
+    # The second pass runs like the first and earns its own email row,
+    # because the row's subject is the pass (docs/04, section 2).
+    second = sign_off(db, question_id, reviewer)
+    assert second is not None
+    lease = claim(db, second.job_id, "worker-2")
+    assert lease is not None
+    set_status(db, question_id, "assigning_themes")
+    assert finish_map_themes(db, lease, question_id, consultation_id) == Advance(False, True)
+    rows = outbox_rows(db, consultation_id)
+    assert [(r["kind"], r["subject_id"]) for r in rows] == [
+        ("analysis_ready", first_pass),
+        ("analysis_ready", reopened.run_id),
+    ]
