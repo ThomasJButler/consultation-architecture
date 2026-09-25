@@ -7,14 +7,18 @@ Every expectation here is read from the fixture CSV, not from the code.
 
 from __future__ import annotations
 
+import csv
+from dataclasses import replace
+from pathlib import Path
 from uuid import UUID
 
 import psycopg
 import pytest
 from psycopg.rows import DictRow
 
-from consult.ingest import Ingested, ingest
+from consult.ingest import Ingested, IngestError, ingest
 from consult.tokenise import tokenise
+from consult.validate import Resolution, WarningKind
 from tests.pipeline import NOT_ANSWERED, fixture_rows, staged_fixture
 
 pytestmark = pytest.mark.db
@@ -347,3 +351,63 @@ def test_ingest_is_idempotent_on_replay(db: psycopg.Connection[DictRow]) -> None
     assert staging_tables(db) == []
     assert ingest(db, staged.consultation_id) == nothing_written
     assert snapshot(db, staged.consultation_id) == written
+
+
+def write_repeated_id_file(tmp_path: Path) -> Path:
+    """The fixture with row 3's respondent id changed to row 2's."""
+    rows = fixture_rows()
+    rows[1]["respondent_ref"] = rows[0]["respondent_ref"]
+    path = tmp_path / "repeated.csv"
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
+
+
+def external_ids(db: psycopg.Connection[DictRow], consultation_id: UUID) -> dict[int, str | None]:
+    return {
+        r["source_row_no"]: r["external_id"]
+        for r in db.execute(
+            "SELECT source_row_no, external_id FROM respondent WHERE consultation_id = %s",
+            (consultation_id,),
+        ).fetchall()
+    }
+
+
+def test_a_repeated_respondent_id_is_refused_by_ingest_unless_resolved(
+    db: psycopg.Connection[DictRow], tmp_path: Path
+) -> None:
+    path = write_repeated_id_file(tmp_path)
+
+    # Unresolved: refused before a row is written, naming the rows and never
+    # the value (docs/04, section 3; docs/02, section 3.2 as corrected).
+    unresolved = staged_fixture(db, path=path, resolve=lambda r: replace(r, duplicate_ids=None))
+    assert any(w.kind is WarningKind.DUPLICATE_RESPONDENT_ID for w in unresolved.report.warnings)
+    with pytest.raises(IngestError) as refused:
+        ingest(db, unresolved.consultation_id)
+    assert "rows 2, 3" in str(refused.value)
+    assert "R-0001" not in str(refused.value)
+    assert external_ids(db, unresolved.consultation_id) == {}
+    status = db.execute(
+        "SELECT status FROM consultation WHERE id = %s", (unresolved.consultation_id,)
+    ).fetchone()
+    assert status == {"status": "staged"}
+
+    # The validator's default: keep the id on the first occurrence, blank
+    # it on the rest, drop no row.
+    kept = staged_fixture(db, path=path)
+    assert kept.resolutions.duplicate_ids is Resolution.KEEP_FIRST_BLANK_REST
+    ingest(db, kept.consultation_id)
+    ids = external_ids(db, kept.consultation_id)
+    assert len(ids) == 240
+    assert (ids[2], ids[3], ids[4]) == ("R-0001", None, "R-0003")
+
+    # Or ignore the column: every row identified by its row number alone.
+    ignored = staged_fixture(
+        db, path=path, resolve=lambda r: replace(r, duplicate_ids=Resolution.IGNORE_COLUMN)
+    )
+    ingest(db, ignored.consultation_id)
+    ids = external_ids(db, ignored.consultation_id)
+    assert len(ids) == 240
+    assert set(ids.values()) == {None}

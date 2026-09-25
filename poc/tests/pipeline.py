@@ -4,6 +4,7 @@ configured with every warning's default, on one connection."""
 from __future__ import annotations
 
 import csv
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
@@ -39,12 +40,20 @@ def fixture_rows() -> list[dict[str, str]]:
 
 
 def staged_fixture(
-    db: psycopg.Connection[DictRow], resolutions: Resolutions | None = None
+    db: psycopg.Connection[DictRow],
+    resolutions: Resolutions | None = None,
+    *,
+    path: Path = RESPONSES,
+    resolve: Callable[[Resolutions], Resolutions] | None = None,
 ) -> Staged:
+    """`resolutions` replaces the defaults outright; `resolve` edits them,
+    for a test that wants every default but one."""
     consultation_id = make_consultation(db, make_department(db))
-    stage(db, consultation_id, RESPONSES)
+    stage(db, consultation_id, path)
     definition = read_definition(DEFINITION)
-    report = validate(definition, Responses(RESPONSES))
+    report = validate(definition, Responses(path))
     chosen = resolutions or defaults(report)
+    if resolve is not None:
+        chosen = resolve(chosen)
     configured = configure(db, consultation_id, definition, report, chosen)
     return Staged(consultation_id, definition, report, chosen, configured)
