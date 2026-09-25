@@ -411,3 +411,25 @@ def test_a_repeated_respondent_id_is_refused_by_ingest_unless_resolved(
     ids = external_ids(db, ignored.consultation_id)
     assert len(ids) == 240
     assert set(ids.values()) == {None}
+
+
+def test_a_dash_in_the_id_column_is_no_id(db: psycopg.Connection[DictRow], tmp_path: Path) -> None:
+    # `-` is not answered in every column (docs/02, section 3.2), the id
+    # column included: the validator doesn't count two dashes as a repeated
+    # id, so ingest mustn't refuse them as one. Found by the security review.
+    rows = fixture_rows()
+    rows[0]["respondent_ref"] = "-"
+    rows[1]["respondent_ref"] = "-"
+    path = tmp_path / "dashes.csv"
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    staged = staged_fixture(db, path=path)
+    assert not any(w.kind is WarningKind.DUPLICATE_RESPONDENT_ID for w in staged.report.warnings)
+
+    result = ingest(db, staged.consultation_id)
+
+    assert result.respondents == 240
+    ids = external_ids(db, staged.consultation_id)
+    assert (ids[2], ids[3], ids[4]) == (None, None, "R-0003")
