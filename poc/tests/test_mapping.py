@@ -18,9 +18,20 @@ from psycopg.rows import DictRow
 
 from consult.jobs import LeaseLostError, claim
 from consult.mapping import MAP_BATCH_SIZE, assign, load_map_job, plan, run_map_themes
+from consult.themes import TOKEN_CAP
 from consult.transitions import Advance, finish_map_themes, start_map_themes
 from tests.fakes import FakeLLM, Fault, RecordingLLM
 from tests.pipeline import NOT_ANSWERED, fixture_rows, signed_off_fixture, signed_off_questions
+from tests.rows import (
+    make_answer,
+    make_consultation,
+    make_department,
+    make_open_question,
+    make_pending_job,
+    make_respondent,
+    make_theme,
+    make_theme_set_version,
+)
 from tests.test_ingest import normalised
 from tests.test_themes import WorkerCrashError, crash_after, distinct_reasons
 
@@ -117,6 +128,56 @@ def test_mapping_batches_ten_shuffled_answers_and_tags_under_the_fence(
         ).fetchone()
         == batches_before
     )
+
+
+# A hand count against the token cap: four characters a token (docs/05's
+# budget, as themes.py reads it), so an answer of 8,000 characters is 2,000
+# tokens. Three make 6,000, under the 7,500 cap, and a fourth would make
+# 8,000, over it, so twelve such answers plan as four batches of three and
+# the cap cuts long before the count of ten does.
+LONG_ANSWER_CHARS = 8_000
+LONG_ANSWER_TOKENS = 2_000
+LONG_ANSWERS = 12
+
+
+def test_mapping_sends_exactly_the_plans_batches_under_the_token_cap(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    # One signed-off question with twelve long answers and no related
+    # closed question, so they're one partition, built by hand.
+    consultation_id = make_consultation(db, make_department(db), status="awaiting_review")
+    question_id = make_open_question(db, consultation_id, status="signed_off")
+    version_id = make_theme_set_version(db, question_id, version_no=2, status="signed_off")
+    make_theme(db, version_id, "OTHER")
+    for row_no in range(1, LONG_ANSWERS + 1):
+        text = (f"Respondent {row_no}. " + "The crossing by the lock needs a light. " * 250)[
+            :LONG_ANSWER_CHARS
+        ]
+        respondent_id = make_respondent(db, consultation_id, row_no)
+        make_answer(db, consultation_id, respondent_id, question_id, text)
+    job_id = make_pending_job(
+        db, consultation_id, question_id, kind="map_themes", model_alias="fake-model", seed=7
+    )
+    db.execute("UPDATE job SET status = 'queued' WHERE id = %s", (job_id,))
+    job = load_map_job(db, job_id)
+
+    planned = plan(db, job)
+
+    assert TOKEN_CAP == 7_500
+    assert [len(batch.answers) for batch in planned] == [3, 3, 3, 3]
+
+    lease = claim(db, job_id, "worker-1")
+    assert lease is not None
+    llm = RecordingLLM()
+
+    assign(db, llm, lease, job, planned)
+
+    # A fresh job sends the plan as planned: the same batches, in the same
+    # order, answer ids in order, and none past the cap (docs/02, step 9).
+    assert [prompt.answer_ids for prompt in llm.prompts] == [
+        tuple(answer.id for answer in batch.answers) for batch in planned
+    ]
+    assert all(len(prompt.answer_ids) * LONG_ANSWER_TOKENS <= TOKEN_CAP for prompt in llm.prompts)
 
 
 def _proforma() -> tuple[str, int]:
