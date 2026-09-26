@@ -21,7 +21,7 @@ from consult import store
 from consult.query import AttrFilter, Filter, OtherFilter, related_distribution, scope, theme_table
 from make_fixture_data import PROFORMA_REASON, PROFORMA_ROWS
 from tests.pipeline import signed_off_fixture, signed_off_questions
-from tests.rows import tag_answers_by_rule
+from tests.rows import make_department, tag_answers_by_rule
 
 pytestmark = pytest.mark.db
 
@@ -273,3 +273,33 @@ def test_duplicates_are_hidden_unless_asked_for(db: psycopg.Connection[DictRow])
     proforma_shown = {c.key: c.respondents for c in shown.rows}["PROFORMA"]
     assert proforma_shown == 12
     assert proforma_shown - proforma_hidden == 11
+
+
+def _department_of(db: psycopg.Connection[DictRow], question_id: UUID) -> UUID:
+    row = db.execute("SELECT department_id FROM question WHERE id = %s", (question_id,)).fetchone()
+    assert row is not None
+    department_id: UUID = row["department_id"]
+    return department_id
+
+
+def test_the_scope_holds_to_the_callers_department(db: psycopg.Connection[DictRow]) -> None:
+    signed = signed_off_fixture(db)
+    tag_answers_by_rule(db, signed.version_id, signed.question_id, _o_reason_key)
+    other_department = make_department(db)
+
+    # A question id is a guessable value: named by a caller from another
+    # department, it reaches no row (docs/06 section 2, the department is
+    # the caller's; THREAT_MODEL.md row 5).
+    guessed = theme_table(db, signed.question_id, Filter(), department_id=other_department)
+    assert guessed.denominator == 0
+    assert guessed.rows == []
+    assert (
+        related_distribution(db, signed.question_id, Filter(), department_id=other_department) == []
+    )
+
+    # The question's own department still gets the hand count from
+    # responses.csv that test_the_theme_table_counts_match_the_fixture pins.
+    own = theme_table(
+        db, signed.question_id, Filter(), department_id=_department_of(db, signed.question_id)
+    )
+    assert own.denominator == 74
