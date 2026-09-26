@@ -405,3 +405,15 @@ its review and recorded here rather than rewritten into the merged text.
    `N/A` last; `test_a_kept_na_counts_in_the_related_distribution` in
    `poc/tests/test_query_db.py` pins it against a hand count (17 Support,
    22 Oppose, 6 Not sure, 26 `N/A`).
+
+6. **Item 3 above, the department row.** The one-statement find-or-create
+   (`INSERT ... ON CONFLICT (name) DO UPDATE`) locked the department row
+   `FOR UPDATE` for the whole ingest transaction, because the `SET` named a
+   unique-index column, and `FOR UPDATE` conflicts with the `FOR KEY SHARE`
+   every foreign-key insert takes: a worker of that department blocked at
+   its next checkpoint while an ingest ran (the review of 26 September
+   2026, finding 21, measured on PostgreSQL 16.13 with a 2 s lock timeout).
+   `consult ingest` now runs `INSERT ... ON CONFLICT (name) DO NOTHING
+   RETURNING id` and reads the id by name when nothing comes back; two runs
+   racing on a new name still land on one row, and no row lock is kept
+   (`poc/tests/test_cli_ingest.py`).
