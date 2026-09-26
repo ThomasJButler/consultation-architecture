@@ -127,7 +127,13 @@ def test_the_filter_plan_uses_both_indexes_at_twenty_thousand(
     assert shares is not None
     selectivity = shares["villages"] / shares["everyone"]
 
-    compiled = scope(reason, parse_filters(FILTER))
+    # The caller's department (docs/06 section 2) is the consultation's
+    # own: the benchmark reads as its owner, not across departments.
+    owner = db.execute(
+        "SELECT department_id FROM consultation WHERE id = %s", (staged.consultation_id,)
+    ).fetchone()
+    assert owner is not None
+    compiled = scope(reason, parse_filters(FILTER), department_id=owner["department_id"])
     explain = sql.SQL("EXPLAIN (ANALYZE, FORMAT JSON) ") + compiled.sql + FIRST_PAGE
     row = db.execute(explain, compiled.params).fetchone()
     assert row is not None
