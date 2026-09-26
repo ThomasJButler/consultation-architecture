@@ -11,7 +11,8 @@ time**.
 
 ## 0. How to start it
 
-Paste this into the cloud session:
+Start the cloud session on **Fable 5.1** (`claude-fable-5-1`), then paste
+this:
 
 > Run `plans/final-run.md` in this repository from section 1 to the end.
 > Merging is delegated to you for PR-08 and PR-09: merge each with a
@@ -19,7 +20,10 @@ Paste this into the cloud session:
 > logged. PR-10 is opened and left for me. Use the `tom-commit-voice` skill
 > for every commit, pull request and merge message, and the
 > `mattpocock-skills:tdd` skill for the test loop, where they're
-> available. Sections 3 and 4 of the file are the rules either way.
+> available. Sections 4 and 5 of the file are the rules either way.
+> Orchestrate on Fable 5.1 and hand the work to Sonnet 5 and Opus 5.5
+> subagents as section 3 sets out, within its budget. You may run a
+> workflow for each review round, inside the same budget.
 
 That paragraph is the owner's delegation. It overrides CLAUDE.md rule 5's
 "the owner does the merging" for PR-08 and PR-09 only, as the owner has
@@ -52,7 +56,10 @@ and apply the first rule that matches:
 
 ## 2. The environment
 
-The environment must be green before any work starts.
+The environment must be green before any work starts. The owner's laptop is
+closed for the whole run: nothing here may depend on it, its Docker
+Postgres, `RESUME.md` or `plans/prompts/`. The owner tests by hand
+afterwards (section 10).
 
 1. **Identity.** A clone has none of the repo-local config:
 
@@ -103,7 +110,92 @@ The environment must be green before any work starts.
    available, push the branch and stop, since the chain can't continue
    without a merge.
 
-## 3. The test loop (binding)
+## 3. Models and the budget
+
+**The session runs on Fable 5.1 as the orchestrator.** Fable reads the
+plans, sequences the work, and checks every chunk that comes back. It also
+decides fallbacks and judges disputed review findings. It writes every word
+that goes out under the owner's name: the pull request descriptions, the
+merge messages, the review rows and the reports.
+
+**Everything else goes to subagents, and they are Sonnet 5 or Opus 5.5,
+never Fable.**
+- Every Agent call and every Workflow `agent()` call names its model:
+  `model: "sonnet"` for Sonnet 5, `model: "opus"` for Opus 5.5.
+- A call that leaves the model out inherits Fable, which is the one thing
+  this budget exists to stop.
+- In a workflow, set `effort: "medium"` on Sonnet agents and
+  `effort: "high"` on Opus agents.
+
+### Who does what
+
+| Work | Model | Why that one |
+|---|---|---|
+| Sequencing, fallbacks, judging disputed findings, every description, merge message, review row and report | Fable 5.1, the session itself | Judgement over the whole run's context |
+| Checking a chunk: run its tests, read the diff, check the subjects and trailers | Fable 5.1, inline, no subagent | A few shell commands don't need an agent |
+| Getting the environment green (section 2) | Sonnet 5 | Long, noisy, well specified |
+| Implementation chunks that are concurrency, locking or SQL composition | Opus 5.5 | Where a subtle bug costs the most, and where the review rounds found the real defects (`docs/07` rows 05 and 06) |
+| Implementation chunks that are pure functions, wiring, settings, fakes, docs or status | Sonnet 5 | Well specified by the plan and pinned by a test |
+| Review lenses: design fidelity, tests and red/green history, writing rules | Sonnet 5 | Reading against a checklist |
+| Review lenses: SQL and Python under concurrency; the security review | Opus 5.5 | The hard reading |
+| Verifying findings | One Sonnet 5 agent per lens verifies all of that lens's findings in one pass. Only findings it upholds at high severity get one Opus 5.5 refuter | Three refuters per finding on forty findings would be 120 agents |
+| Fixing upheld findings | Sonnet 5, or Opus 5.5 when the fix is in a concurrency path | |
+
+### The chunks
+
+Implementation runs **one chunk at a time** because it's one branch. Each
+chunk agent does its red/green pairs in order, commits each one to sections
+4 and 5, and reports back. Its report gives:
+- the hashes and subjects of its commits;
+- the failing line it saw for each `Pin`;
+- anything the plan didn't answer.
+
+The agent's brief names the plan file, its step numbers, the files it may
+touch, and sections 4 and 5 of this file.
+
+| PR | Chunk | Plan steps | Model |
+|---|---|---|---|
+| 08 | The pure pick | 1-2 | Sonnet 5 |
+| 08 | Dispatch under the lock; `jobs.queue` retired | 3-4 | Opus 5.5 |
+| 08 | `start_map_themes` and `fail_job` | 5-6 | Opus 5.5 |
+| 08 | Mapping batches and duplicates | 7-10 | Sonnet 5 |
+| 08 | The retry at one, resume by coverage, fan-in 2 | 11-16 | Opus 5.5 |
+| 08 | `GatewayError` and the backoff | 17-18 | Sonnet 5 |
+| 08 | The worker loop | 19-20 | Opus 5.5 |
+| 08 | The reconciler's statements | 21-28 | Opus 5.5 |
+| 08 | The commands, the docs correction, docstrings, `TESTING.md` | 29-33 | Sonnet 5 |
+| 09 | The grammar | 1-2 | Sonnet 5 |
+| 09 | The scope CTE and hostile values | 3-4 | Opus 5.5 |
+| 09 | The theme table, the other-question filter, the duplicate toggle | 5-10 | Sonnet 5 |
+| 09 | The prefix, the workbook, the export role | 11-16 | Sonnet 5 |
+| 09 | The generator and the plan benchmark | 17-20 | Opus 5.5 |
+| 09 | The commands and `TESTING.md` | 21-23 | Sonnet 5 |
+| 10 | The mechanics pin and `TESTING.md` | 1-2 | Sonnet 5 |
+| 10 | The docs corrections and the READMEs | 3-6 | Sonnet 5 |
+
+Fable does the status-block step at the end of each PR itself, because it
+carries the owner's words. Fable writes PR-10's evidence table from what a
+Sonnet agent pulls out of `SUBMISSION.md` and the docs.
+
+### The budget
+
+| PR | Subagents at most | Of which Opus 5.5 at most |
+|---|---|---|
+| 08 | 24 | 10 |
+| 09 | 18 | 6 |
+| 10 | 6 | 1 |
+| **The run** | **48** | **17** |
+
+- No more than five subagents run at once, and only in a review round.
+- Fable subagents: none.
+- Fable keeps a running count in its head and writes it into each PR's
+  description and review row. The row names which model ran which lens.
+- When a PR's ceiling is reached, no more subagents start on it. Fable
+  finishes inline, or cuts to the clock rules in section 1, and says so.
+- If the account's usage limit is hit mid-run, push what's committed and
+  stop as section 11 says.
+
+## 4. The test loop (binding)
 
 This follows CLAUDE.md rule 2 and the `mattpocock-skills:tdd` skill. If
 the skill is listed, invoke it at the start of each pull request. These
@@ -131,7 +223,7 @@ rules hold either way:
 8. **`make -C poc check` in full before every push.** Coverage stays at 90%
    or above.
 
-## 4. The commit voice (binding)
+## 5. The commit voice (binding)
 
 This follows CLAUDE.md rule 4 and the `tom-commit-voice` skill. If the
 skill is listed, invoke it for every commit, pull request description and
@@ -176,7 +268,7 @@ wouldn't guess), `## Testing` (the test count and what ran where), and
   were the review round.
 - `git log -1 --format=%B fb8bb1e` is the model.
 
-## 5. Every pull request finishes the same way
+## 6. Every pull request finishes the same way
 
 1. `make -C poc check` green. Push.
 2. Open the pull request **ready for review**, not draft (unless section 2
@@ -197,12 +289,12 @@ wouldn't guess), `## Testing` (the test count and what ran where), and
    were lost because they weren't written down before the merge.
 5. Update the README Status block (dated) and CLAUDE.md's status line.
    Revise the next plan if this merge changed anything it assumes.
-6. For PR-08 and PR-09: CI green on the head, merge (section 4), then run
+6. For PR-08 and PR-09: CI green on the head, merge (section 5), then run
    `git switch main && git pull`. For PR-10: stop here.
 7. Report in fifteen lines at most: what shipped, what was cut and why,
    and anything the owner must decide.
 
-## 6. PR-08: mapping, the worker loop and the reconciler
+## 7. PR-08: mapping, the worker loop and the reconciler
 
 **Plan:** `plans/PR-08-poc-mapping-worker.md`. It was revised on
 26 September against the merged PR-07 code. Its section 2 is the list of
@@ -241,7 +333,7 @@ planning commits at its base; don't cut a new one.
 - The jitter's `random` carries both the ruff S311 and the bandit B311
   markers.
 
-## 7. PR-09: the filter query, the export and the plan benchmark
+## 8. PR-09: the filter query, the export and the plan benchmark
 
 **Plan:** `plans/PR-09-poc-query-export-cli.md`.
 
@@ -267,7 +359,7 @@ If the planner won't use the GIN index at an honest selectivity, the
 plan's section 7 says what to record. A benchmark that finds the design
 wrong has done its job.
 
-## 8. PR-10: the submission, finished
+## 9. PR-10: the submission, finished
 
 **Plan:** `plans/PR-10-submission-polish.md`.
 
@@ -297,7 +389,51 @@ the owner's list: rewrite the bullets, rebuild the PDF
 (`submission/build.sh`), answer the rule-12 question, merge, and tag
 `v1.0-submission`.
 
-## 9. When to stop early
+## 10. The owner's manual test
+
+The owner runs this on the laptop after the run, on the way home, in about
+half an hour. It's not a gate on the run. Anything it finds goes on a
+`fix/` branch cut from `main` as a red/green pair, before PR-10 merges.
+
+```bash
+cd ~/Repos/iai/iaitakehometest && git switch main && git pull
+cd poc && docker compose up -d db
+.venv/bin/pip install -e '.[dev]'
+make reset && make check
+make ingest                                # prints the consultation id
+docker compose exec db psql -U consult -d consult -c \
+  "select id, column_ref, status from question where kind = 'open'"
+.venv/bin/consult worker --once            # run twice: both questions themes_ready
+.venv/bin/consult worker --once
+.venv/bin/consult themes <question-id>     # read the themes and the edit counter
+.venv/bin/consult sign-off <question-id> --reviewer "$(uuidgen)" --expect-version <n>
+                                           # once per question
+.venv/bin/consult worker --once            # run twice: both complete, consultation ready
+.venv/bin/consult worker --once
+docker compose exec db psql -U consult -d consult -c \
+  "select status from consultation; select kind, status from notification_outbox;
+   select kind, status, count(*) from job group by 1, 2"
+.venv/bin/consult reconcile                # then the same query: only the outbox rows move to sent
+```
+
+After PR-09 (the flags as `consult query --help` shows them):
+
+```bash
+.venv/bin/consult query <question-id> --filter attr:d_area=Villages
+.venv/bin/consult export <consultation-id> --out ~/Desktop/consult.xlsx
+open ~/Desktop/consult.xlsx                # the answer starting "=" shows as text, not a formula
+.venv/bin/pytest -m slow                   # the plan benchmark
+```
+
+What to look for:
+- No answer text anywhere in the terminal. Ids, counts, codes and
+  durations only.
+- The consultation goes `processing`, then `awaiting_review`, then `ready`.
+- One `themes_ready` row and one `analysis_ready` row.
+- `reconcile` on a finished consultation changes no job row.
+- In the workbook, a lone `-` is still a lone `-`.
+
+## 11. When to stop early
 
 Stop, push, and report instead of guessing, if:
 - CI goes red for a reason that isn't fixed in 30 minutes;
@@ -309,7 +445,7 @@ Stop, push, and report instead of guessing, if:
 Everything else a plan doesn't answer: take its section 7 fallback, and
 say so in the commit body and the pull request.
 
-## 10. State at hand-off
+## 12. State at hand-off
 
 On 26 September 2026:
 - `main` has PR-03 to PR-07 (#7 to #11) and Dependabot's setup-python
