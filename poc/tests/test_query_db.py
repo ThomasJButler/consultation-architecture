@@ -9,7 +9,10 @@ test is `test_query.py`, which stays pure.
 
 from __future__ import annotations
 
+import csv
 import re
+from collections import Counter
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -19,10 +22,12 @@ from psycopg import sql
 from psycopg.rows import DictRow
 
 from consult import store
+from consult.ingest import ingest
 from consult.query import AttrFilter, Filter, OtherFilter, related_distribution, scope, theme_table
 from make_fixture_data import PROFORMA_REASON, PROFORMA_ROWS
-from tests.pipeline import signed_off_fixture, signed_off_questions
+from tests.pipeline import fixture_rows, signed_off_fixture, signed_off_questions, staged_fixture
 from tests.rows import make_department, tag_answers_by_rule
+from tests.test_themes import distinct_reasons
 
 pytestmark = pytest.mark.db
 
@@ -342,6 +347,51 @@ def test_the_related_lookup_stays_inside_the_department(db: psycopg.Connection[D
             return LookupError
 
     assert asked(signed.question_id) == asked(uuid4()) == []
+
+
+# Lines 2 to 41 of responses.csv, its first forty respondents.
+NA_LINES = range(2, 42)
+
+
+def test_a_kept_na_counts_in_the_related_distribution(
+    db: psycopg.Connection[DictRow], tmp_path: Path
+) -> None:
+    # docs/02 section 3.2 makes N/A on a closed column a real value, kept
+    # unless the reviewer says otherwise, and ingest stores it with no
+    # option: value_text 'N/A', option_id NULL. The related distribution
+    # has to count it as it counts an option, or everyone who gave it
+    # drops out of screen 4's second panel while attr:c_route=N/A still
+    # finds them. c_route is N/A on NA_LINES here, under the default
+    # resolutions. The hand count runs over distinct_reasons(), the first
+    # occurrence of each o_reason text, which is the scope with duplicates
+    # hidden: a duplicate respondent repeats an earlier o_reason. The order
+    # is the definition's options, then N/A.
+    rows = fixture_rows()
+    for line, row in enumerate(rows, start=2):
+        if line in NA_LINES:
+            row["c_route"] = "N/A"
+    path = tmp_path / "responses.csv"
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    staged = staged_fixture(db, path=path)
+    ingest(db, staged.consultation_id)
+    question_id = staged.configured.questions["o_reason"]
+
+    answered = Counter(
+        "N/A" if line in NA_LINES else related
+        for line, _text, related in distinct_reasons()
+        if line in NA_LINES or related is not None
+    )
+    expected = [(label, answered[label]) for label in ("Support", "Oppose", "Not sure", "N/A")]
+
+    distribution = related_distribution(
+        db, question_id, Filter(), department_id=_department_of(db, question_id)
+    )
+
+    assert distribution == expected
+    assert sum(count for _label, count in distribution) == sum(answered.values())
 
 
 def test_the_theme_table_is_one_statement(
