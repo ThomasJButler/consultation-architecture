@@ -79,6 +79,9 @@ class _Configured:
 NOTHING_WRITTEN = Ingested(
     respondents=0, answers=0, vault_rows=0, duplicate_answers=0, duplicate_respondents=0, jobs=0
 )
+# The states a consultation reaches after ingest has run once. A redelivery
+# that finds one of these and no staging table has nothing left to do.
+PAST_INGEST = ("processing", "awaiting_review", "ready")
 
 
 def normalised_sha256(text: str) -> bytes:
@@ -207,10 +210,24 @@ def ingest(
     conn: psycopg.Connection[DictRow], consultation_id: UUID, *, keep_staging: bool = False
 ) -> Ingested:
     config = _load(conn, consultation_id)
-    if config.status == "processing" and not _staging_table_exists(conn, consultation_id):
+    table_exists = _staging_table_exists(conn, consultation_id)
+    if config.status in PAST_INGEST and not table_exists:
         # The usual shape of a redelivery: the first run committed and
-        # dropped its table. Nothing to read and nothing to write.
+        # dropped its table, and the consultation may have moved on since.
+        # Nothing to read and nothing to write (docs/04, section 3).
         return NOTHING_WRITTEN
+    if config.status != "staged" and config.status not in PAST_INGEST:
+        raise IngestError(f"consultation {consultation_id} is {config.status}, not staged")
+    if not config.questions:
+        # Without configure there is nothing to explode the rows into, and
+        # dropping the table would lose the only copy of the answers.
+        raise IngestError(f"consultation {consultation_id} has no questions configured")
+    if not table_exists:
+        # docs/02 correction 5: the ingest job re-runs stage from the upload
+        # consultation.upload_sha256 names. This proof-of-concept stores the
+        # hash but no upload, so it says what's missing rather than failing
+        # on the SELECT below.
+        raise IngestError(f"consultation {consultation_id} has no staging table to ingest")
     answered = [q for q in config.questions if q.kind != "identity"]
     identity = [q for q in config.questions if q.kind == "identity"]
     respondents = 0
