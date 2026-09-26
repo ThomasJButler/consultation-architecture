@@ -362,8 +362,10 @@ A review of PR-02 found fifteen inconsistencies across the design documents; `do
 
 ## Correction, 26 September 2026
 
-Three things PR-06's code does that the body above doesn't say, found by
-its review and recorded here rather than rewritten into the merged text.
+What the code and its review rounds found that the body above doesn't
+say, recorded here rather than rewritten into the merged text: items 1 to
+3 from PR-06's review, 4 from PR-09's benchmark, 5 from PR-10's evidence
+pass.
 
 1. **Section 2, the staging table's drop.** The proof-of-concept drops the
    table inside the ingest transaction, not after the commit. Its
@@ -392,7 +394,6 @@ its review and recorded here rather than rewritten into the merged text.
    chooses. The shares the planner needed, the GIN pending list after an
    ingest and what the fixture's duplicates do to the numbers are in docs/05's
    correction of the same date.
-
 5. **Section 1, the job table and the inference region.** docs/06 section
    2.1 and docs/02 section 10 both require the inference region recorded on
    every job, for the DPIA. The `job` row above has no column for it, and
