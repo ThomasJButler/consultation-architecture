@@ -420,6 +420,10 @@ def _themes(args: argparse.Namespace, settings: Settings) -> int:
     then the longlist with what each folded into. Keys, labels and numbers;
     the quotes themselves are the sign-off screen's to show (docs/02, step 8)."""
     with store.connect(settings) as conn:
+        exists = conn.execute("SELECT 1 FROM question WHERE id = %s", (args.question,)).fetchone()
+        if exists is None:
+            print(f"question {args.question}: not found")
+            return 1
         version = conn.execute(
             """
             SELECT id, version_no, status, edit_version FROM theme_set_version
@@ -665,12 +669,16 @@ def _query(args: argparse.Namespace, settings: Settings) -> int:
     except FilterError as exc:
         print(f"refused: {exc}")
         return 2
-    with store.connect(settings) as conn, as_role(conn, PIPELINE_ROLE):
-        department_id = args.department or _question_department(conn, args.question)
-        table = query.theme_table(conn, args.question, parsed, department_id=department_id)
-        distribution = query.related_distribution(
-            conn, args.question, parsed, department_id=department_id
-        )
+    try:
+        with store.connect(settings) as conn, as_role(conn, PIPELINE_ROLE):
+            department_id = args.department or _question_department(conn, args.question)
+            table = query.theme_table(conn, args.question, parsed, department_id=department_id)
+            distribution = query.related_distribution(
+                conn, args.question, parsed, department_id=department_id
+            )
+    except LookupError:
+        print(f"question {args.question}: not found")
+        return 1
     logs.log_event(
         logger,
         "queried",
@@ -696,8 +704,12 @@ def _export(args: argparse.Namespace, settings: Settings) -> int:
     sets no role itself, only the path and the timing.
     """
     started = time.monotonic()
-    with store.connect(settings) as conn:
-        result = export.write_workbook(conn, args.consultation, args.out)
+    try:
+        with store.connect(settings) as conn:
+            result = export.write_workbook(conn, args.consultation, args.out)
+    except LookupError:
+        print(f"consultation {args.consultation}: not found")
+        return 1
     logs.log_event(
         logger,
         "exported",
