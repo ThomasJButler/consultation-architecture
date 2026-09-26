@@ -13,9 +13,12 @@ runs it to the end with the fake, committing after every batch; `consult
 themes` lists a question's candidates as keys, labels, counts and answer
 ids; `consult sign-off` confirms them as they stand and dispatches the
 map_themes job (docs/02, steps 4 and 6 to 8). `consult worker` picks,
-claims and runs one queued or stale job by kind, once with `--once` or in
-a loop that stops on SIGINT or SIGTERM; `consult reconcile` runs the five
-statements of docs/02 section 5 and prints their six counts.
+claims and runs one queued or stale job by kind, once with `--once` or,
+without it, in a loop that stops between jobs on SIGINT or SIGTERM: a
+manual convenience, not ADR-002's per-batch stop inside Fargate's
+`stopTimeout`, which is the deployed worker's design (`_stop_flag`'s
+docstring). `consult reconcile` runs the five statements of docs/02
+section 5 and prints their six counts.
 """
 
 from __future__ import annotations
@@ -490,10 +493,14 @@ def _log_outcome(outcome: Outcome | None) -> None:
 
 
 def _stop_flag() -> threading.Event:
-    """A flag SIGINT and SIGTERM both set, so the loop below finishes the
-    job it is on and stops rather than dying mid-batch (ADR-002: "on
-    SIGTERM a worker finishes its current batch"). Installed only here,
-    since `--once` returns before a second signal could matter."""
+    """A flag SIGINT and SIGTERM both set, checked only between
+    `run_once` calls (`_worker`, below), so the loop stops between jobs,
+    not between batches. ADR-002's "on SIGTERM a worker finishes its
+    current batch and stops" is sized to `stopTimeout` for the deployed
+    Fargate worker; this loop is the manual test's own convenience, and
+    `--once` is the path a test drives (`_worker`'s docstring). Installed
+    only here, since `--once` returns before a second signal could
+    matter."""
     stop = threading.Event()
 
     def _handle(_signum: int, _frame: object) -> None:
@@ -513,8 +520,13 @@ def _worker(args: argparse.Namespace, settings: Settings) -> int:
     SIGTERM flips the stop flag; the design has no number for that sleep,
     so five seconds is picked only to be short enough not to leave real
     work waiting and long enough not to poll Postgres for nothing. The
-    loop isn't run by a test: real time isn't something a test should
-    wait on, and `--once` is what `test_cli_worker.py` drives instead."""
+    flag is only read between the calls to `run_once` below, so a job
+    already running is finished whole; that is coarser than ADR-002's
+    per-batch stop inside `stopTimeout`, which belongs to the deployed
+    worker and not to this loop's own manual convenience (`_stop_flag`'s
+    docstring). The loop isn't run by a test: real time isn't something a
+    test should wait on, and `--once` is what `test_cli_worker.py` drives
+    instead."""
     llm = OfflineModel()
     name = _worker_name(args.worker)
     with store.connect(settings) as conn:
