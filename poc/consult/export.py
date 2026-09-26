@@ -535,14 +535,19 @@ def _write_responses(
     return cut
 
 
-def _write_summary(ws: WriteOnlyWorksheet, table: query.ThemeTable) -> int:
+def _write_summary(ws: WriteOnlyWorksheet, table: query.ThemeTable, hidden: int) -> int:
     """docs/02 step 12's per-question summary: key, label, respondents and
     the denominator, straight from `query.theme_table` under the default
     filter, so this number and the per-question dashboard's can't drift
-    apart. Returns the count of cells cut at the cap."""
+    apart. The default filter hides duplicates (docs/02 section 7,
+    decision 9) and the Responses sheet marks every row, so a line under
+    the table, a blank row apart so it isn't read as a theme, names the
+    `hidden` count. Returns the count of cells cut at the cap."""
     cut = _row(ws, ["key", "label", "respondents", "denominator"])
     for row in table.rows:
         cut += _row(ws, [row.key, row.label, row.respondents, table.denominator])
+    ws.append([])
+    cut += _row(ws, [f"Duplicate answers hidden: {hidden} (the Responses sheet marks every row)"])
     return cut
 
 
@@ -619,18 +624,20 @@ def write_workbook(
     statement and holds it for every statement after (PostgreSQL 17
     manual, 13.2.2), so a retraction, a human tag, a worker insert or a
     new sign-off committed by another session mid-export can't split the
-    workbook across two states of the database, the summary sheet
-    disagreeing with the Responses sheet it's meant to total. psycopg
-    only applies `isolation_level` and `read_only` to the next
-    transaction, and only while the connection is idle, so a connection
-    with a transaction open is refused (`ExportError.CONNECTION_BUSY`)
-    rather than committed: those writes are the caller's to commit or
-    roll back. Both settings are saved before they're set and put back
-    in `finally`, so `conn` comes back to its caller at its own
-    isolation level, not this function's. `exported_at` is read back as
-    that transaction's own `now()` (`_snapshot_now`) rather than Python's
-    clock, for the same reason: it names the instant the snapshot was
-    taken.
+    workbook across two states of the database. The summary sheets aren't
+    the Responses sheet's totals: they count respondents under the default
+    filter, duplicates hidden (docs/02 section 7, decision 9), where the
+    Responses sheet marks every row, and each says under its table how
+    many answers that hides. psycopg only applies `isolation_level` and
+    `read_only` to the next transaction, and only while the connection is
+    idle, so a connection with a transaction open is refused
+    (`ExportError.CONNECTION_BUSY`) rather than committed: those writes
+    are the caller's to commit or roll back. Both settings are saved
+    before they're set and put back in `finally`, so `conn` comes back to
+    its caller at its own isolation level, not this function's.
+    `exported_at` is read back as that transaction's own `now()`
+    (`_snapshot_now`) rather than Python's clock, for the same reason: it
+    names the instant the snapshot was taken.
 
     The reads run as `store.EXPORT_ROLE` (docs/06, section 2.4 as
     corrected), the one role with a grant on the vault and none on the
@@ -666,6 +673,15 @@ def write_workbook(
                 question.id: query.theme_table(
                     conn, question.id, Filter(), department_id=department_id
                 )
+                for question in open_questions
+            }
+            # The same scope with duplicates shown: what its denominator
+            # adds to the default one is what the summary sheet hides.
+            hidden = {
+                question.id: query.theme_table(
+                    conn, question.id, Filter(with_duplicates=True), department_id=department_id
+                ).denominator
+                - summaries[question.id].denominator
                 for question in open_questions
             }
             manifest_questions = tuple(
@@ -714,7 +730,7 @@ def write_workbook(
         summary_ws: WriteOnlyWorksheet = workbook.create_sheet(
             _sheet_title(question.column_ref, used_titles)
         )
-        cut += _write_summary(summary_ws, summaries[question.id])
+        cut += _write_summary(summary_ws, summaries[question.id], hidden[question.id])
     manifest_ws: WriteOnlyWorksheet = workbook.create_sheet("Manifest")
     _write_manifest(manifest_ws, manifest, cut)
     workbook.save(path)
