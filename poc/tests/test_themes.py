@@ -23,6 +23,7 @@ from psycopg.rows import DictRow
 from consult.ingest import ingest
 from consult.jobs import claim
 from consult.prompts import DATA_PREAMBLE, PromptAnswer
+from consult.store import PIPELINE_ROLE, as_role
 from consult.themes import (
     BATCH_SIZE,
     EXAMPLES_PER_THEME,
@@ -566,3 +567,23 @@ def test_a_second_delivery_writes_no_second_v1(db: psycopg.Connection[DictRow]) 
             """,
             (job.question_id,),
         )
+
+
+def test_the_whole_job_runs_under_the_pipeline_role(db: psycopg.Connection[DictRow]) -> None:
+    # The grants docs/06 section 2.4 gives consult_pipeline are enough for
+    # every write a find_themes job makes, and they are the ones the worker
+    # should be running with, so the vault stays out of reach even when the
+    # code gets it wrong (THREAT_MODEL.md, row 6). Found by the security
+    # review: the command was running as the login user.
+    staged = staged_fixture(db)
+    ingest(db, staged.consultation_id)
+    job_id = queued_find_themes_job(db, staged, "o_reason")
+    with as_role(db, PIPELINE_ROLE):
+        lease = claim(db, job_id, "worker-1")
+        assert lease is not None
+        advance = run_find_themes(db, RecordingLLM(), lease)
+        who = db.execute("SELECT current_user AS who").fetchone()
+    assert who == {"who": "consult_pipeline"}
+    assert advance == Advance(themes_ready=False, analysis_ready=False)
+    state = db.execute("SELECT status FROM job WHERE id = %s", (job_id,)).fetchone()
+    assert state == {"status": "succeeded"}

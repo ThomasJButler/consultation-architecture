@@ -18,8 +18,11 @@ import psycopg
 import pytest
 from psycopg.rows import DictRow
 
+from consult import themes
 from consult.cli import main
 from consult.config import Settings
+from consult.jobs import Lease
+from consult.transitions import Advance
 
 pytestmark = pytest.mark.db
 
@@ -239,3 +242,34 @@ def test_the_sign_off_command_freezes_v2_and_refuses_a_second(
         {"q": safety},
     ).fetchone()
     assert state == {"status": "themes_ready", "versions": 1}
+
+
+def test_run_job_works_as_the_pipeline_role(
+    db: psycopg.Connection[DictRow],
+    db_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The command claims and runs under SET ROLE consult_pipeline, the role
+    # with no grant on the vault (docs/06, section 2.4 as corrected), and
+    # not as the login user it connected with.
+    jobs = ingested(db, db_settings)
+    seen: list[str] = []
+
+    def record_role(
+        conn: psycopg.Connection[DictRow], llm: object, lease: Lease, **_: object
+    ) -> Advance:
+        row = conn.execute("SELECT current_user AS who").fetchone()
+        seen.append(str(row["who"]) if row else "")
+        return Advance(themes_ready=False, analysis_ready=False)
+
+    monkeypatch.setattr(themes, "run_find_themes", record_role)
+    assert (
+        main(
+            ["run-job", str(jobs["o_reason"]), "--worker", "w1", "--model", "fake"],
+            settings=db_settings,
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert seen == ["consult_pipeline"]
