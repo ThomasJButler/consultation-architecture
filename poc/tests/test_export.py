@@ -33,7 +33,7 @@ from consult import export, store
 from consult.config import Settings
 from consult.query import Filter, theme_table
 from consult.store import EXPORT_ROLE, as_role
-from tests.pipeline import signed_off_questions
+from tests.pipeline import fixture_rows, signed_off_questions
 from tests.rows import make_job_batch, tag_answers_by_rule
 
 pytestmark = pytest.mark.db
@@ -754,3 +754,43 @@ def test_sheet_titles_differing_only_in_case_stay_within_excels_limit(
         assert len(title) <= 31
         assert not title.startswith("'")
         assert not title.endswith("'")
+
+
+def test_the_summary_sheet_says_how_many_duplicates_it_hides(
+    db: psycopg.Connection[DictRow], tmp_path: Path
+) -> None:
+    """The summary sheet counts respondents under the default filter,
+    which hides duplicates (docs/02 section 7, decision 9), while the
+    Responses sheet marks every row, a duplicate's copied tags included,
+    so the two disagree by design and the sheet has to say by how much.
+    Hand count from responses.csv: o_reason is answered on 221 rows
+    (blank, "-" and "N/A", which docs/02 section 3.2 makes not answered
+    on an open question, left out) holding 74 distinct texts, one
+    canonical answer each, so 147 rows are hidden."""
+    answered = [
+        row["o_reason"] for row in fixture_rows() if row["o_reason"] not in {"", "-", "N/A"}
+    ]
+    assert (len(answered), len(set(answered))) == (221, 74)
+
+    signed = signed_off_questions(db, ("o_reason",))
+    tag_answers_by_rule(
+        db, signed["o_reason"].version_id, signed["o_reason"].question_id, _o_reason_key
+    )
+    db.commit()
+
+    path = tmp_path / "export.xlsx"
+    export.write_workbook(db, signed["o_reason"].consultation_id, path)
+
+    workbook = load_workbook(path)
+    responses = workbook["Responses"]
+    header = [str(cell.value) for cell in next(responses.iter_rows(max_row=1))]
+    columns = [i for i, name in enumerate(header) if name.startswith("o_reason: ")]
+    marks = sum(1 for row in responses.iter_rows(min_row=2) for i in columns if row[i].value == "1")
+    assert marks == 221
+
+    summary = list(workbook["o_reason summary"].iter_rows(values_only=True))
+    assert summary[0] == ("key", "label", "respondents", "denominator")
+    assert {row[3] for row in summary[1:4]} == {"74"}
+    last = summary[-1]
+    assert last[0] == "Duplicate answers hidden: 147 (the Responses sheet marks every row)"
+    assert all(value is None for value in last[1:])
