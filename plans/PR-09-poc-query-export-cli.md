@@ -1,7 +1,8 @@
 # PR-09: The filter query, the export and the plan benchmark
 
-**Status:** Planned (drafted 26 September 2026; read against PR-08's code on
-26 September 2026 before its merge: nothing below changed)
+**Status:** Done (drafted 26 September 2026; merged as pull request #14 on
+26 September 2026, with the open work its review left listed under
+section 7)
 **Owner:** Thomas Butler   **Date:** 26 September 2026
 **Depends on:** PR-08   **Branch:** `feat/09-poc-query-export-cli`
 
@@ -176,6 +177,18 @@ adds one failing test, run and seen failing for the right reason.
   the design wrong has done its job.
 - If time runs short, cut in this order: the summary sheet, then test 5,
   then the related distribution. Never cut tests 2, 6 or 10.
+
+**Open work the review round left (row 09), for a `fix/` branch:**
+
+- `export.write_workbook` scopes by consultation id alone; the caller's
+  department, which `query.scope` takes, isn't a parameter of the export
+  yet (docs/06, section 2). The export reads the consultation's own
+  department for its summary counts.
+- The plan benchmark finds its two index nodes anywhere in the plan tree.
+  The observed placement (the GIN scan feeding a Bitmap Heap Scan on
+  `respondent`, the answer key probed on the inner side of a Nested Loop,
+  200 loops) is recorded in `docs/05`'s correction of 26 September 2026
+  and not yet asserted.
 
 ## 8. Definition of done
 

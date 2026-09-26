@@ -1,6 +1,8 @@
 # PR-10: The submission, finished
 
-**Status:** Planned (drafted 26 September 2026)
+**Status:** Planned (drafted 26 September 2026; read against PR-09's code on
+26 September 2026 before its merge: section 0 gains the open work below,
+nothing else changed)
 **Owner:** Thomas Butler   **Date:** 26 September 2026
 **Depends on:** PR-09   **Branch:** `docs/10-submission-polish`
 
@@ -23,6 +25,25 @@ owner rewrites them by hand (plans/00-plan.md, section 0). A session
 proposes changes in the pull request description and never edits a bullet
 itself. The tag `v1.0-submission` is the owner's, after the rewrite and the
 merge, because nothing is rewritten after a tag (CLAUDE.md, rule 4).
+
+**Open work PR-09 left, to name in `poc/README.md`'s unproved list (step
+4) and to fix on a `fix/` branch if the owner wants it before the tag:**
+
+- `export.write_workbook` scopes by consultation id alone; the caller's
+  department, which `query.scope` takes, isn't a parameter of the export
+  yet (docs/06, section 2; `plans/PR-09-poc-query-export-cli.md`,
+  section 7).
+- The plan benchmark finds its two index nodes anywhere in the plan tree;
+  the observed placement is recorded in `docs/05`'s correction of
+  26 September 2026 and not yet asserted.
+- The scaled fixture's open answers are 99.5% exact duplicates at 20,000
+  rows, so the measured page is empty; the generator needs distinct text
+  before the benchmark says anything about a consultation with few
+  duplicates (`docs/05`, correction 4).
+- The GIN index's pending list isn't flushed by ingest's `ANALYZE`, so
+  the first filter after an ingest runs without the index until
+  autovacuum (`docs/05`, correction 3); the fix, a flush before the ingest
+  commits or `fastupdate = off`, is unmeasured.
 
 ## 1. Objective
 

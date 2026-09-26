@@ -8,12 +8,14 @@ design is `docs/02-architecture.md`; the schema is typed from
 validation in front of it, PR-05 proves three of the four mechanics with
 named tests, PR-06 takes a file into the schema end to end, PR-07 runs
 the `find_themes` job stage by stage with the model a fake, through to a
-signed-off theme set, and PR-08 dispatches jobs under the caps, maps a
+signed-off theme set, PR-08 dispatches jobs under the caps, maps a
 signed-off question in batches, and runs the worker loop and the
-reconciler's five statements without a hand on each job; the section
-"What it does not prove" says what is left, and `TESTING.md` which pull
-request proves it. This is not the product, and `../README.md` says
-what it deliberately leaves out.
+reconciler's five statements without a hand on each job, and PR-09 adds
+the per-question filter query, the XLSX export and the plan benchmark
+that proves the fourth mechanic; the section "What it does not prove"
+says what is left, and `TESTING.md` which pull request proves it. This
+is not the product, and `../README.md` says what it deliberately leaves
+out.
 
 ## Run it
 
@@ -37,6 +39,8 @@ consult themes <question id>                         # keys, labels, counts, exa
 consult sign-off <question id> --reviewer <uuid> --expect-version 0
 consult worker --once                                 # runs the map_themes job sign-off queued
 consult reconcile                                      # dispatch, recover, retry, fan-ins, relay
+consult query <question id> --filter attr:d_area=Villages --filter theme:<key>
+consult export <consultation id> --out out.xlsx
 ```
 
 The model is `consult/fake_model.py`: it answers every prompt well, so
@@ -47,13 +51,13 @@ about theme quality.
 and applies it again. There is no migration tool: a proof-of-concept
 changes its schema by rewriting `consult/schema.sql` and resetting.
 
-## What is here (PR-03 to PR-08)
+## What is here (PR-03 to PR-09)
 
 | Path | What it is |
 |---|---|
 | `consult/schema.sql` | Fourteen of the design's sixteen tables (`docs/04`, section 8 says which two stay out), the `vault` and `staging` schemas, the four roles and their grants |
 | `consult/store.py` | Connections with dict rows, `init`, `reset`, `record_failure` |
-| `consult/cli.py` | `consult init [--reset]`; `consult validate RESPONSES --definition WORKBOOK [--json]`; `consult ingest RESPONSES --definition WORKBOOK --name NAME --department NAME`; `consult run-job JOB --worker NAME --model fake`; `consult themes QUESTION`; `consult sign-off QUESTION --reviewer UUID --expect-version N`; `consult worker [--once] [--worker NAME] [--model fake] [--poll-seconds N]`; `consult reconcile` |
+| `consult/cli.py` | `consult init [--reset]`; `consult validate RESPONSES --definition WORKBOOK [--json]`; `consult ingest RESPONSES --definition WORKBOOK --name NAME --department NAME`; `consult run-job JOB --worker NAME --model fake`; `consult themes QUESTION`; `consult sign-off QUESTION --reviewer UUID --expect-version N`; `consult worker [--once] [--worker NAME] [--model fake] [--poll-seconds N]`; `consult reconcile`; `consult query QUESTION [--filter F]...`; `consult export CONSULTATION --out PATH` |
 | `consult/definition.py` | The definition workbook, read into typed questions (`docs/00`) |
 | `consult/responses.py` | The responses file, CSV or XLSX, one row at a time |
 | `consult/tokenise.py` | Multi-select cells matched by longest match against the option vocabulary, never split on commas |
@@ -76,6 +80,8 @@ changes its schema by rewriting `consult/schema.sql` and resetting.
 | `consult/transitions.py` | The only module that writes the consultation's status: `advance_consultation` for both fan-ins, the sign-off guard, the reopen, `start_map_themes` and `fail_job` (`docs/02`, steps 7, 8 and 10, section 6; ADR-001, ADR-003) |
 | `consult/reconciler.py` | The five statements in order, each idempotent: dispatch, recover, retry, re-run both fan-ins, relay (`docs/02`, section 5) |
 | `consult/tags.py` | Tags inserted on the full unique index, retracted in place, never deleted (ADR-004); a pair whose theme, answer and version don't line up writes nothing |
+| `consult/query.py` | The filter grammar parsed to a typed value, the scope CTE composed with `psycopg.sql`, the theme table with its denominator, the related closed question's distribution (`docs/02`, step 11; `docs/04`, section 6) |
+| `consult/export.py` | The XLSX export: text cells, the neutralising prefix, the per-question summary and the manifest, read as `consult_export` (`docs/02`, step 12) |
 | `consult/config.py` | Settings from the environment, then `.env`; held to `.env.example` by a test |
 | `consult/llm.py` | The model boundary: `Prompt`, `Completion`, the `LLM` protocol |
 | `consult/logs.py` | The log formatter that lets through ids, counts, durations, states and codes and nothing else |
@@ -113,20 +119,21 @@ proforma repeated word for word, and one answer starting with `=`.
 
 ## What it does not prove
 
-- Scale. The fixtures are 240 respondents; the plan benchmark at 20,000
-  rows is PR-09, and ten million is a staging load test, not this.
+- Scale past 20,000 rows. The plan benchmark proves the filter's shape
+  there (`TESTING.md`); the 500 ms at ten million answers stays with the
+  staging load test, not this (ADR-007).
 - Any AWS wiring: no S3, no SQS, no Notify. The queue message is a hint in
   the design and the job table is the truth, so the mechanics can be proved
   without the queue.
 - The web app or the dashboard. The proof-of-concept stops at a command
-  line.
+  line: no report as a print view or DOCX (`docs/02` step 12's second
+  kind, cut for time since the XLSX carries the same numbers), no
+  overview endpoint, no response cards or their page query, and no
+  presigned links.
 - Model quality. The model is a fake that answers every prompt well and
   condenses by key stem. What is proved is what reaches the model, what
   happens to a reply that is wrong in each of the ways the threat model
   names, and the mechanics around the call.
-- The indexed filter query, the fourth mechanic; that's PR-09 with its
-  `EXPLAIN` at 20,000 rows. The other three are proved in `TESTING.md`'s
-  named tests.
 - A real model gateway, SQS or Notify call, and `review_reminder` rows.
   The fake stands in for the gateway throughout; the relay marks an
   outbox row sent with a fake reference; and nothing records when a

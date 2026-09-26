@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from importlib import resources
+from uuid import UUID
 
 import psycopg
 from psycopg import sql
@@ -40,6 +41,11 @@ SCHEMAS: tuple[str, ...] = ("vault", "staging")
 # and no grant on the vault or the staging schema (docs/06, section 2.4 as
 # corrected). The ingest role is named next to the code that uses it.
 PIPELINE_ROLE = "consult_pipeline"
+# The role export.py reads as: SELECT on the public tables, and SELECT on
+# the vault besides, the one grant the pipeline role is refused (docs/06,
+# section 2.4 as corrected; section 4, the export role's own view of the
+# identity columns).
+EXPORT_ROLE = "consult_export"
 
 
 def qualified(name: str) -> sql.Composable:
@@ -110,3 +116,22 @@ def as_role(conn: psycopg.Connection[DictRow], role: str) -> Iterator[None]:
     finally:
         if conn.info.transaction_status != TransactionStatus.INERROR:
             conn.execute("RESET ROLE")
+
+
+def identity_columns(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> list[DictRow]:
+    """One row per identity value held for a consultation: the respondent
+    it names, the column it came from, and the value itself. export.py
+    calls this rather than naming the schema itself, because only
+    ingest.py, stage.py and this module may (test_repo_rules.py,
+    test_nothing_on_the_pipeline_path_names_the_vault); export.py is the
+    one place outside that trio with a real reason to read it (docs/06,
+    section 4).
+    """
+    return conn.execute(
+        """
+        SELECT v.respondent_id, v.column_ref, v.value_text
+          FROM vault.respondent_identity v JOIN respondent r ON r.id = v.respondent_id
+         WHERE r.consultation_id = %s
+        """,
+        (consultation_id,),
+    ).fetchall()

@@ -10,7 +10,11 @@ route that the wireframes in docs/02 section 12 use.
 
 Deterministic: the seed is fixed, so `make fixtures` rewrites the same files
 and a test holds the committed copies to this script. Rerun it after any
-change here and commit the result.
+change here and commit the result. `--scale N --out DIR` writes N
+respondents from the same seed somewhere else, for the plan benchmark's
+20,000-row consultation (docs/05 section 9); the committed files are the
+default 240, and only above that does a demographic with
+`weights_at_scale` leave the uniform draw.
 
 The data carries the cases later pull requests need on purpose: an option
 containing a comma (the argument for configuring in the app), a follow-up
@@ -22,9 +26,11 @@ the export writer must neutralise (THREAT_MODEL.md, section 4).
 
 from __future__ import annotations
 
+import argparse
 import csv
 import random
 import zipfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -48,6 +54,9 @@ class DemographicQuestion:
     text: str
     values: tuple[str, ...]
     not_applicable_share: float = 0.0
+    # Relative weights for `values` when writing more than the committed
+    # RESPONDENTS, or None for the uniform draw at every scale.
+    weights_at_scale: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +79,16 @@ DEMOGRAPHIC_QUESTIONS: tuple[DemographicQuestion, ...] = (
         "d_area",
         "Which part of the district do you live in?",
         ("Town centre", "Suburbs", "Villages", "Outside the district"),
+        # Villages one respondent in twenty above the committed 240, not
+        # one in four, for the plan benchmark that filters on it. At
+        # 20,000 respondents the planner took the GIN scan on attrs at
+        # every share tried from 4.7% to 19.3% and dropped it at 23.0%,
+        # but from 9.5% up its plan cost within 2% of a sequential scan
+        # of respondent; at 4.7% the gap is 8% (a sweep on PostgreSQL
+        # 16.13, 26 September 2026; tests/test_plan_benchmark.py prints
+        # the share it runs at). The committed rows keep the uniform
+        # draw, so their bytes don't move.
+        weights_at_scale=(35, 45, 5, 15),
     ),
     DemographicQuestion(
         "d_commute",
@@ -201,7 +220,7 @@ def _blank_or(rng: random.Random, share: float, value: str) -> str:
     return NO_ANSWER if rng.random() < share else value
 
 
-def _respondent(rng: random.Random, row_no: int) -> dict[str, str]:
+def _respondent(rng: random.Random, row_no: int, *, scaled: bool) -> dict[str, str]:
     row: dict[str, str] = {
         ID_COLUMN: f"R-{row_no:04d}",
         IDENTITY_COLUMN: f"respondent{row_no:03d}@example.org",
@@ -210,7 +229,12 @@ def _respondent(rng: random.Random, row_no: int) -> dict[str, str]:
         if rng.random() < question.not_applicable_share:
             row[question.column_ref] = NOT_APPLICABLE
         else:
-            row[question.column_ref] = _blank_or(rng, 0.04, rng.choice(question.values))
+            weights = question.weights_at_scale if scaled else None
+            if weights is None:
+                value = rng.choice(question.values)
+            else:
+                value = rng.choices(question.values, weights=weights)[0]
+            row[question.column_ref] = _blank_or(rng, 0.04, value)
 
     route, modes, safety = CLOSED_QUESTIONS
     stance = rng.choices(route.options, weights=(50, 35, 15))[0]
@@ -293,7 +317,7 @@ def _fix_zip_timestamps(path: Path) -> None:
             target.writestr(info, data)
 
 
-def write_fixtures(out_dir: Path) -> Written:
+def write_fixtures(out_dir: Path, *, respondents: int = RESPONDENTS, seed: int = SEED) -> Written:
     out_dir.mkdir(parents=True, exist_ok=True)
     definition = out_dir / "definition.xlsx"
     responses = out_dir / "responses.csv"
@@ -303,18 +327,23 @@ def write_fixtures(out_dir: Path) -> Written:
     with zipfile.ZipFile(definition, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
         ExcelWriter(_definition_workbook(), archive).save()
     _fix_zip_timestamps(definition)
-    rng = random.Random(SEED)
+    rng = random.Random(seed)
+    scaled = respondents > RESPONDENTS
     columns = response_columns()
     with responses.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
-        for row_no in range(1, RESPONDENTS + 1):
-            writer.writerow(_respondent(rng, row_no))
+        for row_no in range(1, respondents + 1):
+            writer.writerow(_respondent(rng, row_no, scaled=scaled))
     return Written(definition=definition, responses=responses)
 
 
-def main() -> int:
-    written = write_fixtures(FIXTURES_DIR)
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Write the fictional consultation's fixtures.")
+    parser.add_argument("--scale", type=int, default=RESPONDENTS, help="respondents to write")
+    parser.add_argument("--out", type=Path, default=FIXTURES_DIR, help="directory to write into")
+    args = parser.parse_args(argv)
+    written = write_fixtures(args.out, respondents=args.scale)
     print(f"wrote {written.definition} and {written.responses}")
     return 0
 

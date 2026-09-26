@@ -64,3 +64,7 @@ SELECT a.id, a.value_text
 ## How I'd know this was wrong
 
 An `EXPLAIN` on the three-predicate filter that sequentially scans `respondent`, or a theme count on the dashboard that changes without a new `theme_set_version` row.
+
+## Correction, 26 September 2026
+
+The acceptance test in "Consequences" names the `(question_id, id)` index beside the GIN. PR-09's benchmark (`poc/tests/test_plan_benchmark.py`) found the GIN scan in use and that index in no plan: the first page reaches `answer` once per respondent the GIN scan found, through the unique key that leads with `(respondent_id, question_id)`. docs/04's and docs/05's corrections of the same date carry the measured shares and what the plan needs after an ingest.

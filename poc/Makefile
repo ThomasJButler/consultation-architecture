@@ -3,9 +3,9 @@
 # on the path (CI installs into the runner's interpreter).
 PY ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python)
 
-.PHONY: check lint type test test-pure audit venv init reset fixtures validate ingest
+.PHONY: check lint type test test-slow test-pure audit venv init reset fixtures validate ingest
 
-check: lint type test audit
+check: lint type test test-slow audit
 
 lint:
 	$(PY) -m ruff check .
@@ -14,8 +14,16 @@ lint:
 type:
 	$(PY) -m mypy
 
+# The coverage run deselects the `slow` tests: the plan benchmark's ingest of
+# 20,000 rows took 231 s under coverage against 37 s without it (measured
+# 26 September 2026 on Postgres 16), and coverage is 95% without them.
 test:
-	$(PY) -m pytest --cov=consult --cov-report=term-missing
+	$(PY) -m pytest -m 'not slow' --cov=consult --cov-report=term-missing
+
+# The `slow` tests (the exactly-once race, the plan benchmark) on their own,
+# without coverage, so `make check` still runs every test.
+test-slow:
+	$(PY) -m pytest -m slow
 
 # The pure-function tests, no database needed (pytest.ini marks the rest `db`).
 test-pure:

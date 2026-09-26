@@ -18,7 +18,13 @@ without it, in a loop that stops between jobs on SIGINT or SIGTERM: a
 manual convenience, not ADR-002's per-batch stop inside Fargate's
 `stopTimeout`, which is the deployed worker's design (`_stop_flag`'s
 docstring). `consult reconcile` runs the five statements of docs/02
-section 5 and prints their six counts.
+section 5 and prints their six counts. `consult query QUESTION [--filter
+F]...` prints docs/02 screen 4's per-question dashboard: the theme table
+with its denominator, and the related closed question's distribution,
+under a filter of the four forms step 11 names; a malformed one is
+refused by its code and never by the value that failed it. `consult
+export CONSULTATION --out PATH` writes docs/02 step 12's XLSX workbook and
+prints its counts. Neither prints an answer's text.
 """
 
 from __future__ import annotations
@@ -38,7 +44,19 @@ from uuid import UUID
 import psycopg
 from psycopg.rows import DictRow
 
-from consult import config, jobs, logs, reconciler, report, store, themes, transitions, worker
+from consult import (
+    config,
+    export,
+    jobs,
+    logs,
+    query,
+    reconciler,
+    report,
+    store,
+    themes,
+    transitions,
+    worker,
+)
 from consult.config import Settings
 from consult.configure import ConfigureError, configure, defaults
 from consult.definition import Definition, DefinitionError, read_definition
@@ -48,6 +66,7 @@ from consult.ingest import IngestError, ingest
 from consult.inputs import InputError
 from consult.jobs import LeaseLostError
 from consult.llm import GatewayError
+from consult.query import FilterError
 from consult.replies import ReplyError
 from consult.responses import Responses
 from consult.stage import INGEST_ROLE, stage
@@ -112,6 +131,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="how long to sleep between empty picks when looping (default 5)",
     )
     commands.add_parser("reconcile", help="run the reconciler's five statements once")
+    run_query = commands.add_parser(
+        "query", help="print a question's theme table and related distribution under a filter"
+    )
+    run_query.add_argument("question", type=UUID, help="the question id")
+    run_query.add_argument(
+        "--filter",
+        action="append",
+        default=[],
+        help=(
+            "attr:<column>=<value>, theme:<key> (OR'd, repeatable), "
+            "other:<question>.theme=<key>, or with=duplicates (docs/02, step 11); repeatable"
+        ),
+    )
+    run_query.add_argument(
+        "--department",
+        type=UUID,
+        help="the caller's department id (docs/06, section 2); default: the question's own",
+    )
+    run_export = commands.add_parser("export", help="write the consultation's XLSX workbook")
+    run_export.add_argument("consultation", type=UUID, help="the consultation id")
+    run_export.add_argument("--out", type=Path, required=True, help="the workbook's path")
     return parser
 
 
@@ -566,6 +606,88 @@ def _reconcile(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def _question_department(conn: psycopg.Connection[DictRow], question_id: UUID) -> UUID:
+    row = conn.execute(
+        "SELECT department_id FROM question WHERE id = %s", (question_id,)
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"question {question_id} does not exist")
+    department_id: UUID = row["department_id"]
+    return department_id
+
+
+def _query(args: argparse.Namespace, settings: Settings) -> int:
+    """docs/02 screen 4's per-question dashboard, printed rather than paged.
+    The filter parses to a typed value first, so a malformed one is
+    refused by its code and exits 2 before any query runs, and the value
+    that failed it never reaches the line (CLAUDE.md rule 8: a filter
+    value is whatever a user typed into the address bar). The two reads
+    run under `store.PIPELINE_ROLE`: the proof-of-concept has no
+    dashboard role of its own, the pipeline role holds every SELECT the
+    two reads need (schema.sql's grant on all public tables) and no
+    grant on the vault at all, so a read this path should never make
+    fails at the schema rather than succeeding (docs/06, section 2.4).
+
+    Every query is held to the caller's department (docs/06, section 2).
+    The web app passes the signed-in user's; the command-line operator
+    is trusted to name one with `--department`, and without it the
+    command reads the question's own first, under the same role.
+    """
+    try:
+        parsed = query.parse_filters(args.filter or [])
+    except FilterError as exc:
+        print(f"refused: {exc}")
+        return 2
+    with store.connect(settings) as conn, as_role(conn, PIPELINE_ROLE):
+        department_id = args.department or _question_department(conn, args.question)
+        table = query.theme_table(conn, args.question, parsed, department_id=department_id)
+        distribution = query.related_distribution(
+            conn, args.question, parsed, department_id=department_id
+        )
+    logs.log_event(
+        logger,
+        "queried",
+        question_id=args.question,
+        theme_count=len(table.rows),
+        respondent_count=table.denominator,
+    )
+    print(f"question {args.question}: of {table.denominator} respondents who answered")
+    for row in table.rows:
+        pct = (row.respondents / table.denominator * 100) if table.denominator else 0.0
+        print(f"  {row.key}  {report.shown(row.label)}  {row.respondents}  {pct:.1f}%")
+    if distribution:
+        print(
+            "related: "
+            + ", ".join(f"{report.shown(label)} {count}" for label, count in distribution)
+        )
+    return 0
+
+
+def _export(args: argparse.Namespace, settings: Settings) -> int:
+    """docs/02 step 12's XLSX. `write_workbook` already runs its own reads
+    under `store.EXPORT_ROLE` (export.py's own docstring), so this command
+    sets no role itself, only the path and the timing.
+    """
+    started = time.monotonic()
+    with store.connect(settings) as conn:
+        result = export.write_workbook(conn, args.consultation, args.out)
+    logs.log_event(
+        logger,
+        "exported",
+        consultation_id=args.consultation,
+        respondent_count=result.respondents,
+        answer_count=result.answers,
+        tag_count=result.tags,
+        sheet_count=result.sheets,
+        duration_ms=round((time.monotonic() - started) * 1000),
+    )
+    print(
+        f"wrote {args.out}: {result.respondents} respondents, {result.answers} answers, "
+        f"{result.tags} tags, {result.sheets} sheets"
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None, *, settings: Settings | None = None) -> int:
     # Here and not under __main__: the console script pyproject.toml
     # declares calls main directly, and the formatter is the control on the
@@ -594,6 +716,10 @@ def main(argv: Sequence[str] | None = None, *, settings: Settings | None = None)
         return _worker(args, resolved)
     if args.command == "reconcile":
         return _reconcile(args, resolved)
+    if args.command == "query":
+        return _query(args, resolved)
+    if args.command == "export":
+        return _export(args, resolved)
     return _validate(args, resolved)
 
 

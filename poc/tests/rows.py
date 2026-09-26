@@ -6,6 +6,7 @@ design doesn't need for the row to exist.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from uuid import UUID, uuid4
 
 import psycopg
@@ -211,6 +212,100 @@ def make_answer(
         RETURNING id
         """,
         (respondent_id, question_id, text, consultation_id),
+    )
+
+
+def tag_answers_by_rule(
+    conn: psycopg.Connection[DictRow],
+    version_id: UUID,
+    question_id: UUID,
+    key_for: Callable[[str], str],
+    *,
+    source: str = "ai",
+) -> dict[int, str]:
+    """Tag every non-blank answer to `question_id` in `answer_theme` against
+    `version_id`, the key chosen by `key_for(value_text)`. A test's stand-in
+    for `tags.insert_tags`, which needs a claimed lease this factory has no
+    job to hold; the tags a test then counts come from the test and not
+    from the worker. Every physical row is tagged, its
+    duplicates included, so revealing them with `with=duplicates` changes a
+    theme's count and not just the denominator (docs/04 section 6). A key
+    `key_for` returns that the version doesn't already carry is created;
+    OTHER and NO_REASON usually already are, from `transitions.sign_off`'s
+    fallback themes, so this reuses those rather than colliding with them.
+
+    Returns the answer id each key was chosen for, so a test's hand count
+    from the fixture CSV can be checked against exactly what was inserted.
+    """
+    chosen: dict[int, str] = {}
+    for row in conn.execute(
+        "SELECT id, value_text FROM answer WHERE question_id = %s AND NOT is_blank",
+        (question_id,),
+    ).fetchall():
+        answer_id = row["id"]
+        assert isinstance(answer_id, int)
+        text = row["value_text"]
+        assert isinstance(text, str)
+        chosen[answer_id] = key_for(text)
+    if not chosen:
+        return chosen
+
+    keys = sorted(set(chosen.values()))
+    for key in keys:
+        conn.execute(
+            """
+            INSERT INTO theme (department_id, theme_set_version_id, key, label)
+            SELECT department_id, id, %(key)s, %(label)s FROM theme_set_version WHERE id = %(version)s
+            ON CONFLICT (theme_set_version_id, key) DO NOTHING
+            """,
+            {"version": version_id, "key": key, "label": key.replace("_", " ").capitalize()},
+        )
+    theme_ids: dict[str, UUID] = {}
+    for row in conn.execute(
+        "SELECT id, key FROM theme WHERE theme_set_version_id = %s AND key = ANY(%s)",
+        (version_id, keys),
+    ).fetchall():
+        theme_key = row["key"]
+        theme_id = row["id"]
+        assert isinstance(theme_key, str)
+        assert isinstance(theme_id, UUID)
+        theme_ids[theme_key] = theme_id
+
+    answer_ids = list(chosen)
+    conn.execute(
+        """
+        INSERT INTO answer_theme (department_id, answer_id, theme_id, theme_set_version_id, source)
+        SELECT v.department_id, pair.answer_id, pair.theme_id, v.id, %(source)s
+          FROM unnest(%(answer_ids)s::bigint[], %(theme_ids)s::uuid[]) AS pair(answer_id, theme_id)
+          JOIN theme_set_version v ON v.id = %(version)s
+        """,
+        {
+            "version": version_id,
+            "source": source,
+            "answer_ids": answer_ids,
+            "theme_ids": [theme_ids[chosen[answer_id]] for answer_id in answer_ids],
+        },
+    )
+    return chosen
+
+
+def make_job_batch(
+    conn: psycopg.Connection[DictRow],
+    job_id: UUID,
+    answer_ids: list[int],
+    *,
+    batch_no: int = 1,
+    stage: str = "map_themes",
+    status: str = "done",
+) -> None:
+    """A worker's checkpoint as mapping.py writes one (ADR-002): the batch
+    of answers a stage covered, and whether it tagged them or gave up."""
+    conn.execute(
+        """
+        INSERT INTO job_batch (department_id, job_id, batch_no, stage, answer_ids, status)
+        SELECT department_id, id, %s, %s, %s, %s FROM job WHERE id = %s
+        """,
+        (batch_no, stage, answer_ids, status, job_id),
     )
 
 

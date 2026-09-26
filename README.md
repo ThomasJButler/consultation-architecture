@@ -76,9 +76,23 @@ no transaction open across a call, the failed edges and the attention row,
 the reconciler's five statements with the fifth-attempt fix recorded as a
 dated correction to `docs/02`, and two commands, `consult worker --once`
 and `consult reconcile`, that take the fixtures from ingest to `ready`
-with a hand on no job. Next: queries and export (PR-09), then final
-polish (PR-10), run in order from `plans/final-run.md`. Deliberately not
-built: see above.
+with a hand on no job.
+Merged: the filter query, the export and the plan benchmark (PR-09): the
+dashboard's filter grammar parsed to a typed value and refused by code,
+the scope CTE from `docs/04` section 6 composed with `psycopg.sql` and
+held to the caller's department, so a hostile value never reaches the
+statement's text and another department's id finds no row, the theme
+table with its denominator in one statement and the related closed
+question's distribution checked against hand counts, the `other:`
+semi-join and the duplicate toggle, the XLSX export as text cells with
+the neutralising prefix and a manifest, read as `consult_export` under
+one snapshot with the identity column back from the vault, a seeded
+generator at any scale, and the fourth mechanic proved: at 20,000
+respondents the planner takes the GIN index and probes the answer table
+by its unique key, with what that corrected in `docs/04`, `docs/05` and
+ADR-004 recorded as dated corrections. Two commands, `consult query` and
+`consult export`. Next: final polish (PR-10), run from
+`plans/final-run.md`. Deliberately not built: see above.
 
 ## How it was built
 

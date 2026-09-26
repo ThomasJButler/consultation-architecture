@@ -15,7 +15,18 @@ from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.workbook.workbook import Workbook
 
-from make_fixture_data import CLOSED_QUESTIONS, FIXTURES_DIR, OPEN_QUESTIONS, write_fixtures
+from make_fixture_data import (
+    CLOSED_QUESTIONS,
+    FIXTURES_DIR,
+    FORMULA_ROW,
+    OPEN_QUESTIONS,
+    OUT_OF_VOCABULARY_ROWS,
+    PROFORMA_REASON,
+    PROFORMA_ROWS,
+    SEED,
+    main,
+    write_fixtures,
+)
 
 SHEETS = {
     "Demographic questions": ["column_reference", "question_text"],
@@ -98,3 +109,42 @@ def test_the_committed_fixtures_are_what_the_generator_writes(tmp_path: Path) ->
 
     assert committed_responses.read_bytes() == written.responses.read_bytes()
     assert committed_definition.read_bytes() == written.definition.read_bytes()
+
+
+def test_the_generator_scales_deterministically(tmp_path: Path) -> None:
+    """`--scale N` is N respondents from the same seeded generator, for the
+    plan benchmark's 20,000-row consultation (docs/05 section 9). The
+    committed 240-row files stay what the default call writes, which the
+    test above holds."""
+    scale = 300
+    once = write_fixtures(tmp_path / "once", respondents=scale, seed=SEED)
+    again = write_fixtures(tmp_path / "again", respondents=scale, seed=SEED)
+    assert once.responses.read_bytes() == again.responses.read_bytes()
+    assert once.definition.read_bytes() == again.definition.read_bytes()
+    reseeded = write_fixtures(tmp_path / "reseeded", respondents=scale, seed=SEED + 1)
+    assert reseeded.responses.read_bytes() != once.responses.read_bytes()
+
+    # N rows under one header line, and the default still the committed
+    # file's 240 (poc/README.md).
+    assert len(once.responses.read_bytes().splitlines()) == scale + 1
+    _, rows = read_csv(once.responses)
+    _, default_rows = read_csv(write_fixtures(tmp_path / "default").responses)
+    assert len(rows) == scale
+    assert len(default_rows) == 240
+
+    # The fixed cases stay on their own rows at any scale: twelve proforma
+    # answers, one leading "=", and "Unsure" only where it was put.
+    def refs(row_nos: frozenset[int]) -> list[str]:
+        return [f"R-{row_no:04d}" for row_no in sorted(row_nos)]
+
+    proforma = [row["respondent_ref"] for row in rows if row["o_reason"] == PROFORMA_REASON]
+    formula = [row["respondent_ref"] for row in rows if row["o_safety"].startswith("=")]
+    unsure = {row["respondent_ref"] for row in rows if row["c_route"] == "Unsure"}
+    assert proforma == refs(PROFORMA_ROWS)
+    assert formula == refs(frozenset({FORMULA_ROW}))
+    assert unsure
+    assert unsure <= set(refs(OUT_OF_VOCABULARY_ROWS))
+
+    # The flag writes what the call does, into the directory it's given.
+    assert main(["--scale", str(scale), "--out", str(tmp_path / "flag")]) == 0
+    assert (tmp_path / "flag" / "responses.csv").read_bytes() == once.responses.read_bytes()
