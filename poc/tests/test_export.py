@@ -258,15 +258,18 @@ def test_export_reads_one_snapshot_despite_a_mid_export_retraction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`write_workbook` reads the Responses sheet's theme marks and the
-    manifest's tag_count from `export._tags`, then reads the summary
-    sheet's counts again from `query.theme_table`, which resolves the
-    signed-off version and the live tags afresh. A second connection
+    """`write_workbook` reads the tags for the Responses sheet and the
+    manifest from `export._tags`, then reads them again, independently,
+    for the summary sheet, via `query.theme_table`. A second connection
     retracts three PARKING tags and commits in between the two reads,
-    from inside a wrapped `export._tags`: under READ COMMITTED each
+    from inside a wrapped `export._tags`. Under READ COMMITTED each
     statement in `write_workbook`'s transaction takes its own snapshot
-    (PostgreSQL 17 manual, 13.2.1), so the summary sees fewer tags than
-    the sheet built from the read that ran first.
+    (PostgreSQL 17 manual, 13.2.1), so `theme_table`'s read, running
+    later in the same transaction, sees the retraction the first read
+    didn't; a snapshot taken once for the whole gather can't. `baseline`
+    is `theme_table`'s own count before the retraction: what the summary
+    sheet has to still read afterwards if the export holds to one
+    snapshot, since the retraction lands after `baseline` is read too.
     """
     signed = signed_off_questions(db, ("o_reason",))
     tag_answers_by_rule(
@@ -274,9 +277,23 @@ def test_export_reads_one_snapshot_despite_a_mid_export_retraction(
     )
     db.commit()
 
+    department = db.execute(
+        "SELECT department_id FROM question WHERE id = %s", (signed["o_reason"].question_id,)
+    ).fetchone()
+    assert department is not None
+    baseline = {
+        row.key: row.respondents
+        for row in theme_table(
+            db,
+            signed["o_reason"].question_id,
+            Filter(),
+            department_id=department["department_id"],
+        ).rows
+    }["PARKING"]
+
     # Three canonical (non-duplicate) PARKING answers: retracting these
-    # changes query.theme_table's count, which the default Filter() scopes
-    # to canonical rows only, unlike the Responses sheet's marks.
+    # is what moves query.theme_table's canonical-scope count, unlike
+    # retracting one of the campaign proforma's duplicate rows would.
     targets = db.execute(
         "SELECT id FROM answer WHERE question_id = %s AND duplicate_of_answer_id IS NULL"
         " AND value_text ILIKE %s ORDER BY id LIMIT 3",
@@ -311,28 +328,25 @@ def test_export_reads_one_snapshot_despite_a_mid_export_retraction(
     assert retracted
 
     workbook = load_workbook(path)
-    responses = workbook["Responses"]
-    header = [cell.value for cell in next(responses.iter_rows(max_row=1))]
-    parking_col = header.index("o_reason: PARKING")
-    responses_parking = sum(
-        1 for row in responses.iter_rows(min_row=2) if row[parking_col].value == "1"
-    )
-
     summary_rows = {row[0].value: row for row in workbook["o_reason summary"].iter_rows(min_row=2)}
     summary_parking = int(str(summary_rows["PARKING"][2].value))
 
-    # A snapshot taken once for the whole gather can't see a retraction
-    # committed by another connection after it started, so the summary
-    # sheet's count agrees with the Responses sheet built from the same
-    # snapshot, whatever the other connection commits in between.
-    assert summary_parking == responses_parking
+    # One snapshot for the whole gather: the summary sheet still reads
+    # the count from before the retraction, whatever a second connection
+    # commits once the export is already under way.
+    assert summary_parking == baseline
 
-    manifest_rows = list(workbook["Manifest"].iter_rows(min_row=9, values_only=True))
-    o_reason_row = {row[0]: row for row in manifest_rows}["o_reason"]
+    # The Responses sheet and the manifest's tag_count agree with each
+    # other regardless, since both come from the same in-memory read;
+    # this is the pair the isolation level doesn't have to fix.
+    responses = workbook["Responses"]
+    header = [cell.value for cell in next(responses.iter_rows(max_row=1))]
     responses_total_marks = sum(
         1
         for key in ("OTHER", "PARKING", "SAFETY")
         for row in responses.iter_rows(min_row=2)
         if row[header.index(f"o_reason: {key}")].value == "1"
     )
+    manifest_rows = list(workbook["Manifest"].iter_rows(min_row=9, values_only=True))
+    o_reason_row = {row[0]: row for row in manifest_rows}["o_reason"]
     assert o_reason_row[5] == str(responses_total_marks)  # tag_count
