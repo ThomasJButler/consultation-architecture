@@ -280,28 +280,26 @@ class ThemeTable:
     denominator: int
 
 
-def _scope_count(conn: psycopg.Connection[DictRow], compiled: Scope) -> int:
-    query = compiled.sql + sql.SQL("SELECT count(*) AS n FROM scope")
-    row = conn.execute(query, compiled.params).fetchone()
-    if row is None:
-        # count(*) with no GROUP BY always returns one row; a database
-        # that answers otherwise has broken more than this query.
-        raise LookupError("scope's count(*) returned no row")
-    return int(row["n"])
-
-
-# docs/04 section 6's theme-count query. Ties broken on key, which the
-# design's sketch leaves to the reader: a table has to read the same way
-# twice.
+# docs/04 section 6's theme-count query, the denominator in the same
+# statement: a READ COMMITTED transaction takes a new snapshot for each
+# statement (Postgres documentation, 13.2.1), so a count taken in a
+# statement of its own could miss a tag the counts below then see. The
+# LEFT JOIN keeps the denominator's one row when nothing is tagged, its
+# theme columns NULL. Ties broken on key, which the design's sketch
+# leaves to the reader: a table has to read the same way twice.
 _THEME_COUNTS = sql.SQL(
     """
-    SELECT t.key, t.label, t.is_fallback, count(*) AS respondents
-      FROM scope s
-      JOIN answer_theme at ON at.answer_id = s.id
-       AND at.theme_set_version_id = {version} AND at.retracted_at IS NULL
-      JOIN theme t ON t.id = at.theme_id
-     GROUP BY t.id, t.key, t.label, t.is_fallback
-     ORDER BY respondents DESC, t.key
+    SELECT d.denominator, c.key, c.label, c.is_fallback, c.respondents
+      FROM (SELECT count(*) AS denominator FROM scope) d
+      LEFT JOIN (
+        SELECT t.key, t.label, t.is_fallback, count(*) AS respondents
+          FROM scope s
+          JOIN answer_theme at ON at.answer_id = s.id
+           AND at.theme_set_version_id = {version} AND at.retracted_at IS NULL
+          JOIN theme t ON t.id = at.theme_id
+         GROUP BY t.id, t.key, t.label, t.is_fallback
+      ) c ON true
+     ORDER BY c.respondents DESC, c.key
     """
 )
 
@@ -314,17 +312,22 @@ def theme_table(
     signed off beside it, `_latest_signed_off`'s reasoning here too).
     `department_id` is the caller's, as `scope` takes it."""
     compiled = scope(question_id, filter, department_id=department_id)
-    denominator = _scope_count(conn, compiled)
     query = compiled.sql + _THEME_COUNTS.format(
         version=_latest_signed_off(sql.Placeholder("question_id"))
     )
     rows = conn.execute(query, compiled.params).fetchall()
+    if not rows:
+        # count(*) with no GROUP BY always returns one row, and the LEFT
+        # JOIN keeps it; a database that answers otherwise has broken more
+        # than this query.
+        raise LookupError("the theme-count query returned no row")
     return ThemeTable(
         rows=[
             ThemeCount(row["key"], row["label"], row["is_fallback"], row["respondents"])
             for row in rows
+            if row["key"] is not None
         ],
-        denominator=denominator,
+        denominator=int(rows[0]["denominator"]),
     )
 
 
