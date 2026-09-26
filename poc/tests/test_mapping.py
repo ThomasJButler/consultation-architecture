@@ -10,6 +10,7 @@ the code under test.
 from __future__ import annotations
 
 from collections import Counter
+from uuid import UUID
 
 import psycopg
 import pytest
@@ -21,7 +22,7 @@ from consult.transitions import finish_map_themes, start_map_themes
 from tests.fakes import FakeLLM, Fault, RecordingLLM
 from tests.pipeline import NOT_ANSWERED, fixture_rows, signed_off_fixture
 from tests.test_ingest import normalised
-from tests.test_themes import distinct_reasons
+from tests.test_themes import WorkerCrashError, crash_after, distinct_reasons
 
 pytestmark = pytest.mark.db
 
@@ -285,3 +286,75 @@ def test_a_failed_batch_retries_at_size_one_and_buckets_the_answer(
         "SELECT status, error_code FROM job WHERE id = %s", (signed.job_id,)
     ).fetchone()
     assert row == {"status": "succeeded", "error_code": None}
+
+
+def _covered(db: psycopg.Connection[DictRow], job_id: UUID) -> Counter[int]:
+    """Every answer id a checkpoint of the job names, done or unprocessable,
+    with how many checkpoints name it."""
+    return Counter(
+        int(r["answer_id"])
+        for r in db.execute(
+            "SELECT unnest(answer_ids) AS answer_id FROM job_batch WHERE job_id = %s", (job_id,)
+        ).fetchall()
+    )
+
+
+def test_mapping_resumes_by_coverage_after_a_takeover(db: psycopg.Connection[DictRow]) -> None:
+    signed = signed_off_fixture(db)
+    job = load_map_job(db, signed.job_id)
+    planned = plan(db, job)
+    first_ten = next(i for i, batch in enumerate(planned) if len(batch.answers) == MAP_BATCH_SIZE)
+
+    # The first worker: the batch of ten refused, its answers sent one at a
+    # time with the second refused again, and a crash after the fourth of
+    # those commits. The checkpoints now cover part of a planned batch, one
+    # answer at a time, under batch numbers the plan doesn't have.
+    first = claim(db, signed.job_id, "worker-1")
+    assert first is not None
+    script: list[str | Fault] = [
+        *[Fault.NONE] * first_ten,
+        Fault.DROPPED_ID,
+        Fault.NONE,
+        Fault.DROPPED_ID,
+        Fault.NONE,
+        Fault.NONE,
+    ]
+    llm = FakeLLM(script)
+    with pytest.raises(WorkerCrashError):
+        assign(db, llm, first, job, planned, after_batch=crash_after(first_ten + 4))
+    assert not llm.script
+    before = _covered(db, signed.job_id)
+    assert sum(before.values()) == sum(len(b.answers) for b in planned[:first_ten]) + 4
+
+    # Ten minutes of silence, and a second worker takes over (ADR-002).
+    db.execute(
+        "UPDATE job SET heartbeat_at = now() - interval '11 minutes' WHERE id = %s",
+        (signed.job_id,),
+    )
+    second = claim(db, signed.job_id, "worker-2")
+    assert second is not None and second.fence == 2
+    llm2 = RecordingLLM()
+
+    assign(db, llm2, second, job, plan(db, job))
+
+    # The second worker sends only what no checkpoint covers, the answer in
+    # the unprocessable bucket counting as covered, and ten at most a call.
+    sent = [answer_id for p in llm2.prompts for answer_id in p.answer_ids]
+    assert sent
+    assert not set(sent) & before.keys()
+    assert all(len(p.answer_ids) <= MAP_BATCH_SIZE for p in llm2.prompts)
+
+    # Between them the checkpoints name each planned answer exactly once.
+    assert _covered(db, signed.job_id) == Counter(a.id for b in planned for a in b.answers)
+
+    # One tag per distinct answer for the one key the fake returns, bar the
+    # answer in the bucket: counted, not left to the unique index.
+    tags = db.execute(
+        """
+        SELECT count(*) AS n, count(DISTINCT (t.answer_id, t.theme_id)) AS pairs
+          FROM answer_theme t JOIN answer a ON a.id = t.answer_id
+         WHERE t.theme_set_version_id = %s AND a.duplicate_of_answer_id IS NULL
+        """,
+        (job.version_id,),
+    ).fetchone()
+    assert tags == {"n": len(distinct_reasons()) - 1, "pairs": len(distinct_reasons()) - 1}
