@@ -215,12 +215,13 @@ def test_a_failed_batch_retries_at_size_one_and_buckets_the_answer(
     first_ten = next(i for i, batch in enumerate(planned) if len(batch.answers) == MAP_BATCH_SIZE)
     spoiled = planned[first_ten].answers
     bad = 3  # the fourth answer of that batch fails again on its own
-    llm = FakeLLM(
-        [Fault.NONE] * first_ten
-        + [Fault.DROPPED_ID]
-        + [Fault.DROPPED_ID if i == bad else Fault.NONE for i in range(MAP_BATCH_SIZE)]
-        + [Fault.NONE] * (len(planned) - first_ten - 1)
-    )
+    script: list[str | Fault] = [
+        *[Fault.NONE] * first_ten,
+        Fault.DROPPED_ID,
+        *[Fault.DROPPED_ID if i == bad else Fault.NONE for i in range(MAP_BATCH_SIZE)],
+        *[Fault.NONE] * (len(planned) - first_ten - 1),
+    ]
+    llm = FakeLLM(script)
     lease = claim(db, signed.job_id, "worker-1")
     assert lease is not None
     start_map_themes(db, job.question_id)
