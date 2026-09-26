@@ -12,7 +12,10 @@ a value from the file. `consult run-job` claims one find_themes job and
 runs it to the end with the fake, committing after every batch; `consult
 themes` lists a question's candidates as keys, labels, counts and answer
 ids; `consult sign-off` confirms them as they stand and dispatches the
-map_themes job (docs/02, steps 4 and 6 to 8).
+map_themes job (docs/02, steps 4 and 6 to 8). `consult worker` picks,
+claims and runs one queued or stale job by kind, once with `--once` or in
+a loop that stops on SIGINT or SIGTERM; `consult reconcile` runs the five
+statements of docs/02 section 5 and prints their six counts.
 """
 
 from __future__ import annotations
@@ -20,6 +23,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
+import signal
+import socket
+import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -28,7 +35,7 @@ from uuid import UUID
 import psycopg
 from psycopg.rows import DictRow
 
-from consult import config, jobs, logs, report, store, themes, transitions
+from consult import config, jobs, logs, reconciler, report, store, themes, transitions, worker
 from consult.config import Settings
 from consult.configure import ConfigureError, configure, defaults
 from consult.definition import Definition, DefinitionError, read_definition
@@ -42,6 +49,7 @@ from consult.responses import Responses
 from consult.stage import stage
 from consult.store import PIPELINE_ROLE, as_role
 from consult.validate import Report, validate
+from consult.worker import Outcome
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +89,25 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="the edit counter the reviewer was looking at (docs/02, screen 3)",
     )
+    run_worker = commands.add_parser(
+        "worker", help="pick, claim and run one queued or stale job by kind"
+    )
+    run_worker.add_argument(
+        "--once", action="store_true", help="run one job and exit; without it, loop until stopped"
+    )
+    run_worker.add_argument(
+        "--worker", help="this worker's name, for the lease (default: hostname and pid)"
+    )
+    run_worker.add_argument(
+        "--model", choices=["fake"], default="fake", help="the model: only the fake"
+    )
+    run_worker.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=5.0,
+        help="how long to sleep between empty picks when looping (default 5)",
+    )
+    commands.add_parser("reconcile", help="run the reconciler's five statements once")
     return parser
 
 
@@ -396,6 +423,107 @@ def _sign_off(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def _worker_name(name: str | None) -> str:
+    """The default lease name: this host and this process, so two workers
+    started on one machine with no name still get distinct ones (docs/02,
+    step 5)."""
+    return name or f"{socket.gethostname()}-{os.getpid()}"
+
+
+def _print_outcome(outcome: Outcome | None) -> None:
+    if outcome is None:
+        print("nothing to run")
+        return
+    line = f"job {outcome.job_id}: {outcome.kind} {outcome.status}, attempt {outcome.attempts}"
+    if outcome.error_code is not None:
+        line += f", {outcome.error_code.value}"
+    print(line)
+
+
+def _log_outcome(outcome: Outcome | None) -> None:
+    if outcome is None:
+        logs.log_event(logger, "worker_idle")
+        return
+    if outcome.error_code is None:
+        logs.log_event(
+            logger,
+            "worker_run",
+            job_id=outcome.job_id,
+            kind=outcome.kind,
+            status=outcome.status,
+            attempts=outcome.attempts,
+        )
+    else:
+        logs.log_event(
+            logger,
+            "worker_run",
+            job_id=outcome.job_id,
+            kind=outcome.kind,
+            status=outcome.status,
+            attempts=outcome.attempts,
+            error_code=outcome.error_code,
+        )
+
+
+def _stop_flag() -> threading.Event:
+    """A flag SIGINT and SIGTERM both set, so the loop below finishes the
+    job it is on and stops rather than dying mid-batch (ADR-002: "on
+    SIGTERM a worker finishes its current batch"). Installed only here,
+    since `--once` returns before a second signal could matter."""
+    stop = threading.Event()
+
+    def _handle(_signum: int, _frame: object) -> None:
+        stop.set()
+
+    signal.signal(signal.SIGINT, _handle)
+    signal.signal(signal.SIGTERM, _handle)
+    return stop
+
+
+def _worker(args: argparse.Namespace, settings: Settings) -> int:
+    """`--once` runs `worker.run_once` once and prints its outcome or
+    "nothing to run"; `run_once` already picks, claims and runs the job as
+    the pipeline role and leaves no transaction open (its own module
+    docstring), so this command sets no role itself. Without `--once` it
+    loops, sleeping `--poll-seconds` between empty picks, until SIGINT or
+    SIGTERM flips the stop flag; the design has no number for that sleep,
+    so five seconds is picked only to be short enough not to leave real
+    work waiting and long enough not to poll Postgres for nothing. The
+    loop isn't run by a test: real time isn't something a test should
+    wait on, and `--once` is what `test_cli_worker.py` drives instead."""
+    llm = OfflineModel()
+    name = _worker_name(args.worker)
+    with store.connect(settings) as conn:
+        if args.once:
+            outcome = worker.run_once(conn, llm, worker=name)
+            _print_outcome(outcome)
+            _log_outcome(outcome)
+            return 0
+        stop = _stop_flag()
+        while not stop.is_set():
+            outcome = worker.run_once(conn, llm, worker=name)
+            _print_outcome(outcome)
+            _log_outcome(outcome)
+            if outcome is None:
+                stop.wait(args.poll_seconds)
+    return 0
+
+
+def _reconcile(args: argparse.Namespace, settings: Settings) -> int:
+    """`reconciler.reconcile` already runs every statement as the pipeline
+    role (its own module docstring), so this command sets no role either:
+    dispatch touches `job` and `fail_job` writes `consultation`, both
+    grants the pipeline role already carries (docs/06, section 2.4)."""
+    with store.connect(settings) as conn:
+        reconciled = reconciler.reconcile(conn, settings)
+    print(
+        f"reconciled: {reconciled.dispatched} dispatched, {reconciled.resent} resent, "
+        f"{reconciled.failed} failed, {reconciled.retried} retried, "
+        f"{reconciled.advanced} advanced, {reconciled.relayed} relayed"
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None, *, settings: Settings | None = None) -> int:
     # Here and not under __main__: the console script pyproject.toml
     # declares calls main directly, and the formatter is the control on the
@@ -420,6 +548,10 @@ def main(argv: Sequence[str] | None = None, *, settings: Settings | None = None)
         return _themes(args, resolved)
     if args.command == "sign-off":
         return _sign_off(args, resolved)
+    if args.command == "worker":
+        return _worker(args, resolved)
+    if args.command == "reconcile":
+        return _reconcile(args, resolved)
     return _validate(args, resolved)
 
 
