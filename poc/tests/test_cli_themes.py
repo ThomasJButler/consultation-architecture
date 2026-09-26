@@ -293,6 +293,55 @@ def test_a_version_conflict_names_both_edit_counters(
     assert out == f"question {question_id}: conflict, expected edit 1, the list is at edit 0\n"
 
 
+def test_themes_reads_the_same_after_sign_off(
+    db: psycopg.Connection[DictRow], db_settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    jobs = ingested(db, db_settings)
+    assert (
+        main(
+            ["run-job", str(jobs["o_reason"]), "--worker", "w1", "--model", "fake"],
+            settings=db_settings,
+        )
+        == 0
+    )
+    question = db.execute(
+        "SELECT question_id FROM job WHERE id = %s", (jobs["o_reason"],)
+    ).fetchone()
+    assert question is not None
+    question_id = question["question_id"]
+    reviewer = "11111111-2222-3333-4444-555555555555"
+    assert (
+        main(
+            ["sign-off", str(question_id), "--reviewer", reviewer, "--expect-version", "0"],
+            settings=db_settings,
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    code = main(["themes", str(question_id)], settings=db_settings)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert f"question {question_id}: version 2 (signed_off" in out
+
+    # Every longlist entry still folds into the shortlist theme it merged
+    # into, not into a copy of itself: sign_off's own copy points a
+    # theme's lineage at the candidate row it was copied from, and that
+    # is not the same thing as what a longlist entry folded into.
+    assert re.search(r"ACCESS_\d+ > ACCESS\b", out)
+    assert not re.search(r"(ACCESS_\d+) > \1\b", out)
+
+    # A count on every shortlist theme: "-" rather than "None" for the
+    # fallback themes sign_off adds with no preview_count of their own.
+    assert "count None" not in out
+    assert re.search(r"^\s+OTHER\s+\S.*\bcount -\b", out, re.M)
+
+    # The examples a reviewer saw before sign-off are still there:
+    # sign_off doesn't copy theme_example, so this reads the source
+    # candidate's rows through the same lineage pointer instead.
+    assert re.search(r"^\s+ACCESS\s+\S.*\bexamples \d+", out, re.M)
+
+
 def test_dispatch_runs_under_a_role_from_every_command(
     db: psycopg.Connection[DictRow],
     db_settings: Settings,
