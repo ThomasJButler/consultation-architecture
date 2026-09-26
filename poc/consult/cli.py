@@ -144,6 +144,11 @@ def build_parser() -> argparse.ArgumentParser:
             "other:<question>.theme=<key>, or with=duplicates (docs/02, step 11); repeatable"
         ),
     )
+    run_query.add_argument(
+        "--department",
+        type=UUID,
+        help="the caller's department id (docs/06, section 2); default: the question's own",
+    )
     run_export = commands.add_parser("export", help="write the consultation's XLSX workbook")
     run_export.add_argument("consultation", type=UUID, help="the consultation id")
     run_export.add_argument("--out", type=Path, required=True, help="the workbook's path")
@@ -601,6 +606,16 @@ def _reconcile(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def _question_department(conn: psycopg.Connection[DictRow], question_id: UUID) -> UUID:
+    row = conn.execute(
+        "SELECT department_id FROM question WHERE id = %s", (question_id,)
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"question {question_id} does not exist")
+    department_id: UUID = row["department_id"]
+    return department_id
+
+
 def _query(args: argparse.Namespace, settings: Settings) -> int:
     """docs/02 screen 4's per-question dashboard, printed rather than paged.
     The filter parses to a typed value first, so a malformed one is
@@ -612,6 +627,11 @@ def _query(args: argparse.Namespace, settings: Settings) -> int:
     two reads need (schema.sql's grant on all public tables) and no
     grant on the vault at all, so a read this path should never make
     fails at the schema rather than succeeding (docs/06, section 2.4).
+
+    Every query is held to the caller's department (docs/06, section 2).
+    The web app passes the signed-in user's; the command-line operator
+    is trusted to name one with `--department`, and without it the
+    command reads the question's own first, under the same role.
     """
     try:
         parsed = query.parse_filters(args.filter or [])
@@ -619,8 +639,11 @@ def _query(args: argparse.Namespace, settings: Settings) -> int:
         print(f"refused: {exc}")
         return 2
     with store.connect(settings) as conn, as_role(conn, PIPELINE_ROLE):
-        table = query.theme_table(conn, args.question, parsed)
-        distribution = query.related_distribution(conn, args.question, parsed)
+        department_id = args.department or _question_department(conn, args.question)
+        table = query.theme_table(conn, args.question, parsed, department_id=department_id)
+        distribution = query.related_distribution(
+            conn, args.question, parsed, department_id=department_id
+        )
     logs.log_event(
         logger,
         "queried",
