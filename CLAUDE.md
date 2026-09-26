@@ -85,4 +85,4 @@ sh scripts/brief-guard.sh --all       # what CI runs
 
 ## Status
 
-26 September 2026: PR-03 to PR-07 merged; PR-08 to PR-10 run from `plans/final-run.md`. See the Status block in `README.md`.
+26 September 2026: PR-03 to PR-08 merged; PR-09 and PR-10 run from `plans/final-run.md`. See the Status block in `README.md`.

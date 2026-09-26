@@ -1,7 +1,7 @@
 # PR-09: The filter query, the export and the plan benchmark
 
-**Status:** Planned (drafted 26 September 2026, ahead of PR-08's merge; the
-PR-08 session revises it if its merge changes anything below)
+**Status:** Planned (drafted 26 September 2026; read against PR-08's code on
+26 September 2026 before its merge: nothing below changed)
 **Owner:** Thomas Butler   **Date:** 26 September 2026
 **Depends on:** PR-08   **Branch:** `feat/09-poc-query-export-cli`
 

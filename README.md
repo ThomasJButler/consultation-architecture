@@ -64,10 +64,21 @@ checkpoint per batch and a proven takeover, condensation to a capped
 shortlist with lineage, a preview that gives every theme a count and
 quotes, the reviewer's edits under the version guard, and three commands
 that run a job with the fake, list a question's themes and sign them
-off. Next: mapping, the worker and the reconciler (PR-08),
-with its plan checked against the merged code on 26 September; then
-queries and export (PR-09) and final polish (PR-10), run in order from
-`plans/final-run.md`. Deliberately not built: see above.
+off.
+Merged: mapping, the worker and the reconciler (PR-08): dispatch under
+the three caps as a pure pick and one locked `UPDATE`, the `map_themes`
+job in batches of ten against the frozen keys with the two-way check, a
+refused batch retried one answer at a time and the survivor in the
+`unprocessable` bucket, tags under the fence and copied to duplicates,
+resume by coverage, a worker loop that picks the oldest runnable job with
+`FOR UPDATE SKIP LOCKED` and runs it by kind with full-jitter backoff and
+no transaction open across a call, the failed edges and the attention row,
+the reconciler's five statements with the fifth-attempt fix recorded as a
+dated correction to `docs/02`, and two commands, `consult worker --once`
+and `consult reconcile`, that take the fixtures from ingest to `ready`
+with a hand on no job. Next: queries and export (PR-09), then final
+polish (PR-10), run in order from `plans/final-run.md`. Deliberately not
+built: see above.
 
 ## How it was built
 
