@@ -25,6 +25,7 @@ import pytest
 from defusedxml import ElementTree
 from openpyxl import load_workbook
 from psycopg.errors import InsufficientPrivilege
+from psycopg.pq import TransactionStatus
 from psycopg.rows import DictRow
 
 from consult import export, store
@@ -667,3 +668,48 @@ def test_a_cell_at_the_cap_keeps_a_visible_cut(
 
     manifest = {row[0].value: row[1].value for row in workbook["Manifest"].iter_rows(min_row=2)}
     assert manifest["truncated_cells"] == "1"
+
+
+def test_the_export_leaves_the_callers_connection_as_it_found_it(
+    db: psycopg.Connection[DictRow], tmp_path: Path
+) -> None:
+    """psycopg applies `isolation_level` and `read_only` to the next
+    transaction only, and only while the connection is idle, so a
+    connection with a transaction open can't be made REPEATABLE READ
+    without ending that transaction. Ending it isn't the export's call:
+    the caller's writes are the caller's to commit or roll back, so a
+    busy connection is refused by code with the transaction left as it
+    was. An idle one comes back at the caller's own settings, not at
+    psycopg's defaults."""
+    signed = signed_off_questions(db, ("o_reason",))
+    consultation_id = signed["o_reason"].consultation_id
+    db.commit()
+    db.isolation_level = psycopg.IsolationLevel.SERIALIZABLE
+    db.read_only = False
+
+    db.execute(
+        "UPDATE consultation SET name = %s WHERE id = %s",
+        ("Renamed, not committed", consultation_id),
+    )
+    busy_path = tmp_path / "busy.xlsx"
+    with pytest.raises(export.ExportError) as refused:
+        export.write_workbook(db, consultation_id, busy_path)
+    assert refused.value.code == "connection_busy"
+    assert not busy_path.exists()
+    assert db.info.transaction_status == TransactionStatus.INTRANS
+    renamed = db.execute(
+        "SELECT name FROM consultation WHERE id = %s", (consultation_id,)
+    ).fetchone()
+    assert renamed is not None
+    assert renamed["name"] == "Renamed, not committed"
+    db.rollback()
+    kept = db.execute("SELECT name FROM consultation WHERE id = %s", (consultation_id,)).fetchone()
+    assert kept is not None
+    assert kept["name"] == "Riverside cycle route"
+    db.rollback()
+
+    idle_path = tmp_path / "idle.xlsx"
+    export.write_workbook(db, consultation_id, idle_path)
+    assert idle_path.exists()
+    assert db.isolation_level == psycopg.IsolationLevel.SERIALIZABLE
+    assert db.read_only is False
