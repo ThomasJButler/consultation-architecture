@@ -1,6 +1,6 @@
 # The final run: PR-08, PR-09 and PR-10
 
-**Status:** Ready to run   **Owner:** Thomas Butler   **Written:** 26 September 2026
+**Status:** Run on 26 September 2026: PR-08 (#13) and PR-09 (#14) merged, PR-10 (#15) open for the owner   **Owner:** Thomas Butler   **Written:** 26 September 2026
 
 One file a fresh session can run from a clone, with nobody at the keyboard.
 It carries what `RESUME.md` and `plans/prompts/` would, because both are
@@ -380,7 +380,7 @@ Run `git switch -c docs/10-submission-polish main`.
 - edit a submission bullet (the owner writes those by hand);
 - tag;
 - merge;
-- change the rule-12 wording in README.md line 35 and `.gitignore` line 1
+- change the rule-12 wording in README.md line 40 and `.gitignore` line 1
   without the owner's yes. Ask in the description, with the neutral
   wording the plan suggests.
 

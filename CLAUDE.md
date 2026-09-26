@@ -81,7 +81,7 @@ sh scripts/brief-guard.sh --all       # what CI runs
 | Why this shape? | `docs/02-architecture.md`, `docs/03-adrs/` |
 | What does the data look like? | `docs/00-brief-and-data-shape.md`, `docs/04-data-model.md` |
 | What does it cost? | `docs/05-scale-and-cost.md` |
-| What is the next piece of work? | `plans/final-run.md`, `RESUME.md` if it exists, then `plans/` |
+| What is left to do? | `plans/PR-10-submission-polish.md`: the owner's steps in section 8 and the open work in section 0; then `plans/` |
 
 ## Status
 

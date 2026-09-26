@@ -13,7 +13,7 @@ signed-off question in batches, and runs the worker loop and the
 reconciler's five statements without a hand on each job, and PR-09 adds
 the per-question filter query, the XLSX export and the plan benchmark
 that proves the fourth mechanic; the section "What it does not prove"
-says what is left, and `TESTING.md` which pull request proves it. This
+says what is left, and `TESTING.md` which test proves it. This
 is not the product, and `../README.md` says what it deliberately leaves
 out.
 

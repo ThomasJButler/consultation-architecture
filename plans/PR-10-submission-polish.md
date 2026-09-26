@@ -107,7 +107,7 @@ a documentation rule can be checked by code:
 
 ## 6. Security and quality notes
 
-- **The owner decides one thing.** README.md line 35 and `.gitignore`
+- **The owner decides one thing.** README.md line 40 and `.gitignore`
   line 1 say the brief was "received under a recruitment process", which
   CLAUDE.md rule 12 forbids. A neutral wording keeps the handling point
   without the process, e.g. "The brief and the sample data for this task
