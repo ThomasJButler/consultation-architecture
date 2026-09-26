@@ -321,6 +321,46 @@ def test_a_single_select_option_with_a_comma_is_merged_back(tmp_path: Path) -> N
     assert warnings_of(report, WarningKind.UNKNOWN_VALUE) == []
 
 
+def test_two_real_options_in_one_single_select_cell_are_never_fused(tmp_path: Path) -> None:
+    # One respondent wrote two of c_route's options in its one cell.
+    # Support and Oppose sit next to each other in the option list, so the
+    # cell spells a run of them, but each is chosen alone by nearly a
+    # hundred others: a split comma option's pieces are never chosen alone
+    # (docs/00), so this is a stray answer and not one. Offered the merge,
+    # the default would fuse the two options and ingest would blank every
+    # answer to either. It stays an unknown value instead, and the options
+    # and their tallies stay as the definition and the CSV have them.
+    rows = fixture_rows()
+    assert rows[0]["c_route"] == "Support"
+    rows[0]["c_route"] = "Support, Oppose"
+    path = tmp_path / "responses.csv"
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    definition = read_definition(FIXTURES / "definition.xlsx")
+    (route,) = [q for q in definition.closed if q.column_ref == "c_route"]
+    counted = Counter(row["c_route"] for row in rows)
+
+    report = validate(definition, Responses(path))
+
+    assert [(w.kind, w.value, w.count) for w in report.warnings if w.column_ref == "c_route"] == [
+        (WarningKind.UNKNOWN_VALUE, "Unsure", counted["Unsure"]),
+        (WarningKind.UNKNOWN_VALUE, "Support, Oppose", 1),
+    ]
+    (stray,) = [w for w in report.warnings if w.value == "Support, Oppose"]
+    assert stray.example_rows == (2,)
+    assert stray.default is Resolution.TREAT_AS_NOT_ANSWERED
+    assert merged_options(route, defaults(report)) == ["Support", "Oppose", "Not sure"]
+    by_ref = {column.column_ref: column for column in report.columns}
+    assert dict(by_ref["c_route"].values) == {
+        "Support": counted["Support"],
+        "Oppose": counted["Oppose"],
+        "Not sure": counted["Not sure"],
+    }
+    assert (counted["Support"], counted["Oppose"]) == (102, 92)
+
+
 def test_a_repeated_or_blank_header_is_an_error_and_a_column_is_listed_once(tmp_path: Path) -> None:
     # Cells are keyed by header, so a repeated name would silently lose a
     # column and a blank one has nothing to key by; both block, once each.
