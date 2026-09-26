@@ -21,8 +21,11 @@ from psycopg.rows import DictRow
 from consult import themes
 from consult.cli import main
 from consult.config import Settings
+from consult.errors import ErrorCode
 from consult.jobs import Lease
+from consult.llm import GatewayError
 from consult.transitions import Advance
+from consult.worker import BackingOff
 
 pytestmark = pytest.mark.db
 
@@ -273,6 +276,78 @@ def test_run_job_works_as_the_pipeline_role(
     )
     capsys.readouterr()
     assert seen == ["consult_pipeline"]
+
+
+def test_run_job_hands_the_runner_backing_off_with_commit_as_before_call(
+    db: psycopg.Connection[DictRow],
+    db_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # run-job has to back off outside any open transaction the same way
+    # the worker loop does (worker.py's module docstring), so it hands the
+    # runner worker.BackingOff and not the raw model. Calling
+    # llm.before_call() here and reading the transaction status back
+    # wouldn't prove whose commit it is; before_call.__self__ does, since
+    # a bound method's __self__ is the instance it was bound to.
+    jobs = ingested(db, db_settings)
+    kinds: list[type] = []
+    same_conn: list[bool] = []
+
+    def record_model(
+        conn: psycopg.Connection[DictRow], llm: object, lease: Lease, **_: object
+    ) -> Advance:
+        kinds.append(type(llm))
+        same_conn.append(llm.before_call.__self__ is conn)  # type: ignore[attr-defined]
+        return Advance(themes_ready=False, analysis_ready=False)
+
+    monkeypatch.setattr(themes, "run_find_themes", record_model)
+    assert (
+        main(
+            ["run-job", str(jobs["o_reason"]), "--worker", "w1", "--model", "fake"],
+            settings=db_settings,
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert kinds == [BackingOff]
+    assert same_conn == [True]
+
+
+def test_run_job_records_a_gateway_error_as_a_code_and_a_request_id(
+    db: psycopg.Connection[DictRow],
+    db_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A gateway failure that outlasts the backoff is a code and a request
+    # id on the row, never the provider's text (CLAUDE.md, rule 8), the
+    # same as the worker loop's own GatewayError branch (worker.py's
+    # record_gateway_failure).
+    jobs = ingested(db, db_settings)
+    message = "upstream said: The towpath floods"
+
+    def fail(conn: object, llm: object, lease: Lease, **_: object) -> Advance:
+        raise GatewayError(ErrorCode.GATEWAY_UNAVAILABLE, request_id="req_x", message=message)
+
+    monkeypatch.setattr(themes, "run_find_themes", fail)
+    code = main(
+        ["run-job", str(jobs["o_reason"]), "--worker", "w1", "--model", "fake"],
+        settings=db_settings,
+    )
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "gateway_unavailable" in out
+    assert message not in out and "towpath" not in out
+    row = db.execute(
+        "SELECT status, error_code, provider_request_id FROM job WHERE id = %s",
+        (jobs["o_reason"],),
+    ).fetchone()
+    assert row == {
+        "status": "failed_retryable",
+        "error_code": "gateway_unavailable",
+        "provider_request_id": "req_x",
+    }
 
 
 def test_run_job_reports_a_lost_lease_found_while_recording_a_failure(
