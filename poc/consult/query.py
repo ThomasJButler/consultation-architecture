@@ -370,13 +370,20 @@ def related_distribution(
     """docs/04 section 6's related closed question distribution, among the
     respondents `scope` narrows to under the caller's `department_id`.
     Empty when the question names no `related_closed_question_id` (docs/04
-    section 1): o_safety, on screen 4's own example, has none."""
+    section 1): o_safety, on screen 4's own example, has none.
+
+    Empty too when the caller's department has no such question: the
+    lookup is held to the department as the scope is (docs/06 section 2),
+    so a question that exists elsewhere and an id nobody has get the same
+    answer, and a guessed id says nothing (THREAT_MODEL.md row 5)."""
     row = conn.execute(
-        "SELECT related_closed_question_id FROM question WHERE id = %s", (question_id,)
+        """
+        SELECT related_closed_question_id FROM question
+         WHERE id = %s AND department_id = %s
+        """,
+        (question_id, department_id),
     ).fetchone()
-    if row is None:
-        raise LookupError(f"question {question_id} does not exist")
-    related_id = row["related_closed_question_id"]
+    related_id = row["related_closed_question_id"] if row is not None else None
     if related_id is None:
         return []
     compiled = scope(question_id, filter, department_id=department_id)
