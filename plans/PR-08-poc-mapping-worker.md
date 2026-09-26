@@ -51,6 +51,11 @@ Batches are sized so no transaction comes near the ten-minute lease, since
   `question` nor `theme_set_version` records when a question got there.
   That's a schema change for an email none of the four mechanics needs, so
   statement 5 relays and nothing more, and the plan says so.
+- **ADR-006's worker fast-path relay.** ADR-006 has the worker relay right
+  after the commit that wrote an outbox row, with the reconciler's statement
+  5 as the slow path. `worker.run_once` doesn't relay, so every email waits
+  for the next reconcile pass, up to five minutes; the reconciler's module
+  docstring says so too.
 
 ## 1. Objective
 

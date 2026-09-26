@@ -13,14 +13,18 @@ in too. So a statement never holds a job row lock when it calls
 `fail_job`: its bulk UPDATE commits first, and each job at the retry
 budget is then failed in a transaction of its own.
 
-Two things the design has that this module doesn't. A row the relay
+Three things the design has that this module doesn't. A row the relay
 left in `sending` by crashing between its two commits needs ADR-006's
 reference lookup, asking Notify for a notification with that reference
 before sending again; with no Notify here there's nothing to ask, so
-such a row stays where it is. And statement 5 as corrected (docs/02,
+such a row stays where it is. Statement 5 as corrected (docs/02,
 correction 7) also inserts `review_reminder` rows, keyed on five working
 days in `themes_ready`, which nothing records the start of; plan
 section 0 leaves them out, so the relay relays and does nothing more.
+And ADR-006 has two relays sharing one query: the worker's fast path,
+right after the commit that wrote the outbox row, and statement 5 as the
+slow path. `worker.run_once` doesn't relay, so every email here waits
+for the next pass, up to its five minutes.
 """
 
 from __future__ import annotations
