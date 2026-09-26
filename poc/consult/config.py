@@ -60,6 +60,11 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     Setting("CONSULT_USD_PER_MILLION_OUTPUT", "8.00", "Model price per million output tokens"),
     Setting("CONSULT_GBP_PER_USD", "0.75", "Planning rate to the pound"),
+    # The two service-wide caps dispatch enforces alongside
+    # department.concurrent_jobs_cap (docs/02, step 4): four jobs queued at
+    # once for one consultation, twenty queued at once across all of them.
+    Setting("CONSULT_JOBS_PER_CONSULTATION", "4", "Cap: jobs queued at once for one consultation"),
+    Setting("CONSULT_JOBS_IN_ALL", "20", "Cap: jobs queued at once service-wide"),
 )
 
 
@@ -76,6 +81,8 @@ class Settings:
     db_password: str
     caps: Caps = DEFAULT_CAPS
     rates: Rates = DEFAULT_RATES
+    jobs_per_consultation: int = 4
+    jobs_in_all: int = 20
 
 
 def read_dotenv(path: Path) -> dict[str, str]:
@@ -145,4 +152,6 @@ def load(env: Mapping[str, str] | None = None, dotenv_path: Path = DOTENV_PATH) 
             usd_per_million_output=_number(values, "CONSULT_USD_PER_MILLION_OUTPUT"),
             gbp_per_usd=_number(values, "CONSULT_GBP_PER_USD"),
         ),
+        jobs_per_consultation=_integer(values, "CONSULT_JOBS_PER_CONSULTATION"),
+        jobs_in_all=_integer(values, "CONSULT_JOBS_IN_ALL"),
     )
