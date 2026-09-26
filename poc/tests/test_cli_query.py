@@ -221,3 +221,39 @@ def test_the_query_command_holds_to_the_named_department(
     named = first_line("--department", str(reason_row["department_id"]))
     assert named == f"question {reason_id}: of 74 respondents who answered"
     assert first_line() == named
+
+
+def test_a_wrong_id_is_refused_by_name_not_a_traceback(
+    db: psycopg.Connection[DictRow],
+    db_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    # A question id where a consultation id belongs, or the reverse, used
+    # to end in a Python traceback from export.py's or cli.py's own
+    # LookupError; `themes` conflated it with "no theme set yet". All
+    # three now say which id they were given and which kind it wasn't.
+    ingested(db, db_settings)
+    question_row = db.execute("SELECT id FROM question WHERE kind = 'open' LIMIT 1").fetchone()
+    consultation_row = db.execute("SELECT id FROM consultation").fetchone()
+    assert question_row is not None and consultation_row is not None
+    question_id = question_row["id"]
+    consultation_id = consultation_row["id"]
+    capsys.readouterr()
+
+    code = main(["query", str(consultation_id)], settings=db_settings)
+    out = capsys.readouterr().out
+    assert code == 1
+    assert out == f"question {consultation_id}: not found\n"
+
+    out_path = tmp_path / "wrong.xlsx"
+    code = main(["export", str(question_id), "--out", str(out_path)], settings=db_settings)
+    out = capsys.readouterr().out
+    assert code == 1
+    assert out == f"consultation {question_id}: not found\n"
+    assert not out_path.exists()
+
+    code = main(["themes", str(consultation_id)], settings=db_settings)
+    out = capsys.readouterr().out
+    assert code == 1
+    assert out == f"question {consultation_id}: not found\n"
