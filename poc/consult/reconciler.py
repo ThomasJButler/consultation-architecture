@@ -77,6 +77,44 @@ def recover(
     return resent, _fail_each(conn, spent)
 
 
+def retry(
+    conn: psycopg.Connection[DictRow], *, max_attempts: int = MAX_ATTEMPTS
+) -> tuple[int, int]:
+    """Statement 3: a due failure below the retry budget goes back to
+    pending, and one at it is failed; returns (retried, failed).
+
+    The section retried only below five and statement 2 scans only queued
+    and running, so a job that failed on its fifth attempt sat in
+    failed_retryable for good (plan section 2). Failing it here closes
+    that.
+
+    Only the status moves on a retry. attempts, params and model_alias
+    stay, so the next dispatch keeps the seed and the alias (ADR-002), and
+    error_code stays until the next failure overwrites it. As in
+    `recover`, the UPDATE commits before any job is failed.
+    """
+    params = {"max_attempts": max_attempts}
+    retried = conn.execute(
+        """
+        UPDATE job SET status = 'pending'
+         WHERE status = 'failed_retryable' AND next_attempt_at <= now()
+           AND attempts < %(max_attempts)s
+        """,
+        params,
+    ).rowcount
+    conn.commit()
+    spent = conn.execute(
+        """
+        SELECT id, consultation_id FROM job
+         WHERE status = 'failed_retryable' AND next_attempt_at <= now()
+           AND attempts >= %(max_attempts)s
+         ORDER BY id
+        """,
+        params,
+    ).fetchall()
+    return retried, _fail_each(conn, spent)
+
+
 def _fail_each(conn: psycopg.Connection[DictRow], jobs: Sequence[DictRow]) -> int:
     """`fail_job` on each scanned job, each in a transaction of its own and
     committed; returns how many it failed.
