@@ -82,6 +82,28 @@ def distinct_answers(
     return [(int(row["id"]), str(row["value_text"]), row["related"]) for row in rows]
 
 
+def cut(
+    answers: Sequence[PromptAnswer], *, size: int, token_cap: int
+) -> list[tuple[PromptAnswer, ...]]:
+    """`answers` in their order, cut at `size` answers or `token_cap`
+    tokens, whichever comes first; an answer over the cap on its own still
+    goes, alone. `batches` plans with it, and `mapping`'s resume cuts what
+    is left with it too, so what a job sends is cut the way it was planned."""
+    chunks: list[tuple[PromptAnswer, ...]] = []
+    chunk: list[PromptAnswer] = []
+    tokens = 0
+    for answer in answers:
+        cost = _tokens(answer.text)
+        if chunk and (len(chunk) >= size or tokens + cost > token_cap):
+            chunks.append(tuple(chunk))
+            chunk, tokens = [], 0
+        chunk.append(answer)
+        tokens += cost
+    if chunk:
+        chunks.append(tuple(chunk))
+    return chunks
+
+
 def batches(
     conn: psycopg.Connection[DictRow],
     question_id: UUID,
@@ -91,9 +113,9 @@ def batches(
     token_cap: int = TOKEN_CAP,
 ) -> list[Batch]:
     """The generation plan: partitioned by related answer, shuffled within
-    each partition with the seed, cut at `size` answers or `token_cap`
-    tokens, whichever comes first. Deterministic for a seed, so it is
-    recomputed on takeover rather than stored."""
+    each partition with the seed, then `cut` at `size` answers or
+    `token_cap` tokens, whichever comes first. Deterministic for a seed, so
+    it is recomputed on takeover rather than stored."""
     by_related: dict[str | None, list[PromptAnswer]] = {}
     for answer_id, text, related in distinct_answers(conn, question_id):
         by_related.setdefault(related, []).append(PromptAnswer(answer_id, text))
@@ -104,17 +126,7 @@ def batches(
     for related in sorted(by_related, key=lambda r: (r is None, r or "")):
         answers = by_related[related]
         rng.shuffle(answers)
-        chunk: list[PromptAnswer] = []
-        tokens = 0
-        for answer in answers:
-            cost = _tokens(answer.text)
-            if chunk and (len(chunk) >= size or tokens + cost > token_cap):
-                plan.append(Batch(related, tuple(chunk)))
-                chunk, tokens = [], 0
-            chunk.append(answer)
-            tokens += cost
-        if chunk:
-            plan.append(Batch(related, tuple(chunk)))
+        plan.extend(Batch(related, chunk) for chunk in cut(answers, size=size, token_cap=token_cap))
     return plan
 
 

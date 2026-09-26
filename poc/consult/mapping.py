@@ -2,11 +2,11 @@
 
 Same shape as `themes.py`: the stages take a connection and never commit,
 so the caller owns the transaction and commits between batches. The plan
-reuses `themes.batches` at `MAP_BATCH_SIZE`, the same partition (by
-related closed answer) and shuffle (by the stored seed) a find_themes job
-uses, so each of a signed-off question's distinct answers is planned
-once; their exact duplicates are never sent, and get their canonical's
-tags copied instead. A batch the two-way check refuses is sent again one
+reuses `themes.batches` at `MAP_BATCH_SIZE` and `themes.TOKEN_CAP`, the
+same partition (by related closed answer), shuffle (by the stored seed)
+and cut a find_themes job uses, so each of a signed-off question's
+distinct answers is planned once; their exact duplicates are never sent,
+and get their canonical's tags copied instead. A batch the two-way check refuses is sent again one
 answer at a time, and a worker taking over resumes by coverage, from the
 answers no checkpoint names yet. A batch's tags and its checkpoint go in
 one transaction. `run_map_themes` ends in `transitions.finish_map_themes`,
@@ -90,9 +90,12 @@ def load_map_job(conn: psycopg.Connection[DictRow], job_id: UUID) -> MapThemesJo
 def plan(conn: psycopg.Connection[DictRow], job: MapThemesJob) -> list[themes.Batch]:
     """Step 9's batches: distinct answers only, partitioned by the related
     closed answer and shuffled with the stored seed, cut at
-    `MAP_BATCH_SIZE` (docs/02, step 9; exact duplicates were flagged at
-    ingest and are themed once, docs/02 step 6)."""
-    return themes.batches(conn, job.question_id, seed=job.seed, size=MAP_BATCH_SIZE)
+    `MAP_BATCH_SIZE` answers or `themes.TOKEN_CAP` tokens (docs/02, step
+    9; exact duplicates were flagged at ingest and are themed once, docs/02
+    step 6). `_uncovered` cuts with the same two."""
+    return themes.batches(
+        conn, job.question_id, seed=job.seed, size=MAP_BATCH_SIZE, token_cap=themes.TOKEN_CAP
+    )
 
 
 def _duplicate_tags(
@@ -131,8 +134,11 @@ def _uncovered(
     conn: psycopg.Connection[DictRow], job_id: UUID, plan: Sequence[themes.Batch]
 ) -> list[themes.Batch]:
     """The plan's answers that no checkpoint of this job names yet, done or
-    unprocessable, rebatched in plan order at MAP_BATCH_SIZE, each batch
-    inside one related-answer partition so its placeholder is filled once."""
+    unprocessable, rebatched in plan order by `themes.cut` at the size and
+    token cap `plan` used, each batch inside one related-answer partition
+    so its placeholder is filled once. With nothing covered that is the
+    plan itself, so a fresh job sends exactly its planned batches, and a
+    resumed job's leftovers are cut the same way."""
     covered = {
         int(r["answer_id"])
         for r in conn.execute(
@@ -145,9 +151,9 @@ def _uncovered(
             answer for answer in batch.answers if answer.id not in covered
         )
     return [
-        themes.Batch(related, tuple(answers[start : start + MAP_BATCH_SIZE]))
+        themes.Batch(related, chunk)
         for related, answers in left.items()
-        for start in range(0, len(answers), MAP_BATCH_SIZE)
+        for chunk in themes.cut(answers, size=MAP_BATCH_SIZE, token_cap=themes.TOKEN_CAP)
     ]
 
 
