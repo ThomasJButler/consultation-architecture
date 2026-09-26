@@ -232,8 +232,8 @@ def test_export_reads_as_the_export_role(
     header = [cell.value for cell in next(responses.iter_rows(max_row=1))]
     assert "email" in header
     email_col = header.index("email")
-    emails = [row[email_col].value for row in responses.iter_rows(min_row=2)]
-    assert sum(1 for value in emails if value and "@" in value) == 240
+    emails = [str(row[email_col].value) for row in responses.iter_rows(min_row=2)]
+    assert sum(1 for value in emails if "@" in value) == 240
 
     # And it holds no write grant it would need: an UPDATE under the role
     # is refused before it can touch a row (docs/06, section 2.8). The
