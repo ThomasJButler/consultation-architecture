@@ -48,9 +48,9 @@ docker compose exec db psql -U consult -d consult -c \
 .venv/bin/consult export <consultation id> --out out.xlsx
 ```
 
-`consult run-job <job id> --worker w1 --model fake` runs one named job
-by hand instead of a `worker --once` pick; the psql line above gives the
-job table's ids too.
+`consult run-job <job id> --worker w1 --model fake` runs one named
+`find_themes` job by hand instead of a `worker --once` pick; `select id,
+kind, status from job` in the same psql gives the job ids.
 
 The model is `consult/fake_model.py`: it answers every prompt well, so
 what these commands prove is the mechanics around the call and nothing
