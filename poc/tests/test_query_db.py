@@ -23,7 +23,18 @@ from psycopg.rows import DictRow
 
 from consult import store
 from consult.ingest import ingest
-from consult.query import AttrFilter, Filter, OtherFilter, related_distribution, scope, theme_table
+from consult.query import (
+    AttrFilter,
+    Filter,
+    FilterCode,
+    FilterError,
+    OtherFilter,
+    check_filter_names,
+    parse_filters,
+    related_distribution,
+    scope,
+    theme_table,
+)
 from make_fixture_data import PROFORMA_REASON, PROFORMA_ROWS
 from tests.pipeline import fixture_rows, signed_off_fixture, signed_off_questions, staged_fixture
 from tests.rows import make_department, tag_answers_by_rule
@@ -449,3 +460,38 @@ def test_the_scope_holds_only_an_open_question(db: psycopg.Connection[DictRow]) 
     assert closed.denominator == 0
     assert closed.rows == []
     assert _run(db, row["id"], Filter()) == []
+
+
+def test_a_theme_key_the_signed_off_shortlist_lacks_is_refused(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    # theme: and other:<question>.theme= name a key on a question's latest
+    # signed-off shortlist, the version the scope's theme predicates read
+    # (docs/04 section 6). A key that isn't there narrows the scope to
+    # nobody, and the query reads "of 0 respondents who answered" at exit
+    # 0, which says "no data" where the truth is "no such key". Keys are
+    # enum values compared exactly (docs/02 step 9), so a wrong case is
+    # unknown too. Refused by code, like an unknown column, and never by
+    # the key. The shortlist here is the fake's three stems and sign-off's
+    # two fallbacks (fake_model.STEMS, transitions.FALLBACK_THEMES).
+    signed = signed_off_questions(db, ("o_reason", "o_safety"))
+    question_id = signed["o_reason"].question_id
+    department_id = _department_of(db, question_id)
+
+    for item, key in (
+        ("theme:access", "access"),
+        ("theme:NOT_A_KEY", "NOT_A_KEY"),
+        ("other:o_safety.theme=nope", "nope"),
+    ):
+        with pytest.raises(FilterError) as refused:
+            check_filter_names(db, question_id, parse_filters([item]), department_id=department_id)
+        assert refused.value.code is FilterCode.UNKNOWN_THEME
+        assert key not in str(refused.value)
+
+    for items in (
+        ["theme:ACCESS"],
+        ["theme:OTHER", "theme:NO_REASON"],
+        ["other:o_safety.theme=PARKING"],
+        ["attr:d_area=Villages", "theme:SAFETY", "other:o_safety.theme=ACCESS"],
+    ):
+        check_filter_names(db, question_id, parse_filters(items), department_id=department_id)
