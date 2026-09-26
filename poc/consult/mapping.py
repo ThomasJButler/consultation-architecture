@@ -123,6 +123,30 @@ def _shortlist(conn: psycopg.Connection[DictRow], version_id: UUID) -> list[Dict
     ).fetchall()
 
 
+def _uncovered(
+    conn: psycopg.Connection[DictRow], job_id: UUID, plan: Sequence[themes.Batch]
+) -> list[themes.Batch]:
+    """The plan's answers that no checkpoint of this job names yet, done or
+    unprocessable, rebatched in plan order at MAP_BATCH_SIZE, each batch
+    inside one related-answer partition so its placeholder is filled once."""
+    covered = {
+        int(r["answer_id"])
+        for r in conn.execute(
+            "SELECT unnest(answer_ids) AS answer_id FROM job_batch WHERE job_id = %s", (job_id,)
+        ).fetchall()
+    }
+    left: dict[str | None, list[PromptAnswer]] = {}
+    for batch in plan:
+        left.setdefault(batch.related_answer, []).extend(
+            answer for answer in batch.answers if answer.id not in covered
+        )
+    return [
+        themes.Batch(related, tuple(answers[start : start + MAP_BATCH_SIZE]))
+        for related, answers in left.items()
+        for start in range(0, len(answers), MAP_BATCH_SIZE)
+    ]
+
+
 def _checked(completion: Completion, prompt: Prompt) -> tuple[Assignment, ...] | Reason:
     """The reply's assignments, or the reason the check refused it. Only
     the reason leaves, so no write after a refusal can chain to the reply
@@ -230,13 +254,22 @@ def assign(
     the answer that spoiled it and not its nine neighbours (docs/02, step
     9). Returns the number of checkpoints this call wrote.
 
-    The batch number comes from `jobs.next_batch_no` when it is written,
-    not from the plan's position, because the retry at size one adds
-    batches the plan doesn't have (plan section 2, "resume is by
-    coverage")."""
+    Resume is by coverage. ADR-002 has a worker taking over resume from
+    the last checkpoint, which themes.generate reads as "skip every batch
+    below next_batch_no". That holds for a plan whose batch count is
+    fixed, and this one's isn't: the retry at size one adds a checkpoint
+    per answer, so batch numbers stop lining up with the plan's batches
+    and skipping by number would repeat or miss answers. So the answers
+    still to send are the plan's minus every id this job's checkpoints
+    name, and each checkpoint takes its number from `jobs.next_batch_no`
+    when it's written (plan section 2, "Resume is by coverage")."""
+    # The write every later one starts with (docs/02, step 5): a lease that
+    # has been taken over stops here, before it spends a call, even when
+    # there's nothing left to send.
+    jobs.heartbeat(conn, lease)
     shortlist = _shortlist(conn, job.version_id)
     ran = 0
-    for batch in plan:
+    for batch in _uncovered(conn, lease.job_id, plan):
         if _send(
             conn, llm, lease, job, shortlist, batch.related_answer, batch.answers, after_batch
         ):
