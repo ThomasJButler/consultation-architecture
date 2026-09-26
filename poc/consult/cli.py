@@ -8,6 +8,10 @@ runs validate, stage, configure and ingest in turn with every warning's
 default resolution and commits once, so the proof-of-concept goes from a
 spreadsheet to a schema full of rows with no model yet (docs/02, steps 2
 to 3a). Its output is counts and ids, never a value from the file.
+`consult run-job` claims one find_themes job and runs it to the end with
+the fake, committing after every batch; `consult themes` lists a
+question's candidates as keys, labels, counts and answer ids; `consult
+sign-off` confirms them as they stand (docs/02, steps 6 to 8).
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ from uuid import UUID
 import psycopg
 from psycopg.rows import DictRow
 
-from consult import config, jobs, logs, report, store, themes
+from consult import config, jobs, logs, report, store, themes, transitions
 from consult.config import Settings
 from consult.configure import ConfigureError, configure, defaults
 from consult.definition import Definition, DefinitionError, read_definition
@@ -66,6 +70,15 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--model", choices=["fake"], default="fake", help="the model: only the fake")
     show = commands.add_parser("themes", help="list a question's candidate themes")
     show.add_argument("question", type=UUID, help="the question id")
+    confirm = commands.add_parser("sign-off", help="confirm a question's themes as they stand")
+    confirm.add_argument("question", type=UUID, help="the question id")
+    confirm.add_argument("--reviewer", type=UUID, required=True, help="the reviewer's user id")
+    confirm.add_argument(
+        "--expect-version",
+        type=int,
+        required=True,
+        help="the edit counter the reviewer was looking at (docs/02, screen 3)",
+    )
     return parser
 
 
@@ -306,6 +319,53 @@ def _themes(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def _sign_off(args: argparse.Namespace, settings: Settings) -> int:
+    """Confirm as-is (docs/02, step 8; ADR-003). The edit counter is checked
+    first so a reviewer who saw an older list gets a conflict, then the
+    guarded UPDATE is the mutex; the rest is transitions.sign_off's."""
+    with store.connect(settings) as conn:
+        candidate = conn.execute(
+            """
+            SELECT edit_version FROM theme_set_version
+             WHERE question_id = %s AND status = 'candidate' ORDER BY version_no DESC LIMIT 1
+            """,
+            (args.question,),
+        ).fetchone()
+        if candidate is None:
+            print(f"question {args.question}: refused, no candidate version to sign off")
+            return 1
+        if candidate["edit_version"] != args.expect_version:
+            print(
+                f"question {args.question}: conflict, the list is at edit "
+                f"{candidate['edit_version']} and you were looking at edit {args.expect_version}"
+            )
+            return 1
+        signed = transitions.sign_off(conn, args.question, args.reviewer)
+        if signed is None:
+            conn.rollback()
+            print(f"question {args.question}: refused, not awaiting sign-off")
+            return 1
+        conn.commit()
+        status = conn.execute(
+            "SELECT c.status FROM consultation c JOIN question q ON q.consultation_id = c.id WHERE q.id = %s",
+            (args.question,),
+        ).fetchone()
+    logs.log_event(
+        logger,
+        "signed_off",
+        question_id=args.question,
+        version_id=signed.version_id,
+        job_id=signed.job_id,
+        reviewer_id=args.reviewer,
+    )
+    print(
+        f"question {args.question} signed off: version {signed.version_id}, "
+        f"map_themes job {signed.job_id} pending; consultation "
+        f"{status['status'] if status else 'unknown'}"
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None, *, settings: Settings | None = None) -> int:
     # Here and not under __main__: the console script pyproject.toml
     # declares calls main directly, and the formatter is the control on the
@@ -328,6 +388,8 @@ def main(argv: Sequence[str] | None = None, *, settings: Settings | None = None)
         return _run_job(args, resolved)
     if args.command == "themes":
         return _themes(args, resolved)
+    if args.command == "sign-off":
+        return _sign_off(args, resolved)
     return _validate(args, resolved)
 
 
