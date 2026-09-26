@@ -170,12 +170,16 @@ def test_the_query_command_reads_as_the_pipeline_role(
     original = query.theme_table
 
     def recording(
-        conn: psycopg.Connection[DictRow], question_id: UUID, filter: query.Filter
+        conn: psycopg.Connection[DictRow],
+        question_id: UUID,
+        filter: query.Filter,
+        *,
+        department_id: UUID,
     ) -> query.ThemeTable:
         row = conn.execute("SELECT current_user AS who").fetchone()
         assert row is not None
         seen.append(str(row["who"]))
-        return original(conn, question_id, filter)
+        return original(conn, question_id, filter, department_id=department_id)
 
     monkeypatch.setattr(query, "theme_table", recording)
 
