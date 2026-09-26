@@ -26,6 +26,10 @@ from tests.rows import make_consultation, make_department
 
 pytestmark = pytest.mark.db
 
+NOTHING_WRITTEN = Ingested(
+    respondents=0, answers=0, vault_rows=0, duplicate_answers=0, duplicate_respondents=0, jobs=0
+)
+
 
 def test_ingest_explodes_answers_one_row_per_option(db: psycopg.Connection[DictRow]) -> None:
     rows = fixture_rows()
@@ -330,14 +334,7 @@ def snapshot(db: psycopg.Connection[DictRow], consultation_id: UUID) -> dict[str
 
 def test_ingest_is_idempotent_on_replay(db: psycopg.Connection[DictRow]) -> None:
     staged = staged_fixture(db)
-    nothing_written = Ingested(
-        respondents=0,
-        answers=0,
-        vault_rows=0,
-        duplicate_answers=0,
-        duplicate_respondents=0,
-        jobs=0,
-    )
+    nothing_written = NOTHING_WRITTEN
 
     first = ingest(db, staged.consultation_id, keep_staging=True)
     assert (first.respondents, first.vault_rows, first.jobs) == (240, 240, 2)
@@ -464,3 +461,18 @@ def test_ingest_refuses_the_wrong_state_nothing_configured_and_a_lost_table(
     db.execute(sql.SQL("DROP TABLE {}").format(staging_table(lost.consultation_id)))
     with pytest.raises(IngestError, match="staging table"):
         ingest(db, lost.consultation_id)
+
+
+def test_a_redelivery_after_the_consultation_moved_on_finishes_quietly(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    # A fast find_themes can take the consultation past processing before
+    # the queue redelivers the ingest message; the redelivery still has
+    # nothing to do (docs/04, section 3). Found by the review.
+    staged = staged_fixture(db)
+    ingest(db, staged.consultation_id)
+    for status in ("awaiting_review", "ready"):
+        db.execute(
+            "UPDATE consultation SET status = %s WHERE id = %s", (status, staged.consultation_id)
+        )
+        assert ingest(db, staged.consultation_id) == NOTHING_WRITTEN
