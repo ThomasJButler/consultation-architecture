@@ -22,12 +22,14 @@ from consult.transitions import (
     SignOffConflictError,
     TransitionError,
     advance_consultation,
+    fail_job,
     finish_find_themes,
     finish_map_themes,
     mark_processing,
     mark_staged,
     reopen_for_correction,
     sign_off,
+    start_map_themes,
     start_staging,
 )
 from tests.rows import (
@@ -276,7 +278,7 @@ def test_a_reopen_mints_a_run_id_so_the_second_email_has_its_own_row(
     # because the row's subject is the pass (docs/04, section 2).
     second = sign_off(db, question_id, reviewer)
     assert second is not None
-    # Dispatch (pending to queued) is the reconciler's, PR-08; done by hand here.
+    # Dispatch is `dispatch.dispatch`; done by hand here to keep this test on the transitions.
     db.execute("UPDATE job SET status = 'queued', sent_at = now() WHERE id = %s", (second.job_id,))
     lease = claim(db, second.job_id, "worker-2")
     assert lease is not None
@@ -369,3 +371,101 @@ def test_sign_off_refuses_an_edit_it_has_not_seen(db: psycopg.Connection[DictRow
     assert state == {"status": "themes_ready", "versions": 1, "candidate": "candidate"}
     signed = sign_off(db, question_id, uuid4(), expected_version=2)
     assert signed is not None
+
+
+def edges_state(db: psycopg.Connection[DictRow], consultation_id: object) -> dict[str, object]:
+    """Everything a failed edge may touch, read back whole, so a call that
+    changes nothing compares equal before and after."""
+    questions = db.execute(
+        "SELECT id, status FROM question WHERE consultation_id = %s", (consultation_id,)
+    ).fetchall()
+    jobs_ = db.execute(
+        "SELECT id, status FROM job WHERE consultation_id = %s", (consultation_id,)
+    ).fetchall()
+    return {
+        "consultation": db.execute(
+            "SELECT status, attention_reason FROM consultation WHERE id = %s", (consultation_id,)
+        ).fetchone(),
+        "questions": {q["id"]: q["status"] for q in questions},
+        "jobs": {j["id"]: j["status"] for j in jobs_},
+        "outbox": outbox_rows(db, consultation_id),
+    }
+
+
+def test_the_map_and_failed_edges_move_the_question(db: psycopg.Connection[DictRow]) -> None:
+    # docs/02 section 6: a job reaching failed leaves the consultation in
+    # its state, sets attention_reason and earns one attention email, whose
+    # subject is the failed job (correction 3).
+    department_id = make_department(db)
+
+    # The map side. A signed-off question starts mapping once; a takeover
+    # finds it assigning already and carries on; any other state refuses.
+    mapped = make_consultation(db, department_id, status="awaiting_review")
+    done = make_open_question(db, mapped, "o_done", status="complete", ordinal=1)
+    mapping = make_open_question(db, mapped, "o_mapping", status="signed_off", ordinal=2)
+    assert start_map_themes(db, mapping) is True
+    assert start_map_themes(db, mapping) is False
+    before = edges_state(db, mapped)
+    with pytest.raises(TransitionError):
+        start_map_themes(db, done)
+    assert edges_state(db, mapped) == before
+
+    # Failed from the working state. A failed mapping blocks ready by
+    # design (docs/02, step 10), so fan-in 2 doesn't flip.
+    map_job = make_queued_job(db, mapped, mapping, kind="map_themes")
+    assert claim(db, map_job, "worker-1") is not None
+    assert fail_job(db, map_job) == Advance(False, False)
+    failed = edges_state(db, mapped)
+    assert failed == {
+        "consultation": {"status": "awaiting_review", "attention_reason": f"map_failed:{mapping}"},
+        "questions": {done: "complete", mapping: "map_failed"},
+        "jobs": {map_job: "failed"},
+        "outbox": [{"kind": "attention_needed", "subject_id": map_job, "status": "pending"}],
+    }
+    # The reconciler repeats itself: a second pass finds the job failed
+    # and writes nothing.
+    assert fail_job(db, map_job) == Advance(False, False)
+    assert edges_state(db, mapped) == failed
+
+    # The find side. A worker that claimed and died before its first commit
+    # leaves the question configured, so the edge takes that state too.
+    found = make_consultation(db, department_id, status="processing")
+    ready = make_open_question(db, found, "o_ready", status="themes_ready", ordinal=1)
+    crashed = make_open_question(db, found, "o_crashed", status="configured", ordinal=2)
+    stuck = make_open_question(db, found, "o_stuck", status="finding_themes", ordinal=3)
+    ready_job = make_queued_job(db, found, ready, status="succeeded")
+    crashed_job = make_queued_job(db, found, crashed)
+    assert claim(db, crashed_job, "worker-1") is not None
+    stuck_job = make_queued_job(db, found, stuck, status="failed_retryable")
+
+    # A sibling still finding holds fan-in 1 back.
+    assert fail_job(db, crashed_job) == Advance(False, False)
+    assert edges_state(db, found)["consultation"] == {
+        "status": "processing",
+        "attention_reason": f"find_failed:{crashed}",
+    }
+
+    # The last unfinished question failing is statement 4's case (docs/02,
+    # section 5), run here inside the failing transaction: fan-in 1 doesn't
+    # wait on a failed question, so the consultation flips with its email.
+    assert fail_job(db, stuck_job) == Advance(True, False)
+    run_id = consultation_row(db, found)["run_id"]
+    assert edges_state(db, found) == {
+        "consultation": {"status": "awaiting_review", "attention_reason": f"find_failed:{stuck}"},
+        "questions": {ready: "themes_ready", crashed: "find_failed", stuck: "find_failed"},
+        "jobs": {ready_job: "succeeded", crashed_job: "failed", stuck_job: "failed"},
+        "outbox": [
+            {"kind": "attention_needed", "subject_id": crashed_job, "status": "pending"},
+            {"kind": "attention_needed", "subject_id": stuck_job, "status": "pending"},
+            {"kind": "themes_ready", "subject_id": run_id, "status": "pending"},
+        ],
+    }
+
+    # A job that finished, one with no question to fail and one that isn't
+    # there are refused, and nothing moves.
+    stage_job = make_queued_job(db, found, kind="stage", status="running")
+    before = edges_state(db, found)
+    for job_id in (ready_job, stage_job, uuid4()):
+        with pytest.raises(TransitionError):
+            fail_job(db, job_id)
+    assert edges_state(db, found) == before
