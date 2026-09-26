@@ -37,10 +37,12 @@ _KEY = re.compile(KEY_PATTERN)
 # newline could open an instruction, a bidirectional override could make
 # the screen read backwards (THREAT_MODEL.md, row 2, "rewrite the theme
 # list"). C0 and C1 controls, zero-width and bidirectional format
-# characters are refused; everything else is the model's to say.
+# characters are refused, and so are U+FFFE and U+FFFF, which XML 1.0's
+# Char production (section 2.2) leaves out and a label would carry into
+# the export's summary sheet; everything else is the model's to say.
 MAX_LABEL = 80
 MAX_DESCRIPTION = 400
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufffe\uffff]")
 
 
 class Reason(StrEnum):
@@ -103,9 +105,19 @@ def _key(key: str, count: int) -> str:
 
 
 def _plain(text: str, limit: int, count: int) -> str:
-    """One line of plain text within the limit, or a ReplyError."""
+    """One line of plain text within the limit, or a ReplyError.
+
+    A JSON escape can spell a lone surrogate, which has no UTF-8 form, so
+    the text would pass here and fail the first insert as a worker error
+    instead; it's refused as malformed, raised from None because the
+    UnicodeEncodeError keeps the whole text on `.object`.
+    """
     if _CONTROL.search(text):
         raise ReplyError(Reason.TEXT_MALFORMED, count)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ReplyError(Reason.TEXT_MALFORMED, count) from None
     if len(text) > limit:
         raise ReplyError(Reason.TEXT_TOO_LONG, count)
     return text
