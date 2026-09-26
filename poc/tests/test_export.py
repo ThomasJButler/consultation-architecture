@@ -19,7 +19,8 @@ from openpyxl import load_workbook
 from psycopg.errors import InsufficientPrivilege
 from psycopg.rows import DictRow
 
-from consult import export
+from consult import export, store
+from consult.config import Settings
 from consult.query import Filter, theme_table
 from consult.store import EXPORT_ROLE, as_role
 from tests.pipeline import signed_off_questions
@@ -249,3 +250,89 @@ def test_export_reads_as_the_export_role(
     # savepoint keeps the connection usable for the RESET ROLE after.
     with as_role(db, EXPORT_ROLE), pytest.raises(InsufficientPrivilege), db.transaction():
         db.execute("UPDATE consultation SET name = name")
+
+
+def test_export_reads_one_snapshot_despite_a_mid_export_retraction(
+    db: psycopg.Connection[DictRow],
+    db_settings: Settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`write_workbook` reads the Responses sheet's theme marks and the
+    manifest's tag_count from `export._tags`, then reads the summary
+    sheet's counts again from `query.theme_table`, which resolves the
+    signed-off version and the live tags afresh. A second connection
+    retracts three PARKING tags and commits in between the two reads,
+    from inside a wrapped `export._tags`: under READ COMMITTED each
+    statement in `write_workbook`'s transaction takes its own snapshot
+    (PostgreSQL 17 manual, 13.2.1), so the summary sees fewer tags than
+    the sheet built from the read that ran first.
+    """
+    signed = signed_off_questions(db, ("o_reason",))
+    tag_answers_by_rule(
+        db, signed["o_reason"].version_id, signed["o_reason"].question_id, _o_reason_key
+    )
+    db.commit()
+
+    # Three canonical (non-duplicate) PARKING answers: retracting these
+    # changes query.theme_table's count, which the default Filter() scopes
+    # to canonical rows only, unlike the Responses sheet's marks.
+    targets = db.execute(
+        "SELECT id FROM answer WHERE question_id = %s AND duplicate_of_answer_id IS NULL"
+        " AND value_text ILIKE %s ORDER BY id LIMIT 3",
+        (signed["o_reason"].question_id, "%parking%"),
+    ).fetchall()
+    target_ids = [row["id"] for row in targets]
+    assert len(target_ids) == 3
+
+    original_tags = export._tags
+    retracted = False
+
+    def retract_after_reading(
+        conn: psycopg.Connection[DictRow], version_id: UUID | None
+    ) -> dict[int, set[str]]:
+        nonlocal retracted
+        result = original_tags(conn, version_id)
+        if not retracted and version_id == signed["o_reason"].version_id:
+            retracted = True
+            with store.connect(db_settings) as second:
+                second.execute(
+                    "UPDATE answer_theme SET retracted_at = now()"
+                    " WHERE theme_set_version_id = %s AND answer_id = ANY(%s)",
+                    (version_id, target_ids),
+                )
+                second.commit()
+        return result
+
+    monkeypatch.setattr(export, "_tags", retract_after_reading)
+
+    path = tmp_path / "export.xlsx"
+    export.write_workbook(db, signed["o_reason"].consultation_id, path)
+    assert retracted
+
+    workbook = load_workbook(path)
+    responses = workbook["Responses"]
+    header = [cell.value for cell in next(responses.iter_rows(max_row=1))]
+    parking_col = header.index("o_reason: PARKING")
+    responses_parking = sum(
+        1 for row in responses.iter_rows(min_row=2) if row[parking_col].value == "1"
+    )
+
+    summary_rows = {row[0].value: row for row in workbook["o_reason summary"].iter_rows(min_row=2)}
+    summary_parking = int(str(summary_rows["PARKING"][2].value))
+
+    # A snapshot taken once for the whole gather can't see a retraction
+    # committed by another connection after it started, so the summary
+    # sheet's count agrees with the Responses sheet built from the same
+    # snapshot, whatever the other connection commits in between.
+    assert summary_parking == responses_parking
+
+    manifest_rows = list(workbook["Manifest"].iter_rows(min_row=9, values_only=True))
+    o_reason_row = {row[0]: row for row in manifest_rows}["o_reason"]
+    responses_total_marks = sum(
+        1
+        for key in ("OTHER", "PARKING", "SAFETY")
+        for row in responses.iter_rows(min_row=2)
+        if row[header.index(f"o_reason: {key}")].value == "1"
+    )
+    assert o_reason_row[5] == str(responses_total_marks)  # tag_count
