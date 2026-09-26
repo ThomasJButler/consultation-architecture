@@ -14,7 +14,8 @@ taken over, a spent retry budget left alone, and workers racing on their
 own connections never sharing a job.
 
 The last races a takeover with nothing left to send against the
-reconciler failing the same job, and pins the lock order the two share.
+reconciler's pass over the same spent job, and pins that the two neither
+deadlock nor fail a live fifth attempt.
 """
 
 from __future__ import annotations
@@ -39,12 +40,12 @@ from consult import worker as worker_module
 from consult.config import Settings
 from consult.dispatch import dispatch
 from consult.errors import ErrorCode
-from consult.jobs import Lease, LeaseLostError, claim
+from consult.jobs import Lease, claim
 from consult.llm import LLM, Completion, GatewayError, Prompt
 from consult.logs import Formatter
 from consult.mapping import assign, load_map_job, plan, run_map_themes
 from consult.reconciler import recover
-from consult.transitions import Advance, fail_job, sign_off, start_map_themes
+from consult.transitions import Advance, sign_off, start_map_themes
 from consult.worker import (
     BACKOFF_ATTEMPTS,
     BACKOFF_BASE_SECONDS,
@@ -577,11 +578,13 @@ def test_a_takeover_with_nothing_left_does_not_deadlock_the_reconciler(
     # run. The worker's fifth attempt holds the job row (assign's opening
     # heartbeat) before the reconciler scans, and the reconciler holds the
     # consultation (_fail_each's lock) before the worker's finish asks for
-    # it. fail_job takes the consultation and then the job (transitions.py);
-    # a finish in the heartbeat's transaction takes them the other way round.
+    # it. _fail_each takes the consultation and then the job (transitions.py
+    # fail_job's order); a finish in the heartbeat's transaction takes them
+    # the other way round.
     worker_holds_job = threading.Event()
     reconciler_holds_consultation = threading.Event()
     worker_raised: list[Exception] = []
+    lock_consultation = transitions.lock_consultation
 
     def assign_after_a_silence(*args: Any, **kwargs: Any) -> int:
         # Silent past the lease between its claim and its first heartbeat,
@@ -596,9 +599,11 @@ def test_a_takeover_with_nothing_left_does_not_deadlock_the_reconciler(
         reconciler_holds_consultation.wait(timeout=30)
         return ran
 
-    def announce_then_fail(conn: psycopg.Connection[DictRow], job_id: UUID) -> Advance:
-        reconciler_holds_consultation.set()
-        return fail_job(conn, job_id)
+    def lock_then_announce(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> None:
+        lock_consultation(conn, consultation_id)
+        # The worker runs on `db`, so only the reconciler's lock announces.
+        if conn is not db:
+            reconciler_holds_consultation.set()
 
     def recording_runner(
         conn: psycopg.Connection[DictRow], llm: LLM, lease: Lease, **kwargs: Any
@@ -617,7 +622,7 @@ def test_a_takeover_with_nothing_left_does_not_deadlock_the_reconciler(
             return recover(conn)
 
     monkeypatch.setattr(mapping, "assign", assign_after_a_silence)
-    monkeypatch.setattr(transitions, "fail_job", announce_then_fail)
+    monkeypatch.setattr(transitions, "lock_consultation", lock_then_announce)
     monkeypatch.setitem(worker_module._RUNNERS, "map_themes", recording_runner)
     llm = FakeLLM([])
 
@@ -632,17 +637,19 @@ def test_a_takeover_with_nothing_left_does_not_deadlock_the_reconciler(
     raised = [*worker_raised, *([reconciler_error] if reconciler_error else [])]
     assert [exc for exc in raised if isinstance(exc, DeadlockDetected)] == []
     assert reconciler_error is None
-    # Statement 2 fails the spent fifth attempt, and the worker's finish
-    # meets its fence: the lease is lost and nothing more is written.
-    assert reconciling.result() == (0, 1)
-    assert [type(exc) for exc in worker_raised] == [LeaseLostError]
-    assert outcome == Outcome(
-        signed.job_id, "map_themes", "failed", RETRY_BUDGET, ErrorCode.LEASE_LOST
-    )
+    assert reconciler_holds_consultation.is_set()
+    # Statement 2 finds the spent fifth attempt's row held under the
+    # consultation's lock and leaves it: a held row is a live lease
+    # (docs/02, section 5, fails "running with a stale heartbeat"). The
+    # worker's finish takes the consultation once the pass commits, and
+    # the job succeeds on its fifth attempt with nothing sent.
+    assert reconciling.result() == (0, 0)
+    assert worker_raised == []
+    assert outcome == Outcome(signed.job_id, "map_themes", "succeeded", RETRY_BUDGET)
     assert llm.prompts == []
     row = db.execute(
         "SELECT j.status AS job, q.status AS question FROM job j"
         " JOIN question q ON q.id = j.question_id WHERE j.id = %s",
         (signed.job_id,),
     ).fetchone()
-    assert row == {"job": "failed", "question": "map_failed"}
+    assert row == {"job": "succeeded", "question": "complete"}
