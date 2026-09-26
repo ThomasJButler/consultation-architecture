@@ -17,6 +17,7 @@ from uuid import UUID
 
 import psycopg
 import pytest
+from psycopg.errors import UniqueViolation
 from psycopg.rows import DictRow
 
 from consult.ingest import ingest
@@ -497,3 +498,71 @@ def test_find_themes_writes_v1_and_flips_the_question_in_one_transaction(
             "versions": 1,
         }
     ]
+
+
+def test_a_second_delivery_writes_no_second_v1(db: psycopg.Connection[DictRow]) -> None:
+    # The first worker checkpoints every batch and dies before its last
+    # transaction; the second runs the whole job again and finds it all
+    # already there (docs/04, section 3: a find_themes job delivered twice
+    # can't write a second v1).
+    staged = staged_fixture(db)
+    ingest(db, staged.consultation_id)
+    job_id = queued_find_themes_job(db, staged, "o_reason")
+    job = load_job(db, job_id)
+    first = claim(db, job_id, "worker-1")
+    assert first is not None
+    start_find_themes(db, job.question_id)
+    version_id = ensure_version(db, first, job.question_id)
+    llm = RecordingLLM()
+    generated = generate(
+        db, llm, first, job, version_id, batches(db, job.question_id, seed=job.seed)
+    )
+    condense(db, llm, first, job, version_id, generated=generated)
+    preview(db, llm, first, job, version_id, generated=generated)
+
+    def written() -> tuple[list[DictRow], list[DictRow], int]:
+        themes = db.execute(
+            """
+            SELECT id, key, label, is_longlist, lineage_theme_id, preview_count
+              FROM theme WHERE theme_set_version_id = %s ORDER BY key
+            """,
+            (version_id,),
+        ).fetchall()
+        versions = db.execute(
+            "SELECT id, version_no, status FROM theme_set_version WHERE question_id = %s",
+            (job.question_id,),
+        ).fetchall()
+        row = db.execute(
+            "SELECT count(*) AS n FROM job_batch WHERE job_id = %s", (job_id,)
+        ).fetchone()
+        assert row is not None
+        return themes, versions, int(row["n"])
+
+    before = written()
+    db.execute(
+        "UPDATE job SET heartbeat_at = now() - interval '11 minutes' WHERE id = %s", (job_id,)
+    )
+    second = claim(db, job_id, "worker-2")
+    assert second is not None
+    llm2 = RecordingLLM()
+
+    advance = run_find_themes(db, llm2, second)
+
+    assert llm2.prompts == []
+    assert written() == before
+    assert len(before[1]) == 1
+    assert advance == Advance(themes_ready=False, analysis_ready=False)
+    state = db.execute(
+        "SELECT q.status AS question, j.status AS job, j.attempts FROM question q, job j WHERE q.id = %s AND j.id = %s",
+        (job.question_id, job_id),
+    ).fetchone()
+    assert state == {"question": "themes_ready", "job": "succeeded", "attempts": 2}
+    # And the index itself, should a code path ever forget the rule.
+    with pytest.raises(UniqueViolation), db.transaction():
+        db.execute(
+            """
+            INSERT INTO theme_set_version (department_id, question_id, version_no, status)
+            SELECT department_id, id, 1, 'candidate' FROM question WHERE id = %s
+            """,
+            (job.question_id,),
+        )
