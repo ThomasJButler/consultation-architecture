@@ -58,8 +58,10 @@ class Caps:
     table takes 1,600 columns (TooManyColumns at 1,601 on the local
     Postgres 16, 26 September 2026). validate.check_stageable_header holds
     the same line whatever this cap is set to. A wide file of short cells
-    meets the 8,160-byte row limit first: 750 cells of ten characters made
-    a row of 8,280 bytes there, which COPY refuses as too big, by sizes.
+    meets the row-size limit first: 750 cells of ten characters made a
+    row of 8,280 bytes against a maximum of 8,160, which COPY refused as
+    too big, naming sizes and no value (measured on the local Postgres
+    16.13, 26 September 2026; nothing refuses it earlier yet).
     """
 
     max_upload_bytes: int = 200 * 1024 * 1024
