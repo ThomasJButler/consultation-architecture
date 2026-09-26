@@ -25,7 +25,7 @@ from uuid import UUID
 import psycopg
 from openpyxl import Workbook
 from openpyxl.cell import WriteOnlyCell
-from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE, Cell
+from openpyxl.cell.cell import Cell
 from openpyxl.utils.exceptions import IllegalCharacterError
 from openpyxl.worksheet._write_only import WriteOnlyWorksheet
 from psycopg.pq import TransactionStatus
@@ -54,11 +54,20 @@ _KEYSET_PAGE = 1000
 _INVALID_SHEET_CHARS = re.compile(r"[\\*?:/\[\]]")
 _MAX_SHEET_TITLE = 31
 
+# XML 1.0's Char production (section 2.2) admits tab, LF, CR, U+0020 to
+# U+D7FF, U+E000 to U+FFFD and U+10000 up, and this is the rest below
+# U+10000: the C0 controls openpyxl's own ILLEGAL_CHARACTERS_RE names
+# (openpyxl 3.1.5, cell.py line 45), the surrogates, and U+FFFE and
+# U+FFFF, which check_string lets through and ElementTree, openpyxl's
+# writer here without lxml, puts raw into a sheet part no XML parser
+# will read.
+_XML_FORBIDDEN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+
 
 class ExportError(Exception):
-    """`_cell`'s backstop. Escaping every `ILLEGAL_CHARACTERS_RE` match
-    before the cell is built should leave openpyxl's own `check_string`
-    nothing left to refuse; if some character it still refuses reaches
+    """`_cell`'s backstop. Escaping every `_XML_FORBIDDEN` match before
+    the cell is built should leave openpyxl's own `check_string` nothing
+    left to refuse; if some character it still refuses reaches
     this anyway, `IllegalCharacterError` puts the whole value in its
     message (openpyxl 3.1.5, cell.py lines 164-165), and THREAT_MODEL.md
     section 2, line 2 forbids an open answer or a vault value at any
@@ -125,18 +134,19 @@ def _cell(ws: WriteOnlyWorksheet, value: object) -> Cell:
     against openpyxl 3.1.5, 26 September 2026).
 
     A C0 control character other than tab, newline or carriage return
-    (`ILLEGAL_CHARACTERS_RE`, openpyxl 3.1.5, cell.py line 45) fails
-    openpyxl's own `check_string` with the raw value in the exception
-    message it raises (cell.py lines 164-165). An open answer or a vault
-    identity value can carry one, and THREAT_MODEL.md section 2, line 2
-    forbids either riding an exception at any level, so every match is
-    escaped to the visible form `report.shown` already uses for a
-    control character before openpyxl ever sees the string. The `except`
-    is a backstop for a character neither list anticipated: it still
-    can't let the value through.
+    fails openpyxl's own `check_string` with the raw value in the
+    exception message it raises (cell.py lines 164-165), and U+FFFE or
+    U+FFFF passes it and leaves the sheet part malformed XML. An open
+    answer or a vault identity value can carry either, and THREAT_MODEL.md
+    section 2, line 2 forbids a value riding an exception at any level,
+    so every character XML 1.0 forbids (`_XML_FORBIDDEN`) is escaped to
+    the visible form `report.shown` already uses for a control character
+    before openpyxl ever sees the string. The `except` is a backstop for
+    a character neither list anticipated: it still can't let the value
+    through.
     """
     text = "" if value is None else str(value)
-    text = ILLEGAL_CHARACTERS_RE.sub(lambda match: repr(match.group())[1:-1], text)
+    text = _XML_FORBIDDEN.sub(lambda match: repr(match.group())[1:-1], text)
     try:
         cell = WriteOnlyCell(ws, value=neutralise(text))
     except IllegalCharacterError:
