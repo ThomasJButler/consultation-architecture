@@ -261,8 +261,14 @@ def _run_job(args: argparse.Namespace, settings: Settings) -> int:
             # backoff sleep is left with a transaction open.
             model = worker.BackingOff(llm, before_call=conn.commit)
             try:
+                # before_finish commits too, as worker._run's does, so the
+                # finish locks the consultation before the job (reconciler.py).
                 themes.run_find_themes(
-                    conn, model, lease, after_batch=lambda _batch_no: conn.commit()
+                    conn,
+                    model,
+                    lease,
+                    after_batch=lambda _batch_no: conn.commit(),
+                    before_finish=conn.commit,
                 )
             except GatewayError as exc:
                 # record_gateway_failure does its own rollback and commit

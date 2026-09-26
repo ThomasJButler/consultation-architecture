@@ -11,7 +11,9 @@ answer at a time, and a worker taking over resumes by coverage, from the
 answers no checkpoint names yet. A batch's tags and its checkpoint go in
 one transaction. `run_map_themes` ends in `transitions.finish_map_themes`,
 whose transaction locks the consultation before anything else in it
-touches that row, so nothing here may take that lock.
+touches that row, so nothing here may take that lock, and the caller's
+`before_finish` commits whatever row locks the stages still hold before
+that transaction starts (see `run_map_themes`).
 """
 
 from __future__ import annotations
@@ -289,18 +291,28 @@ def run_map_themes(
     lease: Lease,
     *,
     after_batch: Callable[[int], None] | None = None,
+    before_finish: Callable[[], None] | None = None,
 ) -> transitions.Advance:
     """The whole job for a claimed lease, the twin of
     `themes.run_find_themes`: the question moved on (or found already moved
     by a takeover), the plan rebuilt from the seed, the answers no
     checkpoint covers mapped, then `transitions.finish_map_themes`: the
     question complete, fan-in 2 run and the job succeeded (docs/02, steps
-    9 and 10). The caller commits in `after_batch`; nothing here does.
+    9 and 10). The caller commits in `after_batch` and `before_finish`;
+    nothing here does.
 
-    Nothing before the finish touches the consultation row, so its lock is
-    the first touch in its transaction whether a batch has just committed
-    or a takeover found every answer covered and no batch ran."""
+    `before_finish` runs once, after the stages and before the finish, and
+    is where a worker passes `conn.commit`. A takeover that finds every
+    answer covered sends no batch, so `assign`'s opening heartbeat is still
+    uncommitted and holds the job row; a finish in that transaction would
+    then ask for the consultation while holding the job, the reverse of
+    `transitions.fail_job`'s order (the consultation, then the job), and
+    the two deadlock when the reconciler fails the same job at that moment
+    (reconciler.py's module docstring). Committed first, the finishing
+    transaction starts with `lock_consultation` and the order matches."""
     job = load_map_job(conn, lease.job_id)
     transitions.start_map_themes(conn, job.question_id)
     assign(conn, llm, lease, job, plan(conn, job), after_batch=after_batch)
+    if before_finish is not None:
+        before_finish()
     return transitions.finish_map_themes(conn, lease, job.question_id, job.consultation_id)

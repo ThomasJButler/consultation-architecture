@@ -211,6 +211,7 @@ class _Runner(Protocol):
         lease: Lease,
         *,
         after_batch: Callable[[int], None] | None = None,
+        before_finish: Callable[[], None] | None = None,
     ) -> transitions.Advance: ...
 
 
@@ -319,7 +320,15 @@ def _run(
     its class in the log and its message nowhere (logs.py)."""
     model = BackingOff(llm, sleep=sleep, rng=rng, before_call=conn.commit)
     try:
-        _RUNNERS[kind](conn, model, lease, after_batch=lambda _batch_no: conn.commit())
+        # before_finish commits too, so the finishing transaction takes the
+        # consultation before the job, as fail_job does (reconciler.py).
+        _RUNNERS[kind](
+            conn,
+            model,
+            lease,
+            after_batch=lambda _batch_no: conn.commit(),
+            before_finish=conn.commit,
+        )
     except GatewayError as exc:
         conn.rollback()
         fields = _fields(conn, lease, kind, started)

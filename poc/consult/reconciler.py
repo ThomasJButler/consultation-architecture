@@ -11,7 +11,12 @@ Lock order is `transitions.fail_job`'s: the consultation row, then the
 job row, which is the order a worker's finishing transaction takes them
 in too. So a statement never holds a job row lock when it calls
 `fail_job`: its bulk UPDATE commits first, and each job at the retry
-budget is then failed in a transaction of its own.
+budget is then failed in a transaction of its own. The worker keeps the
+same order by committing before its finish (the runners' `before_finish`,
+which `worker._run` and `cli._run_job` pass as `conn.commit`): a takeover
+with nothing left to send has only a heartbeat to its name, and that
+heartbeat's job row lock would otherwise still be held when the finish
+asks for the consultation.
 
 Three things the design has that this module doesn't. A row the relay
 left in `sending` by crashing between its two commits needs ADR-006's

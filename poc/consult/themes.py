@@ -489,12 +489,23 @@ def run_find_themes(
     lease: Lease,
     *,
     after_batch: Callable[[int], None] | None = None,
+    before_finish: Callable[[], None] | None = None,
 ) -> transitions.Advance:
     """The whole job for a claimed lease: the question moved on (or found
     already moved by a takeover), v1 ensured, the plan rebuilt from the
     seed, then generation, condensation and preview, each skipping what a
     checkpoint already covers, then the finishing transaction. The caller
-    commits in `after_batch`; nothing here does."""
+    commits in `after_batch` and `before_finish`; nothing here does.
+
+    `before_finish` runs once, after the stages and before the finish, and
+    is where a worker passes `conn.commit`. A takeover that finds no
+    preview batch left still runs `preview`'s heartbeat, which holds the
+    job row until a commit; a finish in that transaction would ask for the
+    consultation while holding the job, the reverse of
+    `transitions.fail_job`'s order, and deadlock against the reconciler
+    failing the same job (`mapping.run_map_themes` has the same shape).
+    Committed first, the finishing transaction starts with
+    `lock_consultation`."""
     job = load_job(conn, lease.job_id)
     transitions.start_find_themes(conn, job.question_id)
     version_id = ensure_version(conn, lease, job.question_id)
@@ -504,4 +515,6 @@ def run_find_themes(
     if after_batch is not None:
         after_batch(len(plan) + 1)
     preview(conn, llm, lease, job, version_id, generated=len(plan), after_batch=after_batch)
+    if before_finish is not None:
+        before_finish()
     return transitions.finish_find_themes(conn, lease, job.question_id, job.consultation_id)
