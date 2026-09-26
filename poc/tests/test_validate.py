@@ -292,6 +292,35 @@ def test_an_option_with_two_commas_is_one_option(tmp_path: Path) -> None:
     assert [(w.value, w.count) for w in never_apart] == [(label, 5)]
 
 
+def test_a_single_select_option_with_a_comma_is_merged_back(tmp_path: Path) -> None:
+    # A single-select cell is the one option chosen, written whole, so an
+    # option with a comma arrives as a value none of its split pieces
+    # matches (docs/00). Taken for an unknown value it would default to not
+    # answered and ingest would blank all six rows; it's the never-apart
+    # case, and the default is to merge (docs/02, section 3.2).
+    path = tmp_path / "responses.csv"
+    path.write_text(
+        "c_route\n" + '"Yes, with changes"\n' * 6 + "No\nNo\nNot sure\n", encoding="utf-8"
+    )
+    # What split_options makes of the cell "Yes, with changes, No, Not sure".
+    split = ("Yes", "with changes", "No", "Not sure")
+    question = ClosedQuestion("c_route", "Support?", ResponseType.SINGLE_SELECT, split)
+    definition = Definition(demographic=(), closed=(question,), open=())
+
+    report = validate(definition, Responses(path))
+
+    assert merged_options(question, defaults(report)) == ["Yes, with changes", "No", "Not sure"]
+    (never_apart,) = warnings_of(report, WarningKind.OPTIONS_NEVER_APART)
+    assert (never_apart.column_ref, never_apart.value, never_apart.count) == (
+        "c_route",
+        "Yes, with changes",
+        6,
+    )
+    assert never_apart.resolutions == (Resolution.MERGE_OPTIONS,)
+    assert never_apart.default is Resolution.MERGE_OPTIONS
+    assert warnings_of(report, WarningKind.UNKNOWN_VALUE) == []
+
+
 def test_a_repeated_or_blank_header_is_an_error_and_a_column_is_listed_once(tmp_path: Path) -> None:
     # Cells are keyed by header, so a repeated name would silently lose a
     # column and a blank one has nothing to key by; both block, once each.
