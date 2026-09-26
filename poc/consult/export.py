@@ -63,6 +63,15 @@ _MAX_SHEET_TITLE = 31
 # will read.
 _XML_FORBIDDEN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
 
+# ECMA-376 Part 1, 22.9.2.19 (ST_Xstring): a spreadsheet decodes _xHHHH_
+# in a cell's text as the character with that code, and openpyxl 3.1.5
+# writes the text as given, so the underscore that opens one is written
+# as _x005F_, the underscore's own escape, the form XlsxWriter writes.
+# A lookahead rather than a match, so an underscore that closes one
+# sequence and opens the next is escaped too.
+_OOXML_ESCAPE = re.compile("_(?=x[0-9A-Fa-f]{4}_)")
+_ESCAPED_UNDERSCORE = "_x005F_"
+
 
 class ExportError(Exception):
     """`_cell`'s backstop. Escaping every `_XML_FORBIDDEN` match before
@@ -144,11 +153,16 @@ def _cell(ws: WriteOnlyWorksheet, value: object) -> Cell:
     before openpyxl ever sees the string. The `except` is a backstop for
     a character neither list anticipated: it still can't let the value
     through.
+
+    An `_xHHHH_` sequence in the text is escaped after `neutralise`
+    (`_OOXML_ESCAPE`), so Excel shows it as typed rather than decoding
+    `_x003D_` into an `=` that `neutralise` never saw.
     """
     text = "" if value is None else str(value)
     text = _XML_FORBIDDEN.sub(lambda match: repr(match.group())[1:-1], text)
+    text = _OOXML_ESCAPE.sub(_ESCAPED_UNDERSCORE, neutralise(text))
     try:
-        cell = WriteOnlyCell(ws, value=neutralise(text))
+        cell = WriteOnlyCell(ws, value=text)
     except IllegalCharacterError:
         raise ExportError() from None
     cell.data_type = "s"
