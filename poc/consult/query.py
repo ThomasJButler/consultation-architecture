@@ -166,7 +166,11 @@ _HEAD = sql.SQL(
 _AND = sql.SQL("\n     AND ")
 _TAIL = sql.SQL("\n)\n")
 
-_THIS_QUESTION = sql.SQL("a.question_id = {} AND NOT a.is_blank").format(
+# An open question only: a multi-select closed one has an answer row per
+# option ticked, and docs/04 section 6's denominator is one non-blank row
+# per respondent (341 rows against 196 respondents for c_modes on the
+# fixture), so a closed question's scope is empty.
+_THIS_QUESTION = sql.SQL("a.question_id = {} AND q.kind = 'open' AND NOT a.is_blank").format(
     sql.Placeholder("question_id")
 )
 # The mandatory scope (docs/06 section 2; THREAT_MODEL.md row 5): the
