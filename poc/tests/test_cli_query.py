@@ -257,3 +257,34 @@ def test_a_wrong_id_is_refused_by_name_not_a_traceback(
     out = capsys.readouterr().out
     assert code == 1
     assert out == f"question {consultation_id}: not found\n"
+
+
+def test_a_filter_naming_an_unknown_column_or_question_is_refused(
+    db: psycopg.Connection[DictRow],
+    db_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ingested(db, db_settings)
+    reason_row = db.execute("SELECT id FROM question WHERE column_ref = 'o_reason'").fetchone()
+    assert reason_row is not None
+    reason_id = reason_row["id"]
+    capsys.readouterr()
+
+    # attr: names a column this consultation doesn't have: refused by
+    # code before the scope CTE ever runs, not "of 0 respondents who
+    # answered" at exit 0.
+    code = main(
+        ["query", str(reason_id), "--filter", "attr:not_a_real_column=x"], settings=db_settings
+    )
+    out = capsys.readouterr().out
+    assert code == 2
+    assert out == "refused: unknown_column\n"
+
+    # other: names a question the same way.
+    code = main(
+        ["query", str(reason_id), "--filter", "other:not_a_real_question.theme=x"],
+        settings=db_settings,
+    )
+    out = capsys.readouterr().out
+    assert code == 2
+    assert out == "refused: unknown_question\n"
