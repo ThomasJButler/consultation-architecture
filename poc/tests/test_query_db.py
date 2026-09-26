@@ -323,6 +323,27 @@ def test_the_scope_holds_to_the_callers_department(db: psycopg.Connection[DictRo
     assert own.denominator == 74
 
 
+def test_the_related_lookup_stays_inside_the_department(db: psycopg.Connection[DictRow]) -> None:
+    # The related distribution first finds the question's related closed
+    # question, and that lookup is a read like any other: held to the
+    # caller's department (docs/06 section 2), since a question id is a
+    # guessable value (THREAT_MODEL.md row 5). From another department, a
+    # question that exists and an id nobody has must get the same answer,
+    # or the difference says which ids exist elsewhere. The answer is the
+    # empty distribution test_the_scope_holds_to_the_callers_department
+    # pins for the first.
+    signed = signed_off_fixture(db)
+    other_department = make_department(db)
+
+    def asked(question_id: UUID) -> object:
+        try:
+            return related_distribution(db, question_id, Filter(), department_id=other_department)
+        except LookupError:
+            return LookupError
+
+    assert asked(signed.question_id) == asked(uuid4()) == []
+
+
 def test_the_theme_table_is_one_statement(
     db: psycopg.Connection[DictRow], monkeypatch: pytest.MonkeyPatch
 ) -> None:
