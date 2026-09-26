@@ -583,3 +583,34 @@ def test_a_noncharacter_never_breaks_the_workbook(
     # The visible form the control-character escape already uses.
     assert row[index["o_reason"]].value == answer_text + "\\uffff"
     assert row[index[identity["column_ref"]]].value == "\\ufffe" + identity_text
+
+
+def test_the_responses_sheet_has_a_column_per_shortlist_theme_only(
+    db: psycopg.Connection[DictRow], tmp_path: Path
+) -> None:
+    """sign_off copies every theme of the candidate into the signed-off
+    version, the longlist too, for lineage (transitions.sign_off), while
+    mapping offers the model the shortlist and its two fallbacks and
+    nothing else (mapping._shortlist reads NOT is_longlist). A column for
+    a longlist key could never hold a mark, so docs/02 step 12's "one
+    column per theme" is one per theme an answer can be tagged with."""
+    signed = signed_off_questions(db, ("o_reason",))
+    themes = db.execute(
+        "SELECT key, is_longlist FROM theme WHERE theme_set_version_id = %s ORDER BY key",
+        (signed["o_reason"].version_id,),
+    ).fetchall()
+    shortlist = [row["key"] for row in themes if not row["is_longlist"]]
+    longlist = {row["key"] for row in themes if row["is_longlist"]}
+    # The fake's condensation leaves candidates on the longlist, so the
+    # fixture's signed-off version has some to leave out.
+    assert longlist
+    db.commit()
+
+    path = tmp_path / "export.xlsx"
+    export.write_workbook(db, signed["o_reason"].consultation_id, path)
+
+    workbook = load_workbook(path)
+    header = [str(cell.value) for cell in next(workbook["Responses"].iter_rows(max_row=1))]
+    columns = [name.removeprefix("o_reason: ") for name in header if name.startswith("o_reason: ")]
+    assert columns == shortlist
+    assert not longlist & set(columns)
