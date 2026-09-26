@@ -17,9 +17,13 @@ small team. That is what this repository is about.
 2. `docs/` holds the reasoning: the brief in my own words, the research with
    sources, the architecture, the decision records, the data model, the cost
    model, the security and governance notes.
-3. `poc/` is a small proof-of-concept of the parts of the design that are easy
-   to claim and hard to get right: the job pipeline's claim, lease and fan-in
-   mechanics, on a real Postgres. It runs offline with a fake model.
+3. `poc/` is a small proof-of-concept of the parts of the design that are
+   easy to claim and hard to get right: the job pipeline's claim, lease and
+   fan-in mechanics, idempotent tag inserts and the indexed filter query, on
+   a real Postgres, each of the four proved by a named test rather than
+   asserted (`poc/TESTING.md`). It runs offline with a fake model, a
+   fixture consultation taken end to end from `consult ingest` through
+   `consult worker`, `consult query` and `consult export`.
 4. `plans/` holds the plan for each pull request, written before the work.
 
 ## What it deliberately does not do
@@ -97,14 +101,16 @@ ADR-004 recorded as dated corrections. Two commands, `consult query` and
 ## How it was built
 
 Test-first, with the checks in CI: ruff, mypy, pytest against a real Postgres,
-pip-audit and bandit (from PR-03 onwards). PR-01 to PR-03 were reviewed
+pip-audit and bandit (from PR-03 onwards; `poc/`'s own `make check` runs the
+same gate). PR-01 to PR-03 were reviewed
 before merging by [ReviewBot Protocol](https://github.com/ThomasJButler/ReviewBotProtocol),
 a code-review tool I built and run myself: several open-weight models read the
 diff independently on my own machine, their findings are compared, and nothing
 leaves the device. From PR-04 the review pass is a Claude code review and a
 Claude security review, run the same way: findings verified, fixed on the
 branch or kept with a reason. What each review found, and what I did about
-it, is in `docs/07-reviews.md`.
+it, is in `docs/07-reviews.md`, one row per pull request, complete to
+row 09; row 10 is this pull request's own round.
 I used Claude throughout, to research, to stress-test alternatives and to
 draft; the decisions are mine.
 
