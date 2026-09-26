@@ -224,9 +224,15 @@ def _run_job(args: argparse.Namespace, settings: Settings) -> int:
             except ReplyError as exc:
                 # The failure is a code and a request id, never the reply
                 # (THREAT_MODEL.md, section 2); whether it retries is the
-                # reconciler's call (PR-08).
+                # reconciler's call (PR-08). Recording it is a fenced write
+                # too, so the lease can turn out to have gone here as well.
                 conn.rollback()
-                jobs.record_failure(conn, lease, exc.code, provider_request_id=None)
+                try:
+                    jobs.record_failure(conn, lease, exc.code, provider_request_id=None)
+                except LeaseLostError as lost:
+                    conn.rollback()
+                    print(f"job {args.job}: {lost.code.value}")
+                    return 1
                 conn.commit()
                 print(f"job {args.job}: failed ({exc.code.value}: {exc.reason.value})")
                 return 1

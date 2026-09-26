@@ -114,8 +114,10 @@ def _plain(text: str, limit: int, count: int) -> str:
 def _object(text: str) -> dict[str, object]:
     try:
         reply = json.loads(text)
-    except ValueError as exc:
-        raise ReplyError(Reason.NOT_JSON) from exc
+    except ValueError:
+        # Not chained: JSONDecodeError keeps the whole document on .doc, and
+        # a chained cause is one logger.exception away from a log line.
+        raise ReplyError(Reason.NOT_JSON) from None
     if not isinstance(reply, dict):
         raise ReplyError(Reason.NOT_AN_OBJECT)
     return reply
