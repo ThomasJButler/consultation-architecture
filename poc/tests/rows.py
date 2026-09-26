@@ -289,6 +289,26 @@ def tag_answers_by_rule(
     return chosen
 
 
+def make_job_batch(
+    conn: psycopg.Connection[DictRow],
+    job_id: UUID,
+    answer_ids: list[int],
+    *,
+    batch_no: int = 1,
+    stage: str = "map_themes",
+    status: str = "done",
+) -> None:
+    """A worker's checkpoint as mapping.py writes one (ADR-002): the batch
+    of answers a stage covered, and whether it tagged them or gave up."""
+    conn.execute(
+        """
+        INSERT INTO job_batch (department_id, job_id, batch_no, stage, answer_ids, status)
+        SELECT department_id, id, %s, %s, %s, %s FROM job WHERE id = %s
+        """,
+        (batch_no, stage, answer_ids, status, job_id),
+    )
+
+
 def make_outbox_row(
     conn: psycopg.Connection[DictRow],
     consultation_id: UUID,

@@ -11,7 +11,7 @@ own test, test_export_prefix.py, outside this mark (test_repo_rules.py).
 from __future__ import annotations
 
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
@@ -24,7 +24,7 @@ from consult.config import Settings
 from consult.query import Filter, theme_table
 from consult.store import EXPORT_ROLE, as_role
 from tests.pipeline import signed_off_questions
-from tests.rows import tag_answers_by_rule
+from tests.rows import make_job_batch, tag_answers_by_rule
 
 pytestmark = pytest.mark.db
 
@@ -390,3 +390,51 @@ def test_a_summary_sheet_title_is_always_valid(
     assert "?" not in title
     assert "/" not in title
     assert workbook[title]["A1"].value == "key"
+
+
+def test_unprocessable_counts_the_versions_own_map_job(
+    db: psycopg.Connection[DictRow], tmp_path: Path
+) -> None:
+    """A reopen and a second sign-off puts a new map_themes job under a
+    new run, which re-maps every answer (docs/02, step 9). The manifest's
+    unprocessable_count has to name the version's own run, not every
+    map_themes job the question has ever had: an answer refused by both
+    an earlier run and the run that tagged this version is one refused
+    answer, not two."""
+    signed = signed_off_questions(db, ("o_reason",))
+    shared_answer = db.execute(
+        "SELECT id FROM answer WHERE question_id = %s AND NOT is_blank ORDER BY id LIMIT 1",
+        (signed["o_reason"].question_id,),
+    ).fetchone()
+    assert shared_answer is not None
+    shared_answer_id = shared_answer["id"]
+
+    # sign_off's own map_themes job (docs/02, step 9): refused the shared
+    # answer in an earlier run.
+    make_job_batch(db, signed["o_reason"].job_id, [shared_answer_id], status="unprocessable")
+
+    # A reopen's new run (docs/02, step 9): a fresh run_id, since
+    # job_one_per_run scopes one job per (consultation, question, kind,
+    # run). Created after the first job, and the alias query in
+    # _manifest_question already picks this one as "the" map_themes job
+    # by created_at.
+    second_job = db.execute(
+        """
+        INSERT INTO job (department_id, consultation_id, question_id, kind, run_id, status,
+                         created_at)
+        SELECT department_id, id, %s, 'map_themes', %s, 'queued', now() + interval '1 minute'
+          FROM consultation WHERE id = %s
+        RETURNING id
+        """,
+        (signed["o_reason"].question_id, uuid4(), signed["o_reason"].consultation_id),
+    ).fetchone()
+    assert second_job is not None
+    make_job_batch(db, second_job["id"], [shared_answer_id], status="unprocessable")
+
+    path = tmp_path / "export.xlsx"
+    export.write_workbook(db, signed["o_reason"].consultation_id, path)
+
+    workbook = load_workbook(path)
+    manifest_rows = list(workbook["Manifest"].iter_rows(min_row=9, values_only=True))
+    o_reason_row = {row[0]: row for row in manifest_rows}["o_reason"]
+    assert o_reason_row[6] == "1"  # unprocessable_count
