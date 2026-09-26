@@ -64,7 +64,12 @@ corrected). A connection is made as the login user in `.env` and `SET ROLE`
 picks the grant set. The pipeline role has no grant on the `vault` schema
 at all; only `consult_admin` holds `DELETE` anywhere. `tests/test_vault.py`
 connects as the pipeline role and the vault refuses it, at the schema, for
-a read and for a write.
+a read and for a write. The split guards against the code getting it
+wrong, not against a compromised process: `SET ROLE` needs membership and
+a member can `RESET ROLE`, and the login user here is the container's
+superuser. A production worker's login user would be a member of
+`consult_pipeline` and nothing else, so the boundary the test pins isn't
+one `RESET ROLE` away (the security review of PR-06, `docs/07`).
 
 ## The fixtures
 

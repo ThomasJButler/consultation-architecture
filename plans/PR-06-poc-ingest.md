@@ -21,6 +21,14 @@ the proof-of-concept runs end to end from a spreadsheet to a schema full
 of rows, with no model yet.
 **Doesn't yet cover:** dispatch (the jobs go in `pending`), the worker and
 the reconciler (PR-08), any model call (PR-07), the filter query (PR-09).
+Two things the design has here are deferred with named reasons: the
+`stage` and `ingest` job rows docs/02 steps 2 and 3 have Confirm insert
+go in with dispatch (PR-08), so the steps run inline and the edges in
+`transitions.py` are the record of them; and re-running stage from the
+stored upload when the table is missing (docs/02, correction 5) needs an
+upload store this proof-of-concept hasn't got, so ingest refuses by name
+instead. The rows are held and written with `executemany` rather than
+streamed with COPY, which the code says at the point it does it.
 
 ## 1. Objective
 

@@ -169,12 +169,13 @@ Each ends in a commit; subjects are plain sentences; one failing test per
 
 ## 6. Security and quality notes
 
-`THREAT_MODEL.md` rows 3 and 6 are the rows this pull request answers on
+`THREAT_MODEL.md` rows 2 and 3 are the rows this pull request answers on
 the prompt side: the containment test asserts what a prompt contains and
-what it doesn't, and the validator turns every wrong-shaped reply into a
-code, never a message body in `job.error`. The masks are a SHOULD in
-`docs/06` and are tested as shapes, with the section 6 note that a name
-in prose gets through. Every theme key the model returns is checked
+what it doesn't (row 2 is the row that names PR-07), and the validator
+turns every wrong-shaped reply into a code, never a message body in
+`job.error`. Row 6, the vault, was PR-06's; this pull request touches it
+only through the masks, a SHOULD in `docs/06` tested as shapes, with the
+section 6 note that a name in prose gets through. Every theme key the model returns is checked
 against the version's enum before it is used as a label anywhere. A
 reviewer should read `prompts.py` against `docs/06` section 2.2 line by
 line, `replies.py` against `tests/fakes.py`'s faults, and the transaction

@@ -359,3 +359,25 @@ A review of PR-02 found fifteen inconsistencies across the design documents; `do
 5. The proof-of-concept schema keeps `department` without its budget columns: fourteen tables, not thirteen (section 8).
 6. The dashboard CTE carries the duplicate toggle's two predicates (section 6). Was: none.
 7. `job.created_at`, `consultation.status_changed_at` and `awaiting_review_at`, for the alarms and the review-time KPI, and a partial unique index on `respondent (consultation_id, external_id)` (sections 1, 2 and 3).
+
+## Correction, 26 September 2026
+
+Three things PR-06's code does that the body above doesn't say, found by
+its review and recorded here rather than rewritten into the merged text.
+
+1. **Section 2, the staging table's drop.** The proof-of-concept drops the
+   table inside the ingest transaction, not after the commit. Its
+   redelivery guard reads "a consultation past ingest with no staging
+   table" as work already done, so the status change and the drop have to
+   become visible together. The production worker, which re-stages from
+   the stored upload when the table is missing (docs/02, correction 5),
+   can keep the wording above.
+2. **Section 1, `consultation.column_roles`.** Besides the respondent id
+   and the ignored columns, the document carries `duplicate_ids`, the
+   repeated-id resolution from docs/02 section 3.2 (correction 8). The id
+   column has no `question` row, so there is no `value_policy` to hold it.
+3. **Sections 1 and 3, `department.name`.** Unique. `consult ingest` finds
+   or creates the department by name in one `INSERT ... ON CONFLICT`, and
+   two runs racing on a new name have to land on one row; the section 3
+   table gains the index: `department (name)`, one department per name
+   however many times the command runs.
