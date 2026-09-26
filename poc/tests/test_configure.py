@@ -17,10 +17,10 @@ import psycopg
 import pytest
 from psycopg.rows import DictRow
 
-from consult.configure import Resolutions, configure, defaults
+from consult.configure import ConfigureError, Resolutions, configure, defaults
 from consult.definition import DemographicQuestion, OpenQuestion, read_definition
 from consult.responses import Responses
-from consult.validate import validate
+from consult.validate import Resolution, validate
 from tests.rows import make_consultation, make_department
 
 pytestmark = pytest.mark.db
@@ -161,3 +161,29 @@ def test_a_re_save_that_moves_a_column_between_kinds_sets_its_status(
     assert (by_ref["d_age"]["kind"], by_ref["d_age"]["status"]) == ("open", "configured")
     assert (by_ref["o_safety"]["kind"], by_ref["o_safety"]["status"]) == ("demographic", None)
     assert by_ref["o_reason"]["status"] == "themes_ready"
+
+
+def test_two_columns_given_the_respondent_id_role_are_refused(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    # docs/02 section 3.2 gives each unmatched header the role the reviewer
+    # chose. Two respondent-id columns can't both be the key, and quietly
+    # recording the second as ignored would misdescribe the choice, so it
+    # refuses, naming both, before anything is written.
+    consultation_id = make_consultation(db, make_department(db), status="staged")
+    definition = read_definition(FIXTURES / "definition.xlsx")
+    report = validate(definition, Responses(FIXTURES / "responses.csv"))
+    chosen = defaults(report)
+    resolutions = replace(
+        chosen, roles={**chosen.roles, "notes_internal": Resolution.ROLE_RESPONDENT_ID}
+    )
+
+    with pytest.raises(ConfigureError) as refused:
+        configure(db, consultation_id, definition, report, resolutions)
+
+    assert "respondent_ref" in str(refused.value) and "notes_internal" in str(refused.value)
+    assert questions_of(db, consultation_id) == []
+    roles = db.execute(
+        "SELECT column_roles FROM consultation WHERE id = %s", (consultation_id,)
+    ).fetchone()
+    assert roles == {"column_roles": {}}
