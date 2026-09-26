@@ -76,7 +76,7 @@ def test_the_validator_reports_the_fixtures_as_designed() -> None:
         Resolution.ADD_AS_OPTION,
         Resolution.TREAT_AS_NOT_ANSWERED,
     )
-    assert unsure.default is Resolution.MAP_TO_OPTION
+    assert unsure.default is Resolution.TREAT_AS_NOT_ANSWERED
 
     (not_applicable,) = warnings_of(report, WarningKind.NOT_APPLICABLE)
     assert not_applicable.column_ref == "d_commute"
@@ -311,7 +311,7 @@ def test_an_unknown_multi_select_token_is_a_warning_with_the_three_resolutions(
         Resolution.ADD_AS_OPTION,
         Resolution.TREAT_AS_NOT_ANSWERED,
     )
-    assert unknown.default is Resolution.MAP_TO_OPTION
+    assert unknown.default is Resolution.TREAT_AS_NOT_ANSWERED
 
 
 def test_a_header_over_sixty_three_bytes_is_an_error(tmp_path: Path) -> None:
