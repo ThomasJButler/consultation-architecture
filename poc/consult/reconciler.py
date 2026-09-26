@@ -254,38 +254,42 @@ def relay(
 
     ADR-006's query takes pending rows in id order FOR UPDATE SKIP LOCKED,
     the manual's own suggestion for many consumers of a queue-like table,
-    so two relays neither wait on each other nor take the same row. The
-    rows go to sending and commit before the first send, and each row's
-    sent mark, with the reference and the time, commits before the next,
-    so no transaction is open across a send and a crash strands at most
-    the one row it was sending.
+    so two relays neither wait on each other nor take the same row. It
+    takes one row a transaction here, ADR-006's mark, send, mark: the row
+    goes to sending and commits, the send runs with no transaction open,
+    and the sent mark, with the reference and the time, commits before
+    the next row is taken. So a crash or a failed send strands at most
+    the one row it was sending, and every row it hadn't reached is still
+    pending for the next pass.
 
     The send is a stand-in (`_fake_notify`): Notify stays a hint in the
     proof-of-concept (plan section 0).
     """
-    taken = conn.execute(
-        """
-        SELECT id FROM notification_outbox
-         WHERE status = 'pending'
-         ORDER BY id
-           FOR UPDATE SKIP LOCKED
-         LIMIT %s
-        """,
-        (limit,),
-    ).fetchall()
-    ids = [row["id"] for row in taken]
-    if not ids:
-        return 0
-    conn.execute("UPDATE notification_outbox SET status = 'sending' WHERE id = ANY(%s)", (ids,))
-    conn.commit()
     sent = 0
-    for outbox_id in ids:
+    for _ in range(limit):
+        taken = conn.execute(
+            """
+            SELECT id FROM notification_outbox
+             WHERE status = 'pending'
+             ORDER BY id
+               FOR UPDATE SKIP LOCKED
+             LIMIT 1
+            """
+        ).fetchone()
+        if taken is None:
+            break
+        outbox_id: int = taken["id"]
+        conn.execute(
+            "UPDATE notification_outbox SET status = 'sending' WHERE id = %s", (outbox_id,)
+        )
+        conn.commit()
+        notify_id = send(outbox_id)
         sent += conn.execute(
             """
             UPDATE notification_outbox SET status = 'sent', notify_id = %s, sent_at = now()
              WHERE id = %s AND status = 'sending'
             """,
-            (send(outbox_id), outbox_id),
+            (notify_id, outbox_id),
         ).rowcount
         conn.commit()
     return sent
