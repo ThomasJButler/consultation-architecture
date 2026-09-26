@@ -280,8 +280,11 @@ def _latest_signed_off(conn: psycopg.Connection[DictRow], question_id: UUID) -> 
     ).fetchone()
     if version is None:
         return _ThemeSet(None, None, ())
+    # The shortlist and its fallbacks only: sign_off copies the longlist
+    # in too, for lineage, but mapping never offers the model a longlist
+    # key (mapping._shortlist), so a column for one could never be marked.
     keys = conn.execute(
-        "SELECT key FROM theme WHERE theme_set_version_id = %s ORDER BY key",
+        "SELECT key FROM theme WHERE theme_set_version_id = %s AND NOT is_longlist ORDER BY key",
         (version["id"],),
     ).fetchall()
     return _ThemeSet(version["id"], version["version_no"], tuple(row["key"] for row in keys))
