@@ -115,6 +115,28 @@ def retry(
     return retried, _fail_each(conn, spent)
 
 
+def rerun_fan_ins(conn: psycopg.Connection[DictRow]) -> int:
+    """Statement 4: both fan-ins again for every consultation either could
+    move; returns how many moved.
+
+    `transitions.advance_consultation` takes the row lock, runs both
+    guarded UPDATEs and writes the outbox row for whichever fired, so a
+    consultation already past both is a lock and nothing else (docs/02,
+    section 6). Each consultation commits on its own, so no pass holds
+    one consultation's lock while it waits on the next.
+    """
+    candidates = conn.execute(
+        "SELECT id FROM consultation WHERE status IN ('processing', 'awaiting_review') ORDER BY id"
+    ).fetchall()
+    advanced = 0
+    for candidate in candidates:
+        advance = transitions.advance_consultation(conn, candidate["id"])
+        conn.commit()
+        if advance.themes_ready or advance.analysis_ready:
+            advanced += 1
+    return advanced
+
+
 def _fail_each(conn: psycopg.Connection[DictRow], jobs: Sequence[DictRow]) -> int:
     """`fail_job` on each scanned job, each in a transaction of its own and
     committed; returns how many it failed.
