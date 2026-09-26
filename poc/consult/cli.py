@@ -284,6 +284,9 @@ def _run_job(args: argparse.Namespace, settings: Settings) -> int:
     started = time.monotonic()
     llm = OfflineModel()
     with store.connect(settings) as conn:
+        # Bounded as the worker's connection is: a run paused mid-batch
+        # loses its job to a takeover (store.bound_idle_transactions).
+        store.bound_idle_transactions(conn)
         # Dispatched, then claimed and run as the pipeline role, whose
         # grants are the control on the worker's path (docs/06, section
         # 2.4): SET ROLE outlives the commits between batches, and RESET

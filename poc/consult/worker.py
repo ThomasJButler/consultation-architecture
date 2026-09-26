@@ -48,7 +48,7 @@ from consult.errors import ErrorCode
 from consult.jobs import STALE_AFTER, Lease, LeaseLostError
 from consult.llm import LLM, Completion, GatewayError, Prompt
 from consult.replies import ReplyError
-from consult.store import PIPELINE_ROLE, as_role
+from consult.store import PIPELINE_ROLE, as_role, bound_idle_transactions
 
 logger = logging.getLogger(__name__)
 
@@ -272,8 +272,14 @@ def run_once(
     ahead of every attempt, and each batch commits in `after_batch`, so
     no call and no backoff sleep has a transaction open (module
     docstring). The connection comes back with none open either.
+
+    The connection's idle transactions are bounded under the lease first
+    (`store.bound_idle_transactions`), so a worker paused inside one loses
+    its job to a takeover (docs/02, step 5), and the bound commits with
+    the claim.
     """
     started = time.monotonic()
+    bound_idle_transactions(conn)
     with as_role(conn, PIPELINE_ROLE):
         claimed = _claim(conn, worker, stale_after)
         conn.commit()

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import timedelta
 from importlib import resources
 from uuid import UUID
 
@@ -46,6 +47,14 @@ PIPELINE_ROLE = "consult_pipeline"
 # section 2.4 as corrected; section 4, the export role's own view of the
 # identity columns).
 EXPORT_ROLE = "consult_export"
+
+# Half the ten-minute lease (jobs.STALE_AFTER; docs/02, step 5). A worker
+# paused inside a transaction holds its job row, and the pick and the
+# re-send both skip a held row, so the lease can be taken over, as ADR-002
+# means it to be, only once the server ends that transaction. No worker or
+# reconciler transaction spans a model call or a sleep (worker.py's module
+# docstring), so a gap between two of their statements is milliseconds.
+IDLE_IN_TRANSACTION_TIMEOUT = timedelta(minutes=5)
 
 
 def qualified(name: str) -> sql.Composable:
@@ -97,6 +106,21 @@ def reset(conn: psycopg.Connection[DictRow]) -> None:
         conn.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
     conn.commit()
     init(conn)
+
+
+def bound_idle_transactions(
+    conn: psycopg.Connection[DictRow], timeout: timedelta = IDLE_IN_TRANSACTION_TIMEOUT
+) -> None:
+    """Have the server end this session once a transaction sits idle in it
+    for `timeout`, which rolls the transaction back and lets its row locks
+    go (idle_in_transaction_session_timeout, PostgreSQL 17 manual,
+    19.11.1). In force at once, and for the rest of the session once the
+    caller commits. set_config and not SET, because SET takes no
+    parameter."""
+    conn.execute(
+        "SELECT set_config('idle_in_transaction_session_timeout', %s, false)",
+        (str(round(timeout.total_seconds() * 1000)),),
+    )
 
 
 @contextmanager

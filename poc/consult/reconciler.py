@@ -47,7 +47,7 @@ from psycopg.rows import DictRow
 from consult import dispatch, logs, transitions
 from consult.config import Settings
 from consult.jobs import STALE_AFTER
-from consult.store import PIPELINE_ROLE, as_role
+from consult.store import PIPELINE_ROLE, as_role, bound_idle_transactions
 from consult.worker import MAX_ATTEMPTS
 
 logger = logging.getLogger(__name__)
@@ -97,7 +97,11 @@ def reconcile(conn: psycopg.Connection[DictRow], settings: Settings) -> Reconcil
     All of it as the pipeline role, whose grants are the control on the
     pipeline's path (docs/06, section 2.4), as `worker.run_once` runs, so
     the command needn't set one. One log line carries the six counts.
+    Its idle transactions are bounded as a worker's are
+    (`store.bound_idle_transactions`): a pass paused in `_fail_each` would
+    otherwise hold a consultation's lock against every finisher of it.
     """
+    bound_idle_transactions(conn)
     with as_role(conn, PIPELINE_ROLE):
         dispatched = dispatch.dispatch(conn, settings)
         conn.commit()
