@@ -5,10 +5,21 @@ docs/04 section 6 and docs/05 section 9 describe it.
 A 20,000-respondent consultation from the seeded generator (`--scale`),
 staged, configured and ingested the way the 240-row fixture is, both
 open questions signed off by hand with factory tags (the benchmark
-measures the plan, not mapping), ANALYZE, then `EXPLAIN (ANALYZE,
-FORMAT JSON)` on the three-predicate filter's first page. The JSON plan
-tree is walked for the two nodes the design names: a Bitmap Index Scan
-on `respondent_attrs_gin` and an Index Scan on `answer_question_id_id`.
+measures the plan, not mapping), then `EXPLAIN (ANALYZE, FORMAT JSON)`
+on the three-predicate filter's first page. The JSON plan tree is walked
+for a Bitmap Index Scan on `respondent_attrs_gin` and, per respondent it
+finds, an Index Scan on answer's unique key, which leads with
+`(respondent_id, question_id)` (docs/04 section 3).
+
+The plan is read in the state autovacuum leaves after a load commits:
+the rows committed, then VACUUM (ANALYZE) on every table the filter
+reads. Two Postgres facts make that the honest state. GIN's fast-update
+pending list holds new entries until a vacuum or an autoanalyze flushes
+it, and every search reads the whole list (PostgreSQL manual, "GIN Fast
+Update Technique"), so the planner charges a GIN scan for it; the plain
+ANALYZE ingest runs leaves it in place. And a table never analysed,
+such as `theme` after an ANALYZE naming only three tables, is planned
+from a guessed size, not its rows.
 
 The selectivity and each node's actual rows are measured here, so the
 test prints them (CLAUDE.md rule 11). Nothing printed is answer text.
@@ -45,6 +56,14 @@ FILTER = ("attr:d_area=Villages", "theme:PARKING", "other:o_safety.theme=LIGHTIN
 FIRST_PAGE = sql.SQL(
     "SELECT id, value_text, duplicate_of_answer_id FROM scope ORDER BY id LIMIT 20 OFFSET 0"
 )
+# Every table the scope CTE and the page read, so none is planned blind.
+READ_TABLES = sql.SQL(", ").join(
+    sql.Identifier(name)
+    for name in ("respondent", "answer", "answer_theme", "theme", "theme_set_version", "question")
+)
+# Postgres's own name for answer's UNIQUE NULLS NOT DISTINCT (respondent_id,
+# question_id, option_id) in schema.sql, which no CREATE INDEX names.
+ANSWER_KEY = "answer_respondent_id_question_id_option_id_key"
 
 
 def _o_reason_key(text: str) -> str:
@@ -90,7 +109,13 @@ def test_the_filter_plan_uses_both_indexes_at_twenty_thousand(
     for question_id, key_for in ((reason, _o_reason_key), (safety, _o_safety_key)):
         version_id = make_theme_set_version(db, question_id, status="signed_off")
         tag_answers_by_rule(db, version_id, question_id, key_for)
-    db.execute("ANALYZE respondent, answer, answer_theme")
+
+    # Committed, because VACUUM can't run inside a transaction block; the
+    # next test's db fixture truncates every table on entry.
+    db.commit()
+    db.autocommit = True
+    db.execute(sql.SQL("VACUUM (ANALYZE) {}").format(READ_TABLES))
+    db.autocommit = False
 
     shares = db.execute(
         """
@@ -114,11 +139,14 @@ def test_the_filter_plan_uses_both_indexes_at_twenty_thousand(
         if node["Node Type"] == "Bitmap Index Scan"
         and node.get("Index Name") == "respondent_attrs_gin"
     ]
-    per_question = [
+    # The scope's own answer rows (alias a in consult/query.py), reached
+    # by the unique key once per respondent the GIN scan found.
+    per_respondent = [
         node
         for node in nodes
         if node["Node Type"] in ("Index Scan", "Index Only Scan")
-        and node.get("Index Name") == "answer_question_id_id"
+        and node.get("Index Name") == ANSWER_KEY
+        and node.get("Alias") == "a"
     ]
     scanned = sorted(
         {
@@ -134,9 +162,10 @@ def test_the_filter_plan_uses_both_indexes_at_twenty_thousand(
             f"\nplan benchmark: respondents={shares['everyone']} villages={shares['villages']}"
             f" selectivity={selectivity:.4f} load_seconds={load_seconds:.1f}"
             f" gin_actual_rows={[node['Actual Rows'] for node in gin]}"
-            f" per_question_actual_rows={[node['Actual Rows'] for node in per_question]}"
+            f" answer_key_actual_rows={[node['Actual Rows'] for node in per_respondent]}"
+            f" answer_key_loops={[node['Actual Loops'] for node in per_respondent]}"
             f"\nplan benchmark: scans={scanned}"
         )
 
     assert gin, scanned
-    assert per_question, scanned
+    assert per_respondent, scanned
