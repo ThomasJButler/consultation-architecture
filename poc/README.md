@@ -6,10 +6,10 @@ mechanics on a real Postgres, with a fake model so it runs offline. The
 design is `docs/02-architecture.md`; the schema is typed from
 `docs/04-data-model.md`. PR-03 laid the scaffold, PR-04 the parsing and
 validation in front of it, PR-05 proves three of the four mechanics with
-named tests, and PR-06 takes a file into the schema end to end, so the
-minimum proof-of-concept runs from a spreadsheet to a processing
-consultation with no model yet; the section "What it does not prove" says
-what is left, and `TESTING.md` which pull request proves it. This is not the product, and `../README.md` says
+named tests, PR-06 takes a file into the schema end to end, and PR-07
+runs the `find_themes` job stage by stage with the model a fake, through
+to a signed-off theme set; the section "What it does not prove" says what
+is left, and `TESTING.md` which pull request proves it. This is not the product, and `../README.md` says
 what it deliberately leaves out.
 
 ## Run it
@@ -24,17 +24,31 @@ make validate                   # consult validate on the fixtures
 make ingest                     # consult ingest on the fixtures: a consultation in processing
 ```
 
+From there the review side runs by id. `consult ingest` prints the
+consultation id; the two `find_themes` jobs it inserted are in the `job`
+table. Then:
+
+```bash
+consult run-job <job id> --worker w1 --model fake   # once per open question
+consult themes <question id>                         # keys, labels, counts, example answer ids
+consult sign-off <question id> --reviewer <uuid> --expect-version 0
+```
+
+The model is `consult/fake_model.py`: it answers every prompt well, so
+what these commands prove is the mechanics around the call and nothing
+about theme quality.
+
 `make reset` (`consult init --reset`) drops everything the schema creates
 and applies it again. There is no migration tool: a proof-of-concept
 changes its schema by rewriting `consult/schema.sql` and resetting.
 
-## What is here (PR-03 to PR-06)
+## What is here (PR-03 to PR-07)
 
 | Path | What it is |
 |---|---|
 | `consult/schema.sql` | Fourteen of the design's sixteen tables (`docs/04`, section 8 says which two stay out), the `vault` and `staging` schemas, the four roles and their grants |
 | `consult/store.py` | Connections with dict rows, `init`, `reset`, `record_failure` |
-| `consult/cli.py` | `consult init [--reset]`; `consult validate RESPONSES --definition WORKBOOK [--json]`; `consult ingest RESPONSES --definition WORKBOOK --name NAME --department NAME` |
+| `consult/cli.py` | `consult init [--reset]`; `consult validate RESPONSES --definition WORKBOOK [--json]`; `consult ingest RESPONSES --definition WORKBOOK --name NAME --department NAME`; `consult run-job JOB --worker NAME --model fake`; `consult themes QUESTION`; `consult sign-off QUESTION --reviewer UUID --expect-version N` |
 | `consult/definition.py` | The definition workbook, read into typed questions (`docs/00`) |
 | `consult/responses.py` | The responses file, CSV or XLSX, one row at a time |
 | `consult/tokenise.py` | Multi-select cells matched by longest match against the option vocabulary, never split on commas |
@@ -43,6 +57,11 @@ changes its schema by rewriting `consult/schema.sql` and resetting.
 | `consult/stage.py` | The file into one logged table per upload in the `staging` schema, by COPY, as the ingest role (`docs/02`, step 2; `docs/04`, section 2) |
 | `consult/configure.py` | Questions, options, `column_roles` and `value_policy` from the definition, the report and the reviewer's resolutions (`docs/02`, step 3) |
 | `consult/ingest.py` | The long answer table, `respondent.attrs`, the vault rows, both duplicate flags, the `find_themes` jobs and the processing edge, in one transaction that a redelivery repeats harmlessly (`docs/02`, step 3a; ADR-004) |
+| `consult/prompts.py` | The prompt contract: the stable prefix, the data line, the answers as JSON-encoded data, the masks (`docs/06`, section 2.2) |
+| `consult/replies.py` | Model output held to the schema, the enum and the two-way id check in code, a code and a reason on failure and never the text (CLAUDE.md, rule 9) |
+| `consult/themes.py` | The `find_themes` job stage by stage with a checkpoint per batch: batches, generation, condensation, preview, then v1 and fan-in 1 (`docs/02`, steps 6 and 7; ADR-002) |
+| `consult/review.py` | The reviewer's edits under the version guard, nothing deleted (`docs/02`, step 8; ADR-003) |
+| `consult/fake_model.py` | The offline model: answers every prompt well and keeps what it was shown |
 | `consult/cost.py` | The token and cost estimate from `docs/05`, with its assumptions printed |
 | `consult/report.py` | The report rendered for a terminal or as JSON |
 | `consult/jobs.py` | The claim with its fence, the heartbeat, the checkpoint, the failure record and the success mark, every write fenced (`docs/02`, step 5; ADR-002) |
@@ -92,14 +111,17 @@ proforma repeated word for word, and one answer starting with `=`.
   without the queue.
 - The web app or the dashboard. The proof-of-concept stops at a command
   line.
-- Model quality. The model is a fake. What is proved is what happens to a
-  reply that is wrong in each of the ways the threat model names.
+- Model quality. The model is a fake that answers every prompt well and
+  condenses by key stem. What is proved is what reaches the model, what
+  happens to a reply that is wrong in each of the ways the threat model
+  names, and the mechanics around the call.
 - The indexed filter query, the fourth mechanic; that's PR-09 with its
   `EXPLAIN` at 20,000 rows. The other three are proved in `TESTING.md`'s
   named tests.
-- That the mechanics compose into a running pipeline. Ingest takes a file
-  to a processing consultation with its `find_themes` jobs pending; the
-  worker loop and the reconciler that pick them up are PR-08.
+- That the mechanics compose into a running pipeline without a hand on
+  each job. `consult run-job` runs one `find_themes` job to the end and
+  queues it itself; dispatch under the caps, the worker loop, mapping and
+  the reconciler are PR-08.
 
 ## Pre-commit
 
