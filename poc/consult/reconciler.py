@@ -125,16 +125,23 @@ def recover(
 
     The re-send is one UPDATE, committed before any job is failed, so no
     job row lock is held when `fail_job` takes the consultation's (module
-    docstring).
+    docstring). It takes its rows FOR UPDATE SKIP LOCKED: a job row some
+    other transaction holds is a worker mid-batch whose heartbeat hasn't
+    committed yet, so the lease is live and the row is left for a later
+    pass, as `worker.pick` leaves it. Waiting on it would hold up every
+    statement after this one for as long as that worker stays paused.
     """
     params = {"stale_after": stale_after, "max_attempts": max_attempts}
     resent = conn.execute(
         """
         UPDATE job SET sent_at = now()
-         WHERE status IN ('queued', 'running') AND attempts < %(max_attempts)s
-           AND CASE status WHEN 'queued' THEN sent_at ELSE heartbeat_at END
-               < now() - %(stale_after)s
-           AND sent_at < now() - %(stale_after)s
+         WHERE id IN (
+               SELECT id FROM job
+                WHERE status IN ('queued', 'running') AND attempts < %(max_attempts)s
+                  AND CASE status WHEN 'queued' THEN sent_at ELSE heartbeat_at END
+                      < now() - %(stale_after)s
+                  AND sent_at < now() - %(stale_after)s
+                  FOR UPDATE SKIP LOCKED)
         """,
         params,
     ).rowcount
