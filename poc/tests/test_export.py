@@ -142,7 +142,16 @@ def test_the_workbook_has_text_cells_every_sheet_and_the_manifest(
 
     # The summary sheet's counts are query.theme_table's own counts under
     # the default filter, so the workbook and the dashboard can't disagree.
-    expected = theme_table(db, signed["o_reason"].question_id, Filter())
+    question_department = db.execute(
+        "SELECT department_id FROM question WHERE id = %s", (signed["o_reason"].question_id,)
+    ).fetchone()
+    assert question_department is not None
+    expected = theme_table(
+        db,
+        signed["o_reason"].question_id,
+        Filter(),
+        department_id=question_department["department_id"],
+    )
     summary = workbook["o_reason summary"]
     summary_rows = {row[0].value: row for row in summary.iter_rows(min_row=2)}
     assert set(summary_rows) == {c.key for c in expected.rows}

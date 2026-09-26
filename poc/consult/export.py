@@ -283,6 +283,21 @@ def _duplicate_counts(conn: psycopg.Connection[DictRow], consultation_id: UUID) 
     return int(row["answers"]), int(row["respondents"])
 
 
+def _department_id(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> UUID:
+    """The consultation's own department. `query.theme_table` takes
+    `department_id` as a required keyword now that `scope` scopes every
+    query to the caller's department (query.py, "Scope every query to the
+    caller's department"); the export reads the consultation's own row
+    for it, since the export role has no separate caller identity to
+    scope by yet (open work, plans/PR-09-poc-query-export-cli.md)."""
+    row = conn.execute(
+        "SELECT department_id FROM consultation WHERE id = %s", (consultation_id,)
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"consultation {consultation_id} does not exist")
+    return UUID(str(row["department_id"]))
+
+
 def _consultation_summary(
     conn: psycopg.Connection[DictRow], consultation_id: UUID
 ) -> tuple[str, UUID, date | None]:
@@ -445,8 +460,9 @@ def write_workbook(
             question.id: sum(len(keys) for keys in tags[question.id].values())
             for question in open_questions
         }
+        department_id = _department_id(conn, consultation_id)
         summaries = {
-            question.id: query.theme_table(conn, question.id, Filter())
+            question.id: query.theme_table(conn, question.id, Filter(), department_id=department_id)
             for question in open_questions
         }
         manifest_questions = tuple(
