@@ -8,10 +8,11 @@ change, because the key is the enum the model returns (docs/02, step 9)
 and a preview or a mapping already running is labelling against it.
 Nothing here deletes a row: a removed or merged theme moves to the
 longlist with its lineage, and a split leaves the original there too. A
-version that isn't a candidate takes no edits. Every edit checks its
-keys before it takes the guard, so a refused edit leaves the counter
-where it was and the reviewer's next attempt still carries the right
-number. Nothing here commits.
+version that isn't a candidate takes no edits, and nor does one whose
+question hasn't reached themes_ready. Every edit checks its keys before
+it takes the guard, so a refused edit leaves the counter where it was
+and the reviewer's next attempt still carries the right number. Nothing
+here commits.
 """
 
 from __future__ import annotations
@@ -37,7 +38,8 @@ class ReviewError(Exception):
 
 class EditConflictError(ReviewError):
     """The version isn't a candidate at the edit_version the reviewer was
-    looking at: someone else edited, or signed it off (docs/02, screen 3)."""
+    looking at: someone else edited, or signed it off (docs/02, screen 3),
+    or its question isn't at themes_ready yet."""
 
 
 @dataclass(frozen=True)
@@ -47,17 +49,24 @@ class Edited:
 
 
 def _guard(conn: psycopg.Connection[DictRow], version_id: UUID, expected_version: int) -> Edited:
+    # v1 is a candidate from the find_themes job's first batch
+    # (themes.ensure_version), and the job writes it until the question
+    # reaches themes_ready, the state the reviewer's screen is for (docs/02,
+    # step 8 and section 6). An edit before then would race the job.
     row = conn.execute(
         """
-        UPDATE theme_set_version SET edit_version = edit_version + 1
-         WHERE id = %s AND status = 'candidate' AND edit_version = %s
-        RETURNING edit_version
+        UPDATE theme_set_version v SET edit_version = v.edit_version + 1
+          FROM question q
+         WHERE v.id = %s AND v.status = 'candidate' AND v.edit_version = %s
+           AND q.id = v.question_id AND q.status = 'themes_ready'
+        RETURNING v.edit_version
         """,
         (version_id, expected_version),
     ).fetchone()
     if row is None:
         raise EditConflictError(
             f"version {version_id} is not a candidate at edit {expected_version}"
+            " with its question at themes_ready"
         )
     return Edited(version_id, int(row["edit_version"]))
 
