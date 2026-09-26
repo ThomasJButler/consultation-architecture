@@ -11,7 +11,8 @@ a request id, never the provider's text.
 The second drives `worker.run_once` on the fixtures (docs/02, step 5): the
 oldest runnable job first, each kind through its own runner, a stale lease
 taken over, a spent retry budget left alone, and workers racing on their
-own connections never sharing a job.
+own connections never sharing a job. Another takes over the job of a
+worker paused inside its batch transaction, once the server ends it.
 
 The last races a takeover with nothing left to send against the
 reconciler's pass over the same spent job, and pins that the two neither
@@ -24,6 +25,7 @@ import io
 import logging
 import random
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from typing import Any
@@ -35,12 +37,12 @@ from psycopg.errors import DeadlockDetected
 from psycopg.pq import TransactionStatus
 from psycopg.rows import DictRow
 
-from consult import mapping, store, transitions
+from consult import mapping, reconciler, store, transitions
 from consult import worker as worker_module
 from consult.config import Settings
 from consult.dispatch import dispatch
 from consult.errors import ErrorCode
-from consult.jobs import Lease, claim
+from consult.jobs import Lease, claim, heartbeat
 from consult.llm import LLM, Completion, GatewayError, Prompt
 from consult.logs import Formatter
 from consult.mapping import assign, load_map_job, plan, run_map_themes
@@ -553,6 +555,79 @@ def test_the_worker_records_a_refused_reply_a_lost_lease_and_a_crash_as_codes(
     for job_id in (first, second, signed.job_id):
         assert f"job_id={job_id}" in output
     assert CRASH_MESSAGE not in " ".join(str(v) for row in rows.values() for v in row.values())
+
+
+# Half the ten-minute lease (docs/02, step 5), as Postgres shows it: a
+# paused worker's transaction ends well before its lease can be taken over.
+IDLE_BOUND = "5min"
+# How long the server may take to end the paused transaction once its one
+# second is up before the test calls it stuck: test_fan_in_race.py's bound.
+ENDS_WITHIN_SECONDS = 30
+
+
+def _row_free(db: psycopg.Connection[DictRow], job_id: UUID) -> bool:
+    """Whether no other transaction holds the job's row lock, asked in a
+    transaction of its own and let go."""
+    row = db.execute(
+        "SELECT id FROM job WHERE id = %s FOR UPDATE SKIP LOCKED", (job_id,)
+    ).fetchone()
+    db.rollback()
+    return row is not None
+
+
+def test_a_paused_workers_job_is_taken_over(
+    db: psycopg.Connection[DictRow], db_settings: Settings
+) -> None:
+    # docs/02 step 5 takes a lease over after ten minutes of silence, and
+    # ADR-002 chose that over an advisory-lock lease so a paused process
+    # loses its job. A worker paused inside a batch transaction holds the
+    # job row with an uncommitted heartbeat, and the pick and the re-send
+    # both skip a held row, so nothing takes the job until the server ends
+    # that transaction. The paused worker's connection here is bounded at
+    # one second, the product's own bound shortened so the test needn't
+    # wait five minutes. The paused job is the older of the fixture's two,
+    # so the pick that follows takes it and not the other.
+    consultation_id = dispatched_fixture(db, db_settings)
+    older, _newer = _by_id(db, consultation_id, "find_themes")
+    db.execute(
+        "UPDATE job SET created_at = created_at - %s WHERE id = %s",
+        (timedelta(minutes=1), older["id"]),
+    )
+    paused = claim(db, older["id"], "w-paused")
+    assert paused is not None
+    db.execute("UPDATE job SET heartbeat_at = now() - %s WHERE id = %s", (STALE, paused.job_id))
+    db.commit()
+
+    holder = store.connect(db_settings)
+    try:
+        store.bound_idle_transactions(holder, timedelta(seconds=1))
+        holder.commit()
+        # The worker's next batch starts with its heartbeat, and the
+        # process pauses before the commit.
+        heartbeat(holder, paused)
+        deadline = time.monotonic() + ENDS_WITHIN_SECONDS
+        while not _row_free(db, paused.job_id) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        freed = _row_free(db, paused.job_id)
+
+        outcome = run_once(db, RecordingLLM(), worker="w-next")
+
+        # The paused worker, waking, finds its transaction gone: its
+        # heartbeat never commits, and the fence refuses what it tries next.
+        with pytest.raises(psycopg.OperationalError):
+            holder.commit()
+    finally:
+        holder.close()
+
+    assert freed
+    assert outcome == Outcome(paused.job_id, "find_themes", "succeeded", 2)
+    # The worker bounds its own connection, and so does the reconciler.
+    shown = db.execute("SHOW idle_in_transaction_session_timeout").fetchone()
+    assert shown == {"idle_in_transaction_session_timeout": IDLE_BOUND}
+    with store.connect(db_settings) as other:
+        reconciler.reconcile(other, db_settings)
+        shown = other.execute("SHOW idle_in_transaction_session_timeout").fetchone()
+    assert shown == {"idle_in_transaction_session_timeout": IDLE_BOUND}
 
 
 def test_a_takeover_with_nothing_left_does_not_deadlock_the_reconciler(
