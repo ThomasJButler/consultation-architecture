@@ -144,7 +144,7 @@ def test_the_themes_command_prints_keys_labels_counts_and_ids(
 
     out = capsys.readouterr().out
     assert code == 0
-    assert f"question {question_id}: version 1 (candidate, edit 0)" in out
+    assert f"question {question_id}: version 1 (candidate, edit 0; sign off with " in out
     # The shortlist: key, label, count and the example answer ids the
     # reviewer would open (docs/02, step 8's screen), then the longlist with
     # what each folded into.
