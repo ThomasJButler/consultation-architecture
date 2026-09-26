@@ -10,6 +10,7 @@ twice upserting rather than duplicating (docs/04, section 3).
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import psycopg
@@ -17,7 +18,7 @@ import pytest
 from psycopg.rows import DictRow
 
 from consult.configure import Resolutions, configure, defaults
-from consult.definition import read_definition
+from consult.definition import DemographicQuestion, OpenQuestion, read_definition
 from consult.responses import Responses
 from consult.validate import validate
 from tests.rows import make_consultation, make_department
@@ -123,3 +124,40 @@ def test_configure_writes_questions_options_roles_and_policies(
     assert again == configured
     assert len(questions_of(db, consultation_id)) == 9
     assert options_of(db, by_ref["c_modes"]["id"]) == options_of(db, again.questions["c_modes"])
+
+
+def test_a_re_save_that_moves_a_column_between_kinds_sets_its_status(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    # docs/04 section 1: status "stays null unless kind is open", and the
+    # upsert exists for "the importer running after a hand edit" (section
+    # 3). So a column moved onto the open sheet arrives configured, one
+    # moved off it goes back to null, and an open question that has already
+    # progressed keeps its state.
+    consultation_id = make_consultation(db, make_department(db), status="staged")
+    definition = read_definition(FIXTURES / "definition.xlsx")
+    report = validate(definition, Responses(FIXTURES / "responses.csv"))
+    configure(db, consultation_id, definition, report, defaults(report))
+    db.execute(
+        "UPDATE question SET status = 'themes_ready' WHERE consultation_id = %s AND column_ref = 'o_reason'",
+        (consultation_id,),
+    )
+
+    moved = replace(
+        definition,
+        demographic=(
+            *(q for q in definition.demographic if q.column_ref != "d_age"),
+            DemographicQuestion("o_safety", "What would make it safer?"),
+        ),
+        open=(
+            *(q for q in definition.open if q.column_ref != "o_safety"),
+            OpenQuestion("d_age", "How old are you?", None),
+        ),
+    )
+    report = validate(moved, Responses(FIXTURES / "responses.csv"))
+    configure(db, consultation_id, moved, report, defaults(report))
+
+    by_ref = {r["column_ref"]: r for r in questions_of(db, consultation_id)}
+    assert (by_ref["d_age"]["kind"], by_ref["d_age"]["status"]) == ("open", "configured")
+    assert (by_ref["o_safety"]["kind"], by_ref["o_safety"]["status"]) == ("demographic", None)
+    assert by_ref["o_reason"]["status"] == "themes_ready"
