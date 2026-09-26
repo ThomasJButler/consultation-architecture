@@ -379,9 +379,13 @@ def test_a_summary_sheet_title_is_always_valid(
     export.write_workbook(db, signed["o_reason"].consultation_id, path)
 
     workbook = load_workbook(path)
+    # o_safety is configured but never signed off here, and still gets
+    # its own summary sheet (query.theme_table over an empty version):
+    # only o_reason's title is dirty.
     summary_titles = [name for name in workbook.sheetnames if name not in ("Responses", "Manifest")]
-    assert len(summary_titles) == 1
-    title = summary_titles[0]
+    assert len(summary_titles) == 2
+    assert "o_safety summary" in summary_titles
+    title = next(name for name in summary_titles if name != "o_safety summary")
     assert len(title) <= 31
     assert "?" not in title
     assert "/" not in title
