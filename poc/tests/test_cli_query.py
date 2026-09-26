@@ -192,3 +192,32 @@ def test_the_query_command_reads_as_the_pipeline_role(
     # the vault even if the code above it gets that wrong, not as the
     # export role, whose vault grant this path never needs.
     assert seen == [PIPELINE_ROLE]
+
+
+def test_the_query_command_holds_to_the_named_department(
+    db: psycopg.Connection[DictRow],
+    db_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # docs/06 section 2: the department is the caller's. Named with
+    # --department, it holds the query to that department, so another
+    # department's question reaches no respondent; left out, the command
+    # takes the question's own. Ingested only: the denominator needs no
+    # theme, and it's test_query_db.py's hand count of 74 o_reason rows.
+    ingested(db, db_settings)
+    reason_row = db.execute(
+        "SELECT id, department_id FROM question WHERE column_ref = 'o_reason'"
+    ).fetchone()
+    assert reason_row is not None
+    reason_id = reason_row["id"]
+    capsys.readouterr()
+
+    def first_line(*extra: str) -> str:
+        assert main(["query", str(reason_id), *extra], settings=db_settings) == 0
+        return capsys.readouterr().out.splitlines()[0]
+
+    elsewhere = first_line("--department", str(uuid4()))
+    assert elsewhere == f"question {reason_id}: of 0 respondents who answered"
+    named = first_line("--department", str(reason_row["department_id"]))
+    assert named == f"question {reason_id}: of 74 respondents who answered"
+    assert first_line() == named
