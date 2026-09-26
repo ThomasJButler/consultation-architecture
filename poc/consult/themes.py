@@ -11,13 +11,18 @@ start at the batch after the last checkpoint.
 from __future__ import annotations
 
 import random
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
 import psycopg
 from psycopg.rows import DictRow
 
-from consult.prompts import PromptAnswer
+from consult import jobs
+from consult.jobs import Lease, LeaseLostError
+from consult.llm import LLM
+from consult.prompts import PromptAnswer, find_themes_prompt
+from consult.replies import ProposedTheme, parse_themes
 
 # About fifty distinct answers a batch (docs/02, step 6), under a token cap
 # that keeps a batch of long answers within what docs/05 budgets for a call:
@@ -100,3 +105,126 @@ def batches(
         if chunk:
             plan.append(Batch(related, tuple(chunk)))
     return plan
+
+
+@dataclass(frozen=True)
+class FindThemesJob:
+    """The find_themes job row and the question it is for."""
+
+    job_id: UUID
+    question_id: UUID
+    consultation_id: UUID
+    question_text: str
+    model_alias: str
+    seed: int
+
+
+def load_job(conn: psycopg.Connection[DictRow], job_id: UUID) -> FindThemesJob:
+    """The job as the runner needs it. The alias and the seed are set on the
+    row before the stages run, so a takeover reads the same two."""
+    row = conn.execute(
+        """
+        SELECT j.id, j.question_id, j.consultation_id, j.model_alias, j.params, q.question_text
+          FROM job j JOIN question q ON q.id = j.question_id
+         WHERE j.id = %s AND j.kind = 'find_themes'
+        """,
+        (job_id,),
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"job {job_id} is not a find_themes job")
+    seed = row["params"].get("seed")
+    if row["model_alias"] is None or not isinstance(seed, int):
+        raise LookupError(f"job {job_id} has no model alias or seed yet")
+    return FindThemesJob(
+        job_id=row["id"],
+        question_id=row["question_id"],
+        consultation_id=row["consultation_id"],
+        question_text=row["question_text"],
+        model_alias=row["model_alias"],
+        seed=seed,
+    )
+
+
+def ensure_version(conn: psycopg.Connection[DictRow], lease: Lease, question_id: UUID) -> UUID:
+    """v1, the candidate, created on the job's first batch so every later
+    batch has somewhere to put its themes and a takeover finds them. The
+    unique index on (question_id, version_no) makes the second call find
+    the first's row (docs/04, section 3). Fenced like every worker write."""
+    jobs.heartbeat(conn, lease)
+    conn.execute(
+        """
+        INSERT INTO theme_set_version (department_id, question_id, version_no, status)
+        SELECT department_id, id, 1, 'candidate' FROM question WHERE id = %s
+        ON CONFLICT (question_id, version_no) DO NOTHING
+        """,
+        (question_id,),
+    )
+    row = conn.execute(
+        "SELECT id FROM theme_set_version WHERE question_id = %s AND version_no = 1", (question_id,)
+    ).fetchone()
+    if row is None:
+        raise LeaseLostError(lease)
+    version_id: UUID = row["id"]
+    return version_id
+
+
+def _insert_candidates(
+    conn: psycopg.Connection[DictRow], version_id: UUID, themes: Sequence[ProposedTheme]
+) -> None:
+    # Candidates are the longlist until condensation picks the shortlist.
+    # Each key once per version (docs/04, section 3), so a replayed batch
+    # writes nothing here either.
+    conn.cursor().executemany(
+        """
+        INSERT INTO theme (department_id, theme_set_version_id, key, label, description, is_longlist)
+        SELECT department_id, id, %s, %s, %s, true FROM theme_set_version WHERE id = %s
+        ON CONFLICT (theme_set_version_id, key) DO NOTHING
+        """,
+        [(theme.key, theme.label, theme.description, version_id) for theme in themes],
+    )
+
+
+def generate(
+    conn: psycopg.Connection[DictRow],
+    llm: LLM,
+    lease: Lease,
+    job: FindThemesJob,
+    version_id: UUID,
+    plan: Sequence[Batch],
+    *,
+    after_batch: Callable[[int], None] | None = None,
+) -> int:
+    """Step 6's generation: one call per batch, the candidates into v1, a
+    checkpoint per batch. Starts at the batch after the last checkpoint, so
+    a worker taking over runs only what the last one never finished
+    (ADR-002). `after_batch` is where the caller commits. Returns the
+    number of batches this call ran."""
+    start = jobs.next_batch_no(conn, lease.job_id)
+    ran = 0
+    for batch_no, batch in enumerate(plan, start=1):
+        if batch_no < start:
+            continue
+        prompt = find_themes_prompt(
+            model_alias=job.model_alias,
+            question_text=job.question_text,
+            related_answer=batch.related_answer,
+            answers=batch.answers,
+        )
+        completion = llm.complete(prompt)
+        themes = parse_themes(completion)
+        jobs.heartbeat(conn, lease)
+        _insert_candidates(conn, version_id, themes)
+        jobs.checkpoint(
+            conn,
+            lease,
+            batch_no=batch_no,
+            stage="generate",
+            answer_ids=[answer.id for answer in batch.answers],
+            trace_id=completion.trace_id,
+            tokens_in=completion.tokens_in,
+            tokens_out=completion.tokens_out,
+        )
+        ran += 1
+        if after_batch is not None:
+            after_batch(batch_no)
+    return ran

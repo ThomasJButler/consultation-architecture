@@ -102,12 +102,15 @@ def mask(text: str) -> str:
     return _POSTCODE.sub("[postcode]", text)
 
 
+NOT_ANSWERED = "(not answered)"
+
+
 def question_as_seen(question_text: str, related_answer: str | None) -> str:
     """The question with its placeholder filled from the respondent's own
-    related closed answer (docs/00), or as written when there is none."""
-    if related_answer is None:
-        return question_text
-    return question_text.replace(PLACEHOLDER, related_answer)
+    related closed answer (docs/00). A respondent who left that closed
+    question blank still saw a question, so the hole is marked rather than
+    left, and a question with no placeholder is returned as written."""
+    return question_text.replace(PLACEHOLDER, related_answer or NOT_ANSWERED)
 
 
 def _prefix(question: str, themes: Sequence[tuple[str, str, str | None]], schema: object) -> str:
