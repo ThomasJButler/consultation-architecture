@@ -142,7 +142,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help=(
             "attr:<column>=<value>, theme:<key> (OR'd, repeatable), "
-            "other:<question>.theme=<key>, or with=duplicates (docs/02, step 11); repeatable"
+            "other:<column_ref>.theme=<key>, e.g. other:o_safety.theme=ACCESS, "
+            "or with=duplicates (docs/02, step 11); repeatable"
         ),
     )
     run_query.add_argument(
@@ -688,16 +689,20 @@ def _query(args: argparse.Namespace, settings: Settings) -> int:
     except FilterError as exc:
         print(f"refused: {exc}")
         return 2
-    try:
-        with store.connect(settings) as conn, as_role(conn, PIPELINE_ROLE):
+    with store.connect(settings) as conn, as_role(conn, PIPELINE_ROLE):
+        try:
             department_id = args.department or _question_department(conn, args.question)
+            query.check_filter_names(conn, args.question, parsed, department_id=department_id)
             table = query.theme_table(conn, args.question, parsed, department_id=department_id)
             distribution = query.related_distribution(
                 conn, args.question, parsed, department_id=department_id
             )
-    except LookupError:
-        print(f"question {args.question}: not found")
-        return 1
+        except LookupError:
+            print(f"question {args.question}: not found")
+            return 1
+        except FilterError as exc:
+            print(f"refused: {exc}")
+            return 2
     logs.log_event(
         logger,
         "queried",

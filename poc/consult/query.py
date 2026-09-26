@@ -46,6 +46,8 @@ class FilterCode(StrEnum):
     EMPTY_VALUE = "empty_value"
     MALFORMED_OTHER = "malformed_other"
     UNREADABLE_VALUE = "unreadable_value"
+    UNKNOWN_COLUMN = "unknown_column"
+    UNKNOWN_QUESTION = "unknown_question"
 
 
 class FilterError(ValueError):
@@ -243,6 +245,45 @@ def _by_column(attrs: Iterable[AttrFilter]) -> list[list[AttrFilter]]:
     for attr in attrs:
         groups.setdefault(attr.column, []).append(attr)
     return list(groups.values())
+
+
+def check_filter_names(
+    conn: psycopg.Connection[DictRow], question_id: UUID, filter: Filter, *, department_id: UUID
+) -> None:
+    """Refuse an `attr:` column or `other:` question this consultation
+    doesn't have, before `scope` ever runs: unmatched, either one narrows
+    the CTE's WHERE clause to nothing and the caller reads "of 0
+    respondents who answered" at exit 0, which says "no data" where the
+    truth is "no such name". Scoped the two ways `scope` itself is
+    (docs/06 section 2): the caller's department, and the question's own
+    consultation, read here with one subselect so a name from a
+    different consultation of the same department is refused the same
+    as one from nowhere."""
+    if not filter.attrs and not filter.others:
+        return
+    row = conn.execute(
+        """
+        SELECT
+          coalesce(array_agg(DISTINCT column_ref)
+                   FILTER (WHERE kind IN ('demographic', 'closed')), '{}') AS columns,
+          coalesce(array_agg(DISTINCT column_ref)
+                   FILTER (WHERE kind = 'open'), '{}') AS questions
+          FROM question
+         WHERE department_id = %(department)s
+           AND consultation_id = (SELECT consultation_id FROM question WHERE id = %(question)s)
+        """,
+        {"department": department_id, "question": question_id},
+    ).fetchone()
+    if row is None:
+        # No GROUP BY: the aggregate always returns one row, even over
+        # zero matching questions.
+        raise LookupError("the filter-name check returned no row")
+    known_columns = set(row["columns"])
+    known_questions = set(row["questions"])
+    if any(attr.column not in known_columns for attr in filter.attrs):
+        raise FilterError(FilterCode.UNKNOWN_COLUMN)
+    if any(other.question not in known_questions for other in filter.others):
+        raise FilterError(FilterCode.UNKNOWN_QUESTION)
 
 
 def scope(question_id: UUID, filter: Filter, *, department_id: UUID) -> Scope:
