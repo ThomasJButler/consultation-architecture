@@ -52,8 +52,12 @@ def test_the_query_and_export_commands(
         )
     for _ in range(2):
         assert main(["worker", "--once", "--worker", "w1"], settings=db_settings) == 0
-    reason_id = db.execute("SELECT id FROM question WHERE column_ref = 'o_reason'").fetchone()["id"]
-    consultation_id = db.execute("SELECT id FROM consultation").fetchone()["id"]
+    reason_row = db.execute("SELECT id FROM question WHERE column_ref = 'o_reason'").fetchone()
+    consultation_row = db.execute("SELECT id FROM consultation").fetchone()
+    assert reason_row is not None
+    assert consultation_row is not None
+    reason_id = reason_row["id"]
+    consultation_id = consultation_row["id"]
     capsys.readouterr()
 
     # Hand count from responses.csv, the same as test_query_db.py's own
