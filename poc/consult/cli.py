@@ -555,14 +555,34 @@ def _worker_name(name: str | None) -> str:
     return name or f"{socket.gethostname()}-{os.getpid()}"
 
 
-def _print_outcome(outcome: Outcome | None) -> None:
+def _print_outcome(conn: psycopg.Connection[DictRow], outcome: Outcome | None) -> int:
+    """Prints the outcome and returns the exit code: 0 for nothing to run
+    or a success, 1 when the run's own attempt failed. The question and
+    consultation are read back rather than assumed, the same as
+    `_run_job`'s summary, so a script reading this line sees the states
+    the job actually left rather than having to reach for psql."""
     if outcome is None:
         print("nothing to run")
-        return
+        return 0
     line = f"job {outcome.job_id}: {outcome.kind} {outcome.status}, attempt {outcome.attempts}"
     if outcome.error_code is not None:
         line += f", {outcome.error_code.value}"
+    state = conn.execute(
+        """
+        SELECT j.question_id, q.status AS question, c.status AS consultation
+          FROM job j JOIN question q ON q.id = j.question_id
+          JOIN consultation c ON c.id = j.consultation_id
+         WHERE j.id = %s
+        """,
+        (outcome.job_id,),
+    ).fetchone()
+    if state is not None:
+        line += (
+            f"; question {state['question_id']} {state['question']}; "
+            f"consultation {state['consultation']}"
+        )
     print(line)
+    return 1 if outcome.error_code is not None else 0
 
 
 def _log_outcome(outcome: Outcome | None) -> None:
@@ -630,13 +650,13 @@ def _worker(args: argparse.Namespace, settings: Settings) -> int:
     with store.connect(settings) as conn:
         if args.once:
             outcome = worker.run_once(conn, llm, worker=name)
-            _print_outcome(outcome)
+            code = _print_outcome(conn, outcome)
             _log_outcome(outcome)
-            return 0
+            return code
         stop = _stop_flag()
         while not stop.is_set():
             outcome = worker.run_once(conn, llm, worker=name)
-            _print_outcome(outcome)
+            _print_outcome(conn, outcome)
             _log_outcome(outcome)
             if outcome is None:
                 stop.wait(args.poll_seconds)
