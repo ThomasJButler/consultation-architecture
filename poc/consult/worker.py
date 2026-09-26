@@ -25,7 +25,7 @@ reports it carries the same two fields and nothing else
 takes it, and the job runs by kind through `themes.run_find_themes` or
 `mapping.run_map_themes`, as the pipeline role, committing after every
 batch. A failure goes on the row as a code under the fence, in
-`cli._run_job`'s three patterns, and every job leaves one log line of
+`cli._run_job`'s four patterns, and every job leaves one log line of
 ids, counts, a status, a duration and a code.
 """
 
@@ -165,7 +165,7 @@ def record_gateway_failure(
 
     A stale fence surfaces as `LeaseLostError`, left to propagate with its
     own code: `run_once` turns it into a code the way `cli._run_job`'s
-    three patterns do.
+    four patterns do.
     """
     conn.rollback()
     try:

@@ -61,6 +61,7 @@ from consult.config import Settings
 from consult.configure import ConfigureError, configure, defaults
 from consult.definition import Definition, DefinitionError, read_definition
 from consult.dispatch import dispatch
+from consult.errors import ErrorCode
 from consult.fake_model import OfflineModel
 from consult.ingest import IngestError, ingest
 from consult.inputs import InputError
@@ -348,6 +349,24 @@ def _run_job(args: argparse.Namespace, settings: Settings) -> int:
             except LeaseLostError as exc:
                 conn.rollback()
                 print(f"job {args.job}: {exc.code.value}")
+                return 1
+            except Exception as exc:
+                # worker._run's fourth branch: anything else is worker_error
+                # under the fence, so the claim doesn't sit running with no
+                # code until the lease goes stale. The class is printed and
+                # the message nowhere, since it could carry an answer
+                # (CLAUDE.md, rule 8).
+                conn.rollback()
+                try:
+                    jobs.record_failure(conn, lease, ErrorCode.WORKER_ERROR)
+                except LeaseLostError as lost:
+                    conn.rollback()
+                    print(f"job {args.job}: {lost.code.value}")
+                    return 1
+                conn.commit()
+                print(
+                    f"job {args.job}: failed ({ErrorCode.WORKER_ERROR.value}: {type(exc).__name__})"
+                )
                 return 1
             conn.commit()
         summary = conn.execute(
