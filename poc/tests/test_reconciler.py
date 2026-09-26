@@ -9,6 +9,8 @@ never the code's.
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from uuid import UUID
 
@@ -16,13 +18,15 @@ import psycopg
 import pytest
 from psycopg.rows import DictRow
 
-from consult import reconciler
+from consult import reconciler, store
+from consult.config import Settings
 from consult.errors import ErrorCode
 from consult.jobs import claim, record_failure
 from tests.rows import (
     make_consultation,
     make_department,
     make_open_question,
+    make_outbox_row,
     make_pending_job,
     make_queued_job,
 )
@@ -39,6 +43,11 @@ RETRY_BUDGET = 5
 # Either side of now for next_attempt_at.
 DUE = timedelta(minutes=-1)
 NOT_YET_DUE = timedelta(minutes=1)
+# ADR-006's relay takes twenty rows at a time. Thirty owed is more than
+# one relay takes, so with two racing, both have to send.
+RELAY_LIMIT = 20
+OWED = 30
+RELAYS = 2
 
 
 def _jobs(db: psycopg.Connection[DictRow], consultation_id: UUID) -> dict[UUID, DictRow]:
@@ -325,3 +334,51 @@ def test_the_reconciler_reruns_the_fan_ins(db: psycopg.Connection[DictRow]) -> N
     assert reconciler.rerun_fan_ins(db) == 0
     assert _consultations(db) == after
     assert _all_outbox(db) == outbox
+
+
+def test_the_relay_marks_outbox_rows_sent_once(
+    db: psycopg.Connection[DictRow], db_settings: Settings
+) -> None:
+    # Statement 5 (docs/02, section 5) with two relays racing on two
+    # connections, the pattern in test_fan_in_race.py. SKIP LOCKED is the
+    # manual's own suggestion for many consumers of a queue-like table
+    # (ADR-006), so neither relay waits on the other and no row goes twice.
+    consultation_id = make_consultation(db, make_department(db), status="processing")
+    owed = [make_outbox_row(db, consultation_id) for _ in range(OWED)]
+    # Committed, so the relays' connections can see the rows.
+    db.commit()
+
+    # With a timeout, a thread that fails before the barrier breaks it for
+    # the other and the test fails loudly instead of the pool joining for ever.
+    barrier = threading.Barrier(RELAYS, timeout=30)
+
+    def relay() -> int:
+        with store.connect(db_settings) as conn:
+            barrier.wait()
+            return reconciler.relay(conn)
+
+    with ThreadPoolExecutor(max_workers=RELAYS) as pool:
+        futures = [pool.submit(relay) for _ in range(RELAYS)]
+    # Every failure, not just the first future's, so the root cause shows
+    # rather than the BrokenBarrierError the other raises after it.
+    failures = [f.exception() for f in futures if f.exception() is not None]
+    assert failures == []
+    sent = [f.result() for f in futures]
+
+    # Every row sent once: the two counts make thirty, and neither relay
+    # took more than its twenty.
+    assert sum(sent) == OWED
+    assert max(sent) <= RELAY_LIMIT
+    # Each row sent, with the fake Notify's reference and a time. The
+    # reference is the outbox id, as ADR-006 has Notify's reference set.
+    rows = db.execute(
+        "SELECT id, status, notify_id, sent_at IS NOT NULL AS stamped FROM notification_outbox"
+        " ORDER BY id"
+    ).fetchall()
+    assert rows == [
+        {"id": row_id, "status": "sent", "notify_id": f"fake-notify-{row_id}", "stamped": True}
+        for row_id in owed
+    ]
+
+    # Nothing is owed now, so a third relay sends nothing.
+    assert reconciler.relay(db) == 0

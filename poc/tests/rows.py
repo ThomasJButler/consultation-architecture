@@ -212,3 +212,24 @@ def make_answer(
         """,
         (respondent_id, question_id, text, consultation_id),
     )
+
+
+def make_outbox_row(
+    conn: psycopg.Connection[DictRow],
+    consultation_id: UUID,
+    *,
+    kind: str = "attention_needed",
+    subject_id: UUID | None = None,
+) -> int:
+    """An email owed, as a transition writes it: pending, naming its subject
+    (ADR-006; docs/02, correction 3). A fresh subject when none is given,
+    so two rows of one kind don't meet on the key."""
+    return _returning_int(
+        conn,
+        """
+        INSERT INTO notification_outbox (department_id, consultation_id, kind, subject_id)
+        SELECT department_id, id, %s, %s FROM consultation WHERE id = %s
+        RETURNING id
+        """,
+        (kind, subject_id or uuid4(), consultation_id),
+    )
