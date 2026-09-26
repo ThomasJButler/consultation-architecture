@@ -10,8 +10,7 @@ mark mean the same thing in the file they get back.
 The Responses sheet carries an identity column docs/04 keeps in its own
 schema. docs/06 section 4 names why the export command alone may read it:
 putting an identity column back into the department's own spreadsheet is
-the one thing that schema's read grant is for, so `write_workbook` reads
-under `store.EXPORT_ROLE` rather than the login user's own privileges.
+the one thing that schema's read grant is for.
 """
 
 from __future__ import annotations
@@ -30,7 +29,7 @@ from psycopg.rows import DictRow
 
 from consult import query
 from consult.query import Filter
-from consult.store import EXPORT_ROLE, as_role, identity_columns
+from consult.store import identity_columns
 
 # docs/06, section 2.7: a value starting with one of these opens as a live
 # formula in Excel or LibreOffice the moment the file is opened
@@ -133,9 +132,7 @@ class _Respondent:
 def _respondents(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> list[_Respondent]:
     """The workbook's rows: every respondent, canonical and duplicate
     alike, since the file the department gets back is this consultation's
-    whole answer set (test_export.py's test_export_reads_as_the_export_role
-    wraps this call, the first read `write_workbook` makes, to prove the
-    role is the one doing the reading)."""
+    whole answer set. The first read `write_workbook` makes."""
     rows = conn.execute(
         "SELECT id, external_id, attrs FROM respondent WHERE consultation_id = %s ORDER BY id",
         (consultation_id,),
@@ -421,39 +418,33 @@ class Exported:
 def write_workbook(
     conn: psycopg.Connection[DictRow], consultation_id: UUID, path: Path
 ) -> Exported:
-    """docs/02 step 12's XLSX, its reads run as `store.EXPORT_ROLE`
-    (docs/06, section 4): the Responses sheet, one summary sheet per open
-    question and a manifest, saved to `path`.
+    """docs/02 step 12's XLSX: the Responses sheet, one summary sheet per
+    open question and a manifest, saved to `path`.
     """
-    with as_role(conn, EXPORT_ROLE):
-        questions = _questions(conn, consultation_id)
-        respondent_id_header = _respondent_id_header(conn, consultation_id)
-        respondents = _respondents(conn, consultation_id)
-        identity = _identity(conn, consultation_id)
-        open_questions = [question for question in questions if question.kind == "open"]
+    questions = _questions(conn, consultation_id)
+    respondent_id_header = _respondent_id_header(conn, consultation_id)
+    respondents = _respondents(conn, consultation_id)
+    identity = _identity(conn, consultation_id)
+    open_questions = [question for question in questions if question.kind == "open"]
 
-        answers = {question.id: _open_answers(conn, question.id) for question in open_questions}
-        theme_sets = {
-            question.id: _latest_signed_off(conn, question.id) for question in open_questions
-        }
-        tags = {
-            question.id: _tags(conn, theme_sets[question.id].version_id)
-            for question in open_questions
-        }
-        tag_counts = {
-            question.id: sum(len(keys) for keys in tags[question.id].values())
-            for question in open_questions
-        }
-        summaries = {
-            question.id: query.theme_table(conn, question.id, Filter())
-            for question in open_questions
-        }
-        manifest_questions = tuple(
-            _manifest_question(conn, question, theme_sets[question.id], tag_counts[question.id])
-            for question in open_questions
-        )
-        name, run_id, retention_until = _consultation_summary(conn, consultation_id)
-        duplicate_answers, duplicate_respondents = _duplicate_counts(conn, consultation_id)
+    answers = {question.id: _open_answers(conn, question.id) for question in open_questions}
+    theme_sets = {question.id: _latest_signed_off(conn, question.id) for question in open_questions}
+    tags = {
+        question.id: _tags(conn, theme_sets[question.id].version_id) for question in open_questions
+    }
+    tag_counts = {
+        question.id: sum(len(keys) for keys in tags[question.id].values())
+        for question in open_questions
+    }
+    summaries = {
+        question.id: query.theme_table(conn, question.id, Filter()) for question in open_questions
+    }
+    manifest_questions = tuple(
+        _manifest_question(conn, question, theme_sets[question.id], tag_counts[question.id])
+        for question in open_questions
+    )
+    name, run_id, retention_until = _consultation_summary(conn, consultation_id)
+    duplicate_answers, duplicate_respondents = _duplicate_counts(conn, consultation_id)
 
     manifest = _Manifest(
         consultation_id=consultation_id,
