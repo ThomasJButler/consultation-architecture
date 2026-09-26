@@ -132,7 +132,13 @@ def _upsert_question(
         ON CONFLICT (consultation_id, column_ref) DO UPDATE
            SET question_text = EXCLUDED.question_text, kind = EXCLUDED.kind,
                response_type = EXCLUDED.response_type, ordinal = EXCLUDED.ordinal,
-               value_policy = EXCLUDED.value_policy
+               value_policy = EXCLUDED.value_policy,
+               -- status stays null unless kind is open (docs/04, section 1):
+               -- a column moved onto the open sheet starts at configured, one
+               -- moved off it goes back to null, and an open question that
+               -- has already progressed keeps where it got to.
+               status = CASE WHEN EXCLUDED.kind = 'open'
+                             THEN coalesce(question.status, EXCLUDED.status) END
         RETURNING id
         """,
         {
