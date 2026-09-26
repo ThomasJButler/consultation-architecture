@@ -180,6 +180,40 @@ def test_a_gateway_error_backs_off_then_records_a_code(db: psycopg.Connection[Di
     assert "provider_request_id=req_abc123" in output
 
 
+def test_backoff_does_not_retry_a_rejected_request(db: psycopg.Connection[DictRow]) -> None:
+    # GATEWAY_REJECTED is a 4xx, the request's own fault (errors.py), and
+    # docs/02 section 9 and ADR-005 back off only on a 429 or a 5xx. One
+    # call, no sleep, then the code and request id land on the row exactly
+    # as a retried failure would.
+    signed = signed_off_fixture(db)
+    lease = claim(db, signed.job_id, "worker-1")
+    assert lease is not None
+
+    fault = GatewayError(ErrorCode.GATEWAY_REJECTED, request_id="req_rejected")
+    fake = FakeLLM([fault])
+    sleeper = _RecordingSleeper(db)
+    backing_off = BackingOff(fake, sleep=sleeper, before_call=db.commit)
+
+    with pytest.raises(GatewayError) as excinfo:
+        run_map_themes(db, backing_off, lease)
+    db.rollback()
+    record_gateway_failure(db, lease, excinfo.value)
+
+    assert len(fake.prompts) == 1
+    assert not fake.script
+    assert sleeper.waits == []
+
+    row = db.execute(
+        "SELECT status, error_code, provider_request_id FROM job WHERE id = %s",
+        (signed.job_id,),
+    ).fetchone()
+    assert row == {
+        "status": "failed_retryable",
+        "error_code": "gateway_rejected",
+        "provider_request_id": "req_rejected",
+    }
+
+
 # ADR-002: "the retry budget is job.attempts < 5".
 RETRY_BUDGET = 5
 # docs/02, step 5: ten minutes of silence and a lease can be taken over.
