@@ -21,19 +21,23 @@ spells, with the resolution to merge them.
 
 The report carries column names, counts, row numbers and the distinct
 values of demographic and closed columns. It never carries an open answer.
+What the staging table can't hold at all (a header named row_no, a NUL, more
+columns than a Postgres table takes) isn't reported but refused, as an
+InputError with a code and a count, the way the reader refuses a hostile file.
 """
 
 from __future__ import annotations
 
 import re
 from collections import Counter, defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
 from consult.cost import DEFAULT_RATES, Estimate, Rates, estimate
 from consult.definition import ClosedQuestion, Definition, ResponseType, spelt_by
-from consult.responses import Responses
+from consult.inputs import InputError, Refusal
+from consult.responses import Responses, Row
 from consult.tokenise import tokenise
 
 NO_ANSWER = "-"
@@ -82,6 +86,13 @@ ROLE_RESOLUTIONS = (Resolution.ROLE_RESPONDENT_ID, Resolution.ROLE_IDENTITY, Res
 # checked 26 September 2026), so a longer header would silently lose its
 # column between COPY and ingest. It blocks here, before spend.
 MAX_HEADER_BYTES = 63
+# The staging table's own column (consult.stage), so no header may take it.
+ROW_NO = "row_no"
+# A Postgres table takes 1,600 columns and the staging table spends one on
+# row_no (TooManyColumns at 1,601 on the local Postgres 16, 26 September
+# 2026). Caps.max_columns defaults to the same, but it's a setting.
+MAX_COLUMNS = 1_599
+NUL = "\x00"
 DUPLICATE_ID_RESOLUTIONS = (Resolution.IGNORE_COLUMN, Resolution.KEEP_FIRST_BLANK_REST)
 
 # Header words that say what an unmatched column is (docs/02, section 3.2:
@@ -155,6 +166,29 @@ class _Tally:
             self.unknown_rows[value].append(row_no)
 
 
+def check_stageable_header(header: Sequence[str]) -> None:
+    """Refuse a header the staging table can't hold, by a code and a count
+    and never the name: more columns than the table takes, stage's own
+    row_no, or a NUL, where libpq ends an identifier, so "notes<NUL>x" and
+    "notes<NUL>y" would both name "notes". The count is the width, the
+    column's position, or row 1. stage() runs the same check as its
+    backstop."""
+    if len(header) > MAX_COLUMNS:
+        raise InputError(Refusal.TOO_MANY_COLUMNS, len(header))
+    for position, name in enumerate(header, start=1):
+        if name == ROW_NO:
+            raise InputError(Refusal.RESERVED_HEADER, position)
+        if NUL in name:
+            raise InputError(Refusal.NUL_CHARACTER, 1)
+
+
+def check_stageable_row(row: Row) -> None:
+    """Refuse a NUL in a cell by the row's number: Postgres text can't store
+    one, and psycopg refuses the row with a DataError at COPY."""
+    if any(NUL in cell for cell in row.cells.values()):
+        raise InputError(Refusal.NUL_CHARACTER, row.no)
+
+
 def _sorted_values(counter: Counter[str]) -> tuple[tuple[str, int], ...]:
     return tuple(sorted(counter.items(), key=lambda pair: (-pair[1], pair[0])))
 
@@ -216,6 +250,7 @@ def _never_apart(tally: _Tally, options: tuple[str, ...]) -> Iterable[Warning]:
 
 
 def validate(definition: Definition, responses: Responses, rates: Rates = DEFAULT_RATES) -> Report:
+    check_stageable_header(responses.header)
     # Cells are keyed by header (consult.responses), so a repeated name
     # would lose a column without a trace and a blank one has no key at
     # all. Both block, and every column is described once, in file order.
@@ -263,6 +298,7 @@ def validate(definition: Definition, responses: Responses, rates: Rates = DEFAUL
     row_count = 0
     open_answers = 0
     for row in responses.rows():
+        check_stageable_row(row)
         row_count += 1
         for ref, cell in row.cells.items():
             if ref not in tallies:

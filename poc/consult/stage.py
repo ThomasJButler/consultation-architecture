@@ -27,15 +27,21 @@ from consult import transitions
 from consult.inputs import DEFAULT_CAPS, Caps
 from consult.responses import Responses
 from consult.store import as_role
-from consult.validate import MAX_HEADER_BYTES
+from consult.validate import MAX_HEADER_BYTES, check_stageable_header, check_stageable_row
 
 INGEST_ROLE = "consult_ingest"
 
 
 class StageError(Exception):
-    """The file's header can't be a table: a blank or repeated name, or one
-    Postgres would truncate. The validator reports these as errors first;
-    this is the backstop. The message carries counts, never a cell."""
+    """The file's header can't name a table's columns: a blank or repeated
+    name, or one Postgres would truncate. The validator reports these in
+    its report's errors, and this is the backstop for a caller that
+    skipped it. The message carries counts, never a cell.
+
+    What else a staging table can't hold, a header named row_no, a NUL in
+    a header or a cell, or more columns than a table takes, is an
+    InputError from validate.check_stageable_header and check_stageable_row,
+    which the validator and stage() both run."""
 
 
 @dataclass(frozen=True)
@@ -61,6 +67,7 @@ def stage(
 ) -> Staged:
     responses = Responses(path, caps)
     header = responses.header
+    check_stageable_header(header)
     if "" in header or len(set(header)) != len(header):
         raise StageError(f"{len(header)} headers, not all distinct and named")
     too_long = sum(len(name.encode()) > MAX_HEADER_BYTES for name in header)
@@ -80,6 +87,7 @@ def stage(
             sql.SQL("COPY {} (row_no, {}) FROM STDIN").format(table, sql.SQL(", ").join(columns))
         ) as copy:
             for row in responses.rows():
+                check_stageable_row(row)
                 copy.write_row([row.no, *(row.cells[name] for name in header)])
                 rows += 1
     transitions.mark_staged(conn, consultation_id, upload_sha256=_sha256(path), row_count=rows)
