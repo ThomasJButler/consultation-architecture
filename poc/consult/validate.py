@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from consult.cost import DEFAULT_RATES, Estimate, Rates, estimate
-from consult.definition import ClosedQuestion, Definition, ResponseType
+from consult.definition import ClosedQuestion, Definition, ResponseType, spelt_by
 from consult.responses import Responses
 from consult.tokenise import tokenise
 
@@ -168,7 +168,11 @@ def _count_closed(tally: _Tally, question: ClosedQuestion, cell: str, row_no: in
         for first, second in zip(tokenised.tokens, tokenised.tokens[1:], strict=False):
             tally.adjacent[first, second] += 1
         return
-    if cell in question.options:
+    # A single-select or likert cell is the chosen option written whole, so
+    # an option with a comma arrives as one value that a run of the split
+    # pieces spells. It's counted as that value and _never_apart offers the
+    # merge, rather than an unknown value defaulting to not answered.
+    if cell in question.options or spelt_by(cell, question.options) is not None:
         tally.values[cell] += 1
     else:
         tally.note_unknown(cell, row_no)
@@ -191,17 +195,24 @@ def _never_apart(tally: _Tally, options: tuple[str, ...]) -> Iterable[Warning]:
             runs[-1].append(option)
         else:
             runs.append([option])
-    for run in runs:
-        if len(run) > 1:
-            yield Warning(
-                WarningKind.OPTIONS_NEVER_APART,
-                "",
-                ", ".join(run),
-                tally.values[run[0]],
-                (),
-                (Resolution.MERGE_OPTIONS,),
-                Resolution.MERGE_OPTIONS,
-            )
+    labels = [(", ".join(run), tally.values[run[0]]) for run in runs if len(run) > 1]
+    # The whole labels a single-select or likert column counted
+    # (_count_closed); a multi-select column counts pieces, all options.
+    labels.extend(
+        (value, count)
+        for value, count in tally.values.items()
+        if value not in options and spelt_by(value, options) is not None
+    )
+    for label, count in labels:
+        yield Warning(
+            WarningKind.OPTIONS_NEVER_APART,
+            "",
+            label,
+            count,
+            (),
+            (Resolution.MERGE_OPTIONS,),
+            Resolution.MERGE_OPTIONS,
+        )
 
 
 def validate(definition: Definition, responses: Responses, rates: Rates = DEFAULT_RATES) -> Report:
