@@ -65,8 +65,11 @@ SETTINGS: tuple[Setting, ...] = (
     # once for one consultation, twenty queued at once across all of them.
     Setting("CONSULT_JOBS_PER_CONSULTATION", "4", "Cap: jobs queued at once for one consultation"),
     Setting("CONSULT_JOBS_IN_ALL", "20", "Cap: jobs queued at once service-wide"),
-    # The alias dispatch stamps on a job that has none (docs/02, step 4).
-    # The fake is the only model the proof-of-concept calls.
+    # The alias dispatch stamps on a job that has none (plans/PR-08, section
+    # 2). ADR-005 pins the alias to the consultation at Confirm; the
+    # proof-of-concept has no Confirm screen and no reopen on a new alias,
+    # so one service-wide setting stands in, and the fake is the only model
+    # it calls.
     Setting("CONSULT_MODEL_ALIAS", "fake", "The model alias dispatch stamps on a job"),
 )
 
