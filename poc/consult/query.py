@@ -29,7 +29,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
 
+import psycopg
 from psycopg import sql
+from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 
 _ATTR_PREFIX = "attr:"
@@ -253,3 +255,103 @@ def scope(question_id: UUID, filter: Filter) -> Scope:
         predicates.append(_other(number))
 
     return Scope(sql=_HEAD + _AND.join(predicates) + _TAIL, params=params)
+
+
+@dataclass(frozen=True)
+class ThemeCount:
+    key: str
+    label: str
+    is_fallback: bool
+    respondents: int
+
+
+@dataclass(frozen=True)
+class ThemeTable:
+    """docs/04 section 6's theme-count query: one row per theme tagged
+    inside `scope`, and `denominator`, "of respondents who answered this
+    question" (docs/02, screen 4) whether or not any theme was tagged."""
+
+    rows: list[ThemeCount]
+    denominator: int
+
+
+def _scope_count(conn: psycopg.Connection[DictRow], compiled: Scope) -> int:
+    query = compiled.sql + sql.SQL("SELECT count(*) AS n FROM scope")
+    row = conn.execute(query, compiled.params).fetchone()
+    if row is None:
+        # count(*) with no GROUP BY always returns one row; a database
+        # that answers otherwise has broken more than this query.
+        raise LookupError("scope's count(*) returned no row")
+    return int(row["n"])
+
+
+# docs/04 section 6's theme-count query. Ties broken on key, which the
+# design's sketch leaves to the reader: a table has to read the same way
+# twice.
+_THEME_COUNTS = sql.SQL(
+    """
+    SELECT t.key, t.label, t.is_fallback, count(*) AS respondents
+      FROM scope s
+      JOIN answer_theme at ON at.answer_id = s.id
+       AND at.theme_set_version_id = {version} AND at.retracted_at IS NULL
+      JOIN theme t ON t.id = at.theme_id
+     GROUP BY t.id, t.key, t.label, t.is_fallback
+     ORDER BY respondents DESC, t.key
+    """
+)
+
+
+def theme_table(conn: psycopg.Connection[DictRow], question_id: UUID, filter: Filter) -> ThemeTable:
+    """docs/04 section 6's theme-count query over `scope`, against the
+    question's latest signed-off version (a reopen leaves the earlier one
+    signed off beside it, `_latest_signed_off`'s reasoning here too)."""
+    compiled = scope(question_id, filter)
+    denominator = _scope_count(conn, compiled)
+    query = compiled.sql + _THEME_COUNTS.format(
+        version=_latest_signed_off(sql.Placeholder("question_id"))
+    )
+    rows = conn.execute(query, compiled.params).fetchall()
+    return ThemeTable(
+        rows=[
+            ThemeCount(row["key"], row["label"], row["is_fallback"], row["respondents"])
+            for row in rows
+        ],
+        denominator=denominator,
+    )
+
+
+# docs/04 section 6's related closed question distribution.
+_RELATED_DISTRIBUTION = sql.SQL(
+    """
+    SELECT o.label, count(*) AS respondents
+      FROM scope s
+      JOIN answer c ON c.respondent_id = s.respondent_id AND c.question_id = {related}
+      JOIN question_option o ON o.id = c.option_id
+     GROUP BY o.ordinal, o.label
+     ORDER BY o.ordinal
+    """
+)
+
+
+def related_distribution(
+    conn: psycopg.Connection[DictRow], question_id: UUID, filter: Filter
+) -> list[tuple[str, int]]:
+    """docs/04 section 6's related closed question distribution, among the
+    respondents `scope` narrows to. Empty when the question names no
+    `related_closed_question_id` (docs/04 section 1): o_safety, on screen
+    4's own example, has none."""
+    row = conn.execute(
+        "SELECT related_closed_question_id FROM question WHERE id = %s", (question_id,)
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"question {question_id} does not exist")
+    related_id = row["related_closed_question_id"]
+    if related_id is None:
+        return []
+    compiled = scope(question_id, filter)
+    query = compiled.sql + _RELATED_DISTRIBUTION.format(
+        related=sql.Placeholder("related_question_id")
+    )
+    params = {**compiled.params, "related_question_id": related_id}
+    rows = conn.execute(query, params).fetchall()
+    return [(row["label"], row["respondents"]) for row in rows]
