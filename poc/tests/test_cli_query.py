@@ -190,8 +190,10 @@ def test_the_query_command_reads_as_the_pipeline_role(
     # on the vault: the query path names no vault table (query.py's own
     # module docstring), so it should read as the role that can't reach
     # the vault even if the code above it gets that wrong, not as the
-    # export role, whose vault grant this path never needs.
-    assert seen == [PIPELINE_ROLE]
+    # export role, whose vault grant this path never needs. Twice: the
+    # default read, then the with=duplicates one the denominator line's
+    # hidden count needs.
+    assert seen == [PIPELINE_ROLE, PIPELINE_ROLE]
 
 
 def test_the_query_command_holds_to_the_named_department(
@@ -219,7 +221,10 @@ def test_the_query_command_holds_to_the_named_department(
     elsewhere = first_line("--department", str(uuid4()))
     assert elsewhere == f"question {reason_id}: of 0 respondents who answered"
     named = first_line("--department", str(reason_row["department_id"]))
-    assert named == f"question {reason_id}: of 74 respondents who answered"
+    assert named == (
+        f"question {reason_id}: of 74 respondents who answered "
+        "(147 duplicate answers hidden; add --filter with=duplicates to count them)"
+    )
     assert first_line() == named
 
 
