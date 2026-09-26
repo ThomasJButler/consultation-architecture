@@ -11,14 +11,17 @@ own test, test_export_prefix.py, outside this mark (test_repo_rules.py).
 from __future__ import annotations
 
 from pathlib import Path
+from uuid import UUID
 
 import psycopg
 import pytest
 from openpyxl import load_workbook
+from psycopg.errors import InsufficientPrivilege
 from psycopg.rows import DictRow
 
 from consult import export
 from consult.query import Filter, theme_table
+from consult.store import EXPORT_ROLE, as_role
 from tests.pipeline import signed_off_questions
 from tests.rows import tag_answers_by_rule
 
@@ -188,3 +191,52 @@ def test_the_workbook_has_text_cells_every_sheet_and_the_manifest(
     assert o_reason_tags is not None
     assert o_reason_row[5] == str(o_reason_tags["n"])
     assert o_reason_row[6] == "0"  # unprocessable_count: no mapping job ran
+
+
+def test_export_reads_as_the_export_role(
+    db: psycopg.Connection[DictRow], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    signed = signed_off_questions(db, ("o_reason",))
+    tag_answers_by_rule(
+        db, signed["o_reason"].version_id, signed["o_reason"].question_id, _o_reason_key
+    )
+
+    # A stand-in for write_workbook's first read, as
+    # test_cli_themes.py's test_run_job_works_as_the_pipeline_role stands
+    # in for the worker's own call, wrapped rather than replaced so the
+    # rest of the export still runs for real.
+    seen: list[str] = []
+    original = export._respondents
+
+    def recording(
+        conn: psycopg.Connection[DictRow], consultation_id: UUID
+    ) -> list[export._Respondent]:
+        row = conn.execute("SELECT current_user AS who").fetchone()
+        assert row is not None
+        seen.append(str(row["who"]))
+        return original(conn, consultation_id)
+
+    monkeypatch.setattr(export, "_respondents", recording)
+
+    path = tmp_path / "export.xlsx"
+    export.write_workbook(db, signed["o_reason"].consultation_id, path)
+
+    # The reads ran as the export role, not the login user the connection
+    # was made with (docs/06, section 2.4 as corrected).
+    assert seen == [EXPORT_ROLE]
+
+    # The role can read the vault: the identity column is in the workbook,
+    # one value per respondent.
+    workbook = load_workbook(path)
+    responses = workbook["Responses"]
+    header = [cell.value for cell in next(responses.iter_rows(max_row=1))]
+    assert "email" in header
+    email_col = header.index("email")
+    emails = [row[email_col].value for row in responses.iter_rows(min_row=2)]
+    assert sum(1 for value in emails if value and "@" in value) == 240
+
+    # And it holds no write grant it would need: an UPDATE under the role
+    # is refused before it can touch a row (docs/06, section 2.8). The
+    # savepoint keeps the connection usable for the RESET ROLE after.
+    with as_role(db, EXPORT_ROLE), pytest.raises(InsufficientPrivilege), db.transaction():
+        db.execute("UPDATE consultation SET name = name")
