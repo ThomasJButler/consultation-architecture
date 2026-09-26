@@ -94,7 +94,9 @@ MAPPING_SCHEMA: dict[str, object] = {
                 "type": "object",
                 "properties": {
                     "answer_id": {"type": "integer"},
-                    "theme_keys": {"type": "array", "items": {"type": "string"}},
+                    # One or more keys per answer, as THEMES_PREAMBLE says: an
+                    # empty list labels nothing and would pass the two-way check.
+                    "theme_keys": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                 },
                 "required": ["answer_id", "theme_keys"],
                 "additionalProperties": False,

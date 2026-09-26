@@ -3,16 +3,17 @@ reads it (CLAUDE.md, rule 9; THREAT_MODEL.md, row 3).
 
 The gateway asks for structured output; this module doesn't trust that it
 got it. A mapping reply has to be an object with an `assignments` list
-whose items carry exactly an integer `answer_id` and a list of string
-`theme_keys`, every key from the enum the prompt carried, and every answer
-id the prompt sent has to come back exactly once with none added (docs/02,
-step 9's two-way check). A generation reply has to be an object with a
-`themes` list of key, label and description, keys well-formed and unique.
-A reply that fails is a ReplyError carrying job.error's code and a reason
-from a fixed list, never a word of the reply, because there is no column
-for one (docs/02, section 3.4). The checks here mirror the schemas in
-consult/prompts.py by hand rather than through a validator library, so
-the rules the model is told are the rules the code enforces.
+whose items carry exactly an integer `answer_id` and a list of one or
+more string `theme_keys`, every key from the enum the prompt carried,
+and every answer id the prompt sent has to come back exactly once with
+none added (docs/02, step 9's two-way check). A generation reply has to
+be an object with a `themes` list of key, label and description, keys
+well-formed and unique. A reply that fails is a ReplyError carrying
+job.error's code and a reason from a fixed list, never a word of the
+reply, because there is no column for one (docs/02, section 3.4). The
+checks here mirror the schemas in consult/prompts.py by hand rather than
+through a validator library, so the rules the model is told are the
+rules the code enforces.
 """
 
 from __future__ import annotations
@@ -60,6 +61,7 @@ class Reason(StrEnum):
     TEXT_MALFORMED = "text_malformed"
     TEXT_TOO_LONG = "text_too_long"
     KEY_RESERVED = "key_reserved"
+    NO_LABEL = "no_label"
 
 
 class ReplyError(Exception):
@@ -162,6 +164,13 @@ def parse_assignments(completion: Completion, prompt: Prompt) -> tuple[Assignmen
         if not isinstance(theme_keys, list) or not all(isinstance(k, str) for k in theme_keys):
             raise ReplyError(Reason.WRONG_SHAPE, len(items))
         assignments.append(Assignment(answer_id, tuple(dict.fromkeys(theme_keys))))
+    # The schema's minItems: an answer with no key is labelled with nothing,
+    # and a batch of them would otherwise pass every check below, get a done
+    # checkpoint and no tag, and never reach the retry at size one (docs/02,
+    # step 9). The count is how many came back empty.
+    unlabelled = sum(1 for assignment in assignments if not assignment.theme_keys)
+    if unlabelled:
+        raise ReplyError(Reason.NO_LABEL, unlabelled)
     # The two-way check: every id sent comes back exactly once, and nothing
     # else does. Which way it failed is the reason.
     sent = Counter(prompt.answer_ids)
