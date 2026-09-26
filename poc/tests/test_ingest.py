@@ -476,3 +476,102 @@ def test_a_redelivery_after_the_consultation_moved_on_finishes_quietly(
             "UPDATE consultation SET status = %s WHERE id = %s", (status, staged.consultation_id)
         )
         assert ingest(db, staged.consultation_id) == NOTHING_WRITTEN
+
+
+def test_the_not_applicable_policy_can_make_na_not_answered(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    # docs/02 section 3.2: N/A is a real value on a demographic column
+    # unless the reviewer says otherwise at configure time. Every other
+    # test keeps it; this one turns it off for d_commute and reads the
+    # consequences off the policy, the answer rows and attrs.
+    rows = fixture_rows()
+    staged = staged_fixture(
+        db, resolve=lambda r: replace(r, not_applicable={**r.not_applicable, "d_commute": False})
+    )
+    ingest(db, staged.consultation_id)
+
+    question_id = staged.configured.questions["d_commute"]
+    policy = db.execute(
+        "SELECT value_policy FROM question WHERE id = %s", (question_id,)
+    ).fetchone()
+    assert policy == {"value_policy": {"not_applicable": "treat_as_not_answered"}}
+    not_applicable = sum(row["d_commute"] == "N/A" for row in rows)
+    not_answered = sum(row["d_commute"] in NOT_ANSWERED for row in rows)
+    assert not_applicable > 0
+    counts = db.execute(
+        """
+        SELECT count(*) FILTER (WHERE is_blank AND value_text IS NULL) AS blank,
+               count(*) FILTER (WHERE value_text = 'N/A') AS kept
+          FROM answer WHERE question_id = %s
+        """,
+        (question_id,),
+    ).fetchone()
+    assert counts == {"blank": not_applicable + not_answered, "kept": 0}
+    without = db.execute(
+        "SELECT count(*) AS n FROM respondent WHERE consultation_id = %s AND NOT attrs ? 'd_commute'",
+        (staged.consultation_id,),
+    ).fetchone()
+    assert without == {"n": not_applicable + not_answered}
+
+
+def test_a_mapped_or_added_unknown_value_lands_on_its_option(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    # docs/02 section 3.2: an unknown value is mapped to an option that
+    # exists, added as a new one, or not answered. The defaults take the
+    # last; these are the other two, read off the answer rows and attrs.
+    rows = fixture_rows()
+    unsure = sum(row["c_route"] == "Unsure" for row in rows)
+    assert unsure > 0
+    first_unsure = next(no for no, row in enumerate(rows, start=2) if row["c_route"] == "Unsure")
+
+    mapped = staged_fixture(
+        db,
+        resolve=lambda r: replace(
+            r, unknown_values={**r.unknown_values, ("c_route", "Unsure"): "Not sure"}
+        ),
+    )
+    ingest(db, mapped.consultation_id)
+    question_id = mapped.configured.questions["c_route"]
+    counts = db.execute(
+        """
+        SELECT count(*) FILTER (WHERE value_text = 'Not sure') AS not_sure,
+               count(*) FILTER (WHERE option_id IS NOT NULL) AS answered
+          FROM answer WHERE question_id = %s
+        """,
+        (question_id,),
+    ).fetchone()
+    assert counts == {
+        "not_sure": sum(row["c_route"] in {"Not sure", "Unsure"} for row in rows),
+        "answered": sum(
+            row["c_route"] in {"Support", "Oppose", "Not sure", "Unsure"} for row in rows
+        ),
+    }
+    attrs = db.execute(
+        "SELECT attrs -> 'c_route' AS route FROM respondent WHERE consultation_id = %s AND source_row_no = %s",
+        (mapped.consultation_id, first_unsure),
+    ).fetchone()
+    assert attrs == {"route": ["Not sure"]}
+
+    added = staged_fixture(
+        db,
+        resolve=lambda r: replace(
+            r, unknown_values={**r.unknown_values, ("c_route", "Unsure"): "Unsure"}
+        ),
+    )
+    ingest(db, added.consultation_id)
+    question_id = added.configured.questions["c_route"]
+    labels = [
+        r["label"]
+        for r in db.execute(
+            "SELECT label FROM question_option WHERE question_id = %s ORDER BY ordinal",
+            (question_id,),
+        ).fetchall()
+    ]
+    assert labels == ["Support", "Oppose", "Not sure", "Unsure"]
+    landed = db.execute(
+        "SELECT count(*) AS n FROM answer WHERE question_id = %s AND value_text = 'Unsure' AND option_id IS NOT NULL",
+        (question_id,),
+    ).fetchone()
+    assert landed == {"n": unsure}
