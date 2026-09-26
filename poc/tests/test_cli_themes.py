@@ -151,3 +151,80 @@ def test_the_themes_command_prints_keys_labels_counts_and_ids(
     assert main(["themes", str(other["question_id"])], settings=db_settings) == 1
     assert "no theme set" in capsys.readouterr().out
     assert main(["themes", "00000000-0000-0000-0000-000000000000"], settings=db_settings) == 1
+
+
+def test_the_sign_off_command_freezes_v2_and_refuses_a_second(
+    db: psycopg.Connection[DictRow], db_settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    jobs = ingested(db, db_settings)
+    for column_ref in ("o_reason", "o_safety"):
+        assert (
+            main(
+                ["run-job", str(jobs[column_ref]), "--worker", "w1", "--model", "fake"],
+                settings=db_settings,
+            )
+            == 0
+        )
+    questions = {
+        ref: db.execute("SELECT question_id FROM job WHERE id = %s", (job_id,)).fetchone()
+        for ref, job_id in jobs.items()
+    }
+    reason = str(questions["o_reason"]["question_id"]) if questions["o_reason"] else ""
+    safety = str(questions["o_safety"]["question_id"]) if questions["o_safety"] else ""
+    reviewer = "11111111-2222-3333-4444-555555555555"
+    capsys.readouterr()
+
+    code = main(
+        ["sign-off", reason, "--reviewer", reviewer, "--expect-version", "0"], settings=db_settings
+    )
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert f"question {reason} signed off" in out and "map_themes job" in out and "pending" in out
+    frozen = db.execute(
+        """
+        SELECT v.version_no, v.status, v.signed_off_by,
+               (SELECT string_agg(t.key, ',' ORDER BY t.key) FROM theme t
+                 WHERE t.theme_set_version_id = v.id AND NOT t.is_longlist) AS shortlist,
+               (SELECT status FROM question WHERE id = v.question_id) AS question,
+               (SELECT count(*) FROM job WHERE question_id = v.question_id AND kind = 'map_themes'
+                   AND status = 'pending') AS map_jobs
+          FROM theme_set_version v WHERE v.question_id = %s ORDER BY v.version_no
+        """,
+        (reason,),
+    ).fetchall()
+    assert [(f["version_no"], f["status"]) for f in frozen] == [
+        (1, "superseded"),
+        (2, "signed_off"),
+    ]
+    assert str(frozen[1]["signed_off_by"]) == reviewer
+    assert frozen[1]["shortlist"] == "ACCESS,NO_REASON,OTHER,PARKING,SAFETY"
+    assert (frozen[1]["question"], frozen[1]["map_jobs"]) == ("signed_off", 1)
+
+    # A second sign-off is refused with nothing changed (ADR-003: the guard is the mutex).
+    assert (
+        main(
+            ["sign-off", reason, "--reviewer", reviewer, "--expect-version", "0"],
+            settings=db_settings,
+        )
+        == 1
+    )
+    assert "refused" in capsys.readouterr().out
+    versions = db.execute(
+        "SELECT count(*) AS n FROM theme_set_version WHERE question_id = %s", (reason,)
+    ).fetchone()
+    assert versions == {"n": 2}
+    # A reviewer looking at the wrong edit gets a conflict, and the question stays put.
+    assert (
+        main(
+            ["sign-off", safety, "--reviewer", reviewer, "--expect-version", "3"],
+            settings=db_settings,
+        )
+        == 1
+    )
+    assert "conflict" in capsys.readouterr().out
+    state = db.execute(
+        "SELECT status, (SELECT count(*) FROM theme_set_version WHERE question_id = %(q)s) AS versions FROM question WHERE id = %(q)s",
+        {"q": safety},
+    ).fetchone()
+    assert state == {"status": "themes_ready", "versions": 1}
