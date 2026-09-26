@@ -10,6 +10,7 @@ test is `test_query.py`, which stays pure.
 from __future__ import annotations
 
 import re
+from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg
@@ -320,3 +321,41 @@ def test_the_scope_holds_to_the_callers_department(db: psycopg.Connection[DictRo
         db, signed.question_id, Filter(), department_id=_department_of(db, signed.question_id)
     )
     assert own.denominator == 74
+
+
+def test_the_theme_table_is_one_statement(
+    db: psycopg.Connection[DictRow], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A READ COMMITTED transaction takes a new snapshot for each statement
+    (Postgres documentation, 13.2.1), so a denominator counted in one
+    statement and the themes in the next can see different tags: a tag
+    committed between the two gives a count above its denominator. One
+    statement is one snapshot, and docs/04 section 6 puts the denominator
+    in the same statement as the counts."""
+    signed = signed_off_fixture(db)
+    department_id = _department_of(db, signed.question_id)
+    statements: list[object] = []
+    original = db.execute
+
+    def counting(*args: Any, **kwargs: Any) -> Any:
+        statements.append(args[0])
+        return original(*args, **kwargs)
+
+    # Nothing tagged yet: the denominator still comes back, with no rows.
+    with monkeypatch.context() as patch:
+        patch.setattr(db, "execute", counting)
+        untagged = theme_table(db, signed.question_id, Filter(), department_id=department_id)
+    assert len(statements) == 1
+    assert untagged.denominator == 74
+    assert untagged.rows == []
+
+    tag_answers_by_rule(db, signed.version_id, signed.question_id, _o_reason_key)
+    statements.clear()
+    with monkeypatch.context() as patch:
+        patch.setattr(db, "execute", counting)
+        tagged = theme_table(
+            db, signed.question_id, Filter(themes=("PARKING",)), department_id=department_id
+        )
+    assert len(statements) == 1
+    assert tagged.denominator == 17
+    assert [(c.key, c.respondents) for c in tagged.rows] == [("PARKING", 17)]
