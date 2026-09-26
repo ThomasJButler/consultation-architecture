@@ -148,3 +148,25 @@ def test_dispatch_queues_under_the_caps_and_keeps_a_seed(
         (department,),
     ).fetchone()
     assert counted == {"queued": 3, "pending": 3}
+
+
+def test_dispatch_stamps_the_send_with_the_clock_not_the_transaction_start(
+    db: psycopg.Connection[DictRow], db_settings: Settings
+) -> None:
+    # The inserting transaction dispatches (docs/02, step 4), and in the
+    # ingest command that transaction has staged, configured and ingested
+    # first. now() is the transaction's start (PostgreSQL 17 manual, 9.9.5),
+    # so a send stamped with it looks as old as the whole ingest, and one
+    # over ten minutes is stale on commit and re-sent by statement 2's next
+    # pass. The send's time is the moment of the UPDATE: later than now()
+    # inside the same transaction, where now() would be equal to it.
+    consultation_id = make_consultation(db, make_department(db), status="processing")
+    (question_id,) = _questions(db, consultation_id, 1)
+    job_id = make_pending_job(db, consultation_id, question_id)
+
+    assert dispatch(db, db_settings) == 1
+
+    row = db.execute(
+        "SELECT sent_at > now() AS after_the_start FROM job WHERE id = %s", (job_id,)
+    ).fetchone()
+    assert row == {"after_the_start": True}
