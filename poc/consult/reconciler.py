@@ -26,7 +26,7 @@ section 0 leaves them out, so the relay relays and does nothing more.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -219,15 +219,28 @@ def rerun_fan_ins(conn: psycopg.Connection[DictRow]) -> int:
     return advanced
 
 
-def relay(conn: psycopg.Connection[DictRow], *, limit: int = RELAY_LIMIT) -> int:
+def _fake_notify(outbox_id: int) -> str:
+    """Notify's reply to a send whose reference is the outbox id (ADR-006):
+    a notification id, made up from the reference."""
+    return f"fake-notify-{outbox_id}"
+
+
+def relay(
+    conn: psycopg.Connection[DictRow],
+    *,
+    limit: int = RELAY_LIMIT,
+    send: Callable[[int], str] = _fake_notify,
+) -> int:
     """Statement 5: send up to `limit` of the emails the outbox owes;
     returns how many went.
 
     ADR-006's query takes pending rows in id order FOR UPDATE SKIP LOCKED,
     the manual's own suggestion for many consumers of a queue-like table,
     so two relays neither wait on each other nor take the same row. The
-    rows go to sending and commit before the send, so no lock is held
-    across it, then to sent with the reference and the time.
+    rows go to sending and commit before the first send, and each row's
+    sent mark, with the reference and the time, commits before the next,
+    so no transaction is open across a send and a crash strands at most
+    the one row it was sending.
 
     The send is a stand-in (`_fake_notify`): Notify stays a hint in the
     proof-of-concept (plan section 0).
@@ -254,16 +267,10 @@ def relay(conn: psycopg.Connection[DictRow], *, limit: int = RELAY_LIMIT) -> int
             UPDATE notification_outbox SET status = 'sent', notify_id = %s, sent_at = now()
              WHERE id = %s AND status = 'sending'
             """,
-            (_fake_notify(outbox_id), outbox_id),
+            (send(outbox_id), outbox_id),
         ).rowcount
-    conn.commit()
+        conn.commit()
     return sent
-
-
-def _fake_notify(outbox_id: int) -> str:
-    """Notify's reply to a send whose reference is the outbox id (ADR-006):
-    a notification id, made up from the reference."""
-    return f"fake-notify-{outbox_id}"
 
 
 def _fail_each(conn: psycopg.Connection[DictRow], jobs: Sequence[DictRow]) -> int:
