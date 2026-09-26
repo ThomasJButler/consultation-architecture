@@ -1,13 +1,15 @@
 """The stage step: the file into a logged table in the staging schema.
 
 docs/02 step 2: the worker COPYs the file into a staging table, and the
-validator runs over it before any spend. docs/04 section 2 says what the
-table is: one logged table per upload, `staging."<consultation id>"`,
-every column text plus the file's row number, created and later dropped
-by the ingest role, which the pipeline role can't read because identity
-columns sit here until ingest moves them to the vault. Logged, because it
-lives across the human configure step and Postgres truncates an unlogged
-table after a crash (docs/01, section 6). Nothing here commits.
+validator runs over it before any spend. docs/04 section 2 says where it
+goes: one logged table per upload, `staging."<consultation id>"`, written
+and later dropped by the ingest role, which the pipeline role can't read
+because identity columns sit here until ingest moves them to the vault.
+Logged, because it lives across the human configure step and Postgres
+truncates an unlogged table after a crash (docs/01, section 6). The
+columns are this module's choice: every one text, plus row_no for the
+file's row number, which ingest carries into respondent.source_row_no.
+Nothing here commits.
 """
 
 from __future__ import annotations

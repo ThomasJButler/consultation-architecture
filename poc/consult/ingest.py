@@ -234,6 +234,11 @@ def ingest(
     answers = 0
     vault_rows = 0
     with as_role(conn, INGEST_ROLE):
+        # docs/02 step 3a streams the staging table with COPY and the
+        # production worker would write answers the same way. Here the rows
+        # are held and written with executemany: the fixtures are 240 rows,
+        # the plan benchmark is 20,000 (PR-09), and throughput is not one of
+        # the four mechanics under proof.
         rows = conn.execute(
             sql.SQL("SELECT * FROM {} ORDER BY row_no").format(staging_table(consultation_id))
         ).fetchall()
@@ -278,11 +283,16 @@ def ingest(
         jobs = _queue_find_themes(conn, consultation_id)
         transitions.mark_processing(conn, consultation_id)
         if not keep_staging:
-            # Dropped by the role that created it, in the transaction that
-            # emptied it (docs/06, section 2.4 as corrected).
+            # Dropped by the role that owns it (docs/06, section 2.4 as
+            # corrected), and inside this transaction rather than after the
+            # commit docs/04 section 2 describes: the redelivery guard at the
+            # top reads "past ingest with no table" as done, so the status
+            # and the drop have to become visible together. docs/04's
+            # correction of 26 September 2026 records the departure.
             conn.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(staging_table(consultation_id)))
-    # docs/02 step 3a ends with ANALYZE, so the first filter query after an
-    # ingest plans on statistics for the rows it just wrote. Outside the
+    # docs/02 step 3a runs ANALYZE in the ingest transaction, so the first
+    # filter query after an ingest plans on statistics for the rows it
+    # just wrote. It sits last here, and outside the
     # role block: ANALYZE takes the MAINTAIN privilege in Postgres 17, which
     # the login user has as owner and the ingest role needn't be given.
     conn.execute("ANALYZE respondent, answer")

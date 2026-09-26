@@ -109,7 +109,10 @@ def advance_consultation(conn: psycopg.Connection[DictRow], consultation_id: UUI
 
 
 def start_staging(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> None:
-    """Headers confirmed, stage job inserted: draft to staging (docs/02, section 6)."""
+    """Draft to staging. docs/02 section 6 gives the trigger as "headers
+    confirmed; stage job inserted"; the stage and ingest job rows are
+    dispatch's to insert and are deferred with it (PR-08), so for now the
+    step runs inline and the edge is the record of it."""
     moved = conn.execute(
         """
         UPDATE consultation SET status = 'staging', status_changed_at = now()
@@ -144,7 +147,7 @@ def mark_staged(
 
 
 def mark_processing(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> bool:
-    """The ingest job's last move: staged to processing. False rather than
+    """The ingest step's last move: staged to processing. False rather than
     an error when it's already there, because a second delivery of the
     ingest message must finish quietly (docs/04, section 3)."""
     moved = conn.execute(
@@ -161,8 +164,10 @@ def record_column_roles(
     conn: psycopg.Connection[DictRow], consultation_id: UUID, roles: Mapping[str, object]
 ) -> None:
     """The columns that aren't questions: the respondent id and the ignored
-    ones (docs/04, section 1). Here rather than in configure.py because this
-    module is the only one that writes the consultation row."""
+    ones (docs/04, section 1), plus the repeated-id resolution, because the
+    id column has no question row to hold a value_policy (docs/04's
+    correction of 26 September 2026). Here rather than in configure.py
+    because this module is the only one that writes the consultation row."""
     conn.execute(
         "UPDATE consultation SET column_roles = %s WHERE id = %s",
         (Jsonb(dict(roles)), consultation_id),

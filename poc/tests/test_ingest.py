@@ -295,8 +295,9 @@ def test_ingest_inserts_one_find_themes_job_per_open_question(
         for ref in ("o_reason", "o_safety")
     ]
     assert result.jobs == 2
-    # The consultation is processing and its staging table is gone, in the
-    # same transaction (docs/02, step 3a).
+    # The consultation is processing and its staging table is gone, both in
+    # this transaction (docs/04, section 2 and its correction of 26 September
+    # 2026: the drop shares the transaction so a redelivery sees both at once).
     after = db.execute(
         "SELECT status FROM consultation WHERE id = %s", (staged.consultation_id,)
     ).fetchone()

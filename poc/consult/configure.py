@@ -244,6 +244,9 @@ def configure(
             "UPDATE question SET related_closed_question_id = %s WHERE id = %s",
             (related, question_id),
         )
+    # column_roles also carries the repeated-id resolution (docs/02, section
+    # 3.2 as corrected, row 8): the id column has no question row, so there
+    # is no value_policy to hold it, and ingest reads it from here.
     transitions.record_column_roles(
         conn,
         consultation_id,
