@@ -794,6 +794,12 @@ def _export(args: argparse.Namespace, settings: Settings) -> int:
     except LookupError:
         print(f"consultation {args.consultation}: not found")
         return 1
+    except export.ExportError as exc:
+        # The code only: THREAT_MODEL.md section 2 forbids the value that
+        # failed a cell riding an exception message, and ExportError's own
+        # docstring carries nothing else.
+        print(f"refused: {exc.code}")
+        return 1
     logs.log_event(
         logger,
         "exported",
@@ -802,12 +808,16 @@ def _export(args: argparse.Namespace, settings: Settings) -> int:
         answer_count=result.answers,
         tag_count=result.tags,
         sheet_count=result.sheets,
+        truncated_cell_count=result.truncated_cells,
         duration_ms=round((time.monotonic() - started) * 1000),
     )
-    print(
+    line = (
         f"wrote {args.out}: {result.respondents} respondents, {result.answers} open answers, "
         f"{result.tags} tags, {result.sheets} sheets"
     )
+    if result.truncated_cells:
+        line += f", {result.truncated_cells} cells truncated at the cap"
+    print(line)
     return 0
 
 

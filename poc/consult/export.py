@@ -617,6 +617,7 @@ class Exported:
     answers: int
     tags: int
     sheets: int
+    truncated_cells: int
 
 
 def write_workbook(
@@ -746,4 +747,5 @@ def write_workbook(
         answers=sum(len(value) for value in answers.values()),
         tags=sum(tag_counts.values()),
         sheets=len(workbook.worksheets),
+        truncated_cells=cut,
     )
