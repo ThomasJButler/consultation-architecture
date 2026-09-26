@@ -139,7 +139,11 @@ def _rows(
     for values in rows:
         if not any(values):
             continue
-        yield dict(zip(expected, values, strict=False))
+        # A row ends at its last filled cell, so a short one is padded to
+        # the header, as responses._fitted pads a responses row, and a
+        # missing cell is a problem the checks below report, not a KeyError.
+        padded = [*values, *[""] * (len(expected) - len(values))]
+        yield dict(zip(expected, padded[: len(expected)], strict=True))
 
 
 def read_definition(path: Path, caps: Caps = DEFAULT_CAPS) -> Definition:
