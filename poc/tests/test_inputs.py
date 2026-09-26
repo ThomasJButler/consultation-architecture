@@ -131,12 +131,14 @@ def test_the_default_caps_admit_the_fixtures(tmp_path: Path) -> None:
     assert read_definition(FIXTURES / "definition.xlsx", Caps()).column_refs
     assert Caps().max_upload_bytes >= 200 * 1024 * 1024
     assert Caps().max_rows >= 250_000
-    # A file Excel itself can save is never refused on a cell's length or a
-    # row's width: its own limits are 32,767 characters and 16,384 columns
-    # (Microsoft Support, "Excel specifications and limits", checked 25
-    # September 2026), and docs/01 records single answers of 4,000 words.
+    # A file Excel itself can save is never refused on a cell's length: its
+    # own limit is 32,767 characters (Microsoft Support, "Excel
+    # specifications and limits", checked 25 September 2026), and docs/01
+    # records single answers of 4,000 words. The width is the staging
+    # table's, not Excel's: 1,599 headers beside row_no is the most a
+    # Postgres table takes (test_stage.py).
     assert Caps().max_cell_chars == 32_767
-    assert Caps().max_columns == 16_384
+    assert Caps().max_columns == 1_599
 
 
 def test_malformed_xml_a_bad_encoding_and_a_missing_file_are_refused_too(tmp_path: Path) -> None:
