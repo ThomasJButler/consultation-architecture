@@ -36,7 +36,7 @@ The brief and the sample data for this task were received under a recruitment
 process and are marked OFFICIAL. They are not in this repository and never will
 be. Everything here is my own work or synthetic data in the same shape.
 
-## Status (25 September 2026)
+## Status (26 September 2026)
 
 Built: the plan, the scaffold, the design documents (brief, research,
 architecture, seven decision records, data model, cost model, security notes
@@ -51,17 +51,21 @@ validator from `docs/02` section 3.2, the input guards from the threat
 model, the cost estimate from `docs/05`, `consult validate`, the claim with
 its fence, checkpoints, both fan-ins through one routine, the sign-off
 guard, the idempotent tag insert and the reopen, with three of the four
-mechanics `docs/02` section 13 names proved by named tests. In review:
-ingest (PR-06): the stage, configure and ingest steps as three functions
-over one connection, `respondent.attrs` equal to what SQL rebuilds from
-the answer rows, identity columns in the vault with the pipeline role
-refused at the schema, both duplicate flags with nothing deleted, one
-`find_themes` job per open question, a replay that writes nothing, and
-`consult ingest` taking the fixtures to a processing consultation; the
-minimum proof-of-concept now runs from a spreadsheet to a schema full of
-rows with no model yet. Planned: themes and sign-off (PR-07), the worker
-and reconciler (PR-08), queries and export (PR-09), final polish (PR-10).
-Deliberately not built: see above.
+mechanics `docs/02` section 13 names proved by named tests, and ingest
+(PR-06): stage, configure and ingest as three functions over one
+connection, identity columns in the vault with the pipeline role refused
+at the schema, both duplicate flags, a replay that writes nothing, and
+`consult ingest` taking the fixtures to a processing consultation, so the
+minimum proof-of-concept runs from a spreadsheet to a schema full of rows.
+In review: themes and sign-off (PR-07): the prompt contract from `docs/06`
+pinned as a test, model output held to the schema, the enum and the
+two-way id check in code, the `find_themes` job stage by stage with a
+checkpoint per batch and a proven takeover, condensation to a capped
+shortlist with lineage, a preview that gives every theme a count and
+quotes, the reviewer's edits under the version guard, and three commands
+that run a job with the fake, list a question's themes and sign them
+off. Planned: mapping, the worker and the reconciler (PR-08), queries and
+export (PR-09), final polish (PR-10). Deliberately not built: see above.
 
 ## How it was built
 
