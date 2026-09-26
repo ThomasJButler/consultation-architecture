@@ -123,6 +123,10 @@ def recover(
     of its own, as dispatch's send does for a queued job (ADR-006: "a lost
     message is caught by the ten-minute re-send").
 
+    Only a kind `fail_job` has a failed edge for is failed: any other
+    would raise on every pass and stop the statements after this one, so
+    it's left where it is.
+
     The re-send is one UPDATE, committed before any job is failed, so no
     job row lock is held when `fail_job` takes the consultation's (module
     docstring). It takes its rows FOR UPDATE SKIP LOCKED: a job row some
@@ -131,7 +135,11 @@ def recover(
     pass, as `worker.pick` leaves it. Waiting on it would hold up every
     statement after this one for as long as that worker stays paused.
     """
-    params = {"stale_after": stale_after, "max_attempts": max_attempts}
+    params = {
+        "stale_after": stale_after,
+        "max_attempts": max_attempts,
+        "kinds": list(transitions.FAILABLE_KINDS),
+    }
     resent = conn.execute(
         """
         UPDATE job SET sent_at = now()
@@ -150,6 +158,7 @@ def recover(
         """
         SELECT id, consultation_id FROM job
          WHERE status IN ('queued', 'running') AND attempts >= %(max_attempts)s
+           AND kind = ANY(%(kinds)s)
            AND CASE status WHEN 'queued' THEN sent_at ELSE heartbeat_at END
                < now() - %(stale_after)s
          ORDER BY id
@@ -168,14 +177,14 @@ def retry(
     The section retried only below five and statement 2 scans only queued
     and running, so a job that failed on its fifth attempt sat in
     failed_retryable for good (plan section 2). Failing it here closes
-    that.
+    that, for the kinds `fail_job` can fail, as in `recover`.
 
     Only the status moves on a retry. attempts, params and model_alias
     stay, so the next dispatch keeps the seed and the alias (ADR-002), and
     error_code stays until the next failure overwrites it. As in
     `recover`, the UPDATE commits before any job is failed.
     """
-    params = {"max_attempts": max_attempts}
+    params = {"max_attempts": max_attempts, "kinds": list(transitions.FAILABLE_KINDS)}
     retried = conn.execute(
         """
         UPDATE job SET status = 'pending'
@@ -189,7 +198,7 @@ def retry(
         """
         SELECT id, consultation_id FROM job
          WHERE status = 'failed_retryable' AND next_attempt_at <= now()
-           AND attempts >= %(max_attempts)s
+           AND attempts >= %(max_attempts)s AND kind = ANY(%(kinds)s)
          ORDER BY id
         """,
         params,

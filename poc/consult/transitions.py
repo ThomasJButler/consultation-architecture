@@ -273,6 +273,9 @@ _FAILED_EDGES = {
     "find_themes": (("configured", "finding_themes"), "find_failed"),
     "map_themes": (("signed_off", "assigning_themes"), "map_failed"),
 }
+# The kinds fail_job can fail, for the reconciler's spent scans: a job of
+# any other kind at the retry budget would raise on every pass.
+FAILABLE_KINDS = tuple(_FAILED_EDGES)
 
 
 def fail_job(conn: psycopg.Connection[DictRow], job_id: UUID) -> Advance:
