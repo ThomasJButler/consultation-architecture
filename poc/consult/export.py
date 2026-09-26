@@ -110,22 +110,29 @@ def _sheet_title(column_ref: str, used: set[str]) -> str:
     isn't: `column_ref` is a free-text header from the definition
     workbook (docs/00), not a sheet-safe string, so the six characters
     `_INVALID_SHEET_CHARS` names are stripped and the result truncated to
-    Excel's limit before openpyxl ever sees it. `used` is mutated: titles
-    are de-duplicated here, with a numbered suffix, rather than left to
+    Excel's limit before openpyxl ever sees it. Excel also refuses a
+    title that starts or ends with an apostrophe, so those are stripped
+    from both ends.
+
+    `used` is mutated and holds titles casefolded: titles are
+    de-duplicated here, with a numbered suffix, rather than left to
     openpyxl's own `avoid_duplicate_name`, which runs after the character
-    check above has already raised.
+    check above has already raised, and compared without case, as Excel
+    and `avoid_duplicate_name` both compare them. Two titles differing
+    only in case would otherwise both pass here and have openpyxl append
+    a digit to the second, past the limit.
     """
-    base = _INVALID_SHEET_CHARS.sub("", column_ref)
-    title = f"{base} summary"[:_MAX_SHEET_TITLE]
-    if title not in used:
-        used.add(title)
+    base = _INVALID_SHEET_CHARS.sub("", column_ref).lstrip("'")
+    title = f"{base} summary"[:_MAX_SHEET_TITLE].rstrip("'")
+    if title.casefold() not in used:
+        used.add(title.casefold())
         return title
     n = 2
     while True:
         suffix = f" ({n})"
         candidate = title[: _MAX_SHEET_TITLE - len(suffix)] + suffix
-        if candidate not in used:
-            used.add(candidate)
+        if candidate.casefold() not in used:
+            used.add(candidate.casefold())
             return candidate
         n += 1
 
@@ -702,7 +709,7 @@ def write_workbook(
         theme_sets,
         tags,
     )
-    used_titles = {"Responses", "Manifest"}
+    used_titles = {"Responses".casefold(), "Manifest".casefold()}
     for question in open_questions:
         summary_ws: WriteOnlyWorksheet = workbook.create_sheet(
             _sheet_title(question.column_ref, used_titles)
