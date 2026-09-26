@@ -123,7 +123,13 @@ def test_configure_writes_questions_options_roles_and_policies(
     again = configure(db, consultation_id, definition, report, resolutions)
     assert again == configured
     assert len(questions_of(db, consultation_id)) == 9
-    assert options_of(db, by_ref["c_modes"]["id"]) == options_of(db, again.questions["c_modes"])
+    assert options_of(db, again.questions["c_modes"]) == [
+        "Cycle",
+        "Walk",
+        "Run",
+        "Wheelchair, mobility scooter or similar",
+        "Push a pram",
+    ]
 
 
 def test_a_re_save_that_moves_a_column_between_kinds_sets_its_status(

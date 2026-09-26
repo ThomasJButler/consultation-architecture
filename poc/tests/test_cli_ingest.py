@@ -41,18 +41,34 @@ def test_the_ingest_command_runs_the_fixtures_end_to_end(
 
     out = capsys.readouterr().out
     assert code == 0
-    # Counts and ids (docs/02, step 3a; plans/PR-06 section 1)...
+    found = re.search(r"consultation ([0-9a-f-]{36})", out)
+    assert found is not None
+    # Counts and ids, never a value from the file (plans/PR-06, section 6;
+    # THREAT_MODEL.md, section 2). The duplicate counts are read back from
+    # the rows rather than matched as bare labels, which a zero would pass.
+    written = db.execute(
+        """
+        SELECT (SELECT count(*) FROM answer WHERE consultation_id = %(id)s) AS answers,
+               (SELECT count(*) FROM answer
+                 WHERE consultation_id = %(id)s AND duplicate_of_answer_id IS NOT NULL)
+                   AS duplicate_answers,
+               (SELECT count(*) FROM respondent
+                 WHERE consultation_id = %(id)s AND duplicate_of IS NOT NULL)
+                   AS duplicate_respondents
+        """,
+        {"id": found.group(1)},
+    ).fetchone()
+    assert written is not None and written["duplicate_respondents"] >= 11
     for expected in (
         "240 rows staged",
         "240 respondents",
+        f"{written['answers']} answers",
         "240 identity rows",
+        f"{written['duplicate_answers']} duplicate answers",
+        f"{written['duplicate_respondents']} duplicate respondents",
         "2 jobs",
-        "duplicate answers",
-        "duplicate respondents",
     ):
         assert expected in out
-    found = re.search(r"consultation ([0-9a-f-]{36})", out)
-    assert found is not None
     # ...and not one value from the file.
     assert "towpath" not in out and "example.org" not in out and "R-0001" not in out
     # Committed on its own connection, so this one sees it.

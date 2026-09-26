@@ -19,7 +19,6 @@ from psycopg.rows import DictRow
 
 from consult.ingest import Ingested, IngestError, ingest
 from consult.stage import stage, staging_table
-from consult.tokenise import tokenise
 from consult.validate import Resolution, WarningKind
 from tests.pipeline import NOT_ANSWERED, RESPONSES, fixture_rows, staged_fixture
 from tests.rows import make_consultation, make_department
@@ -72,10 +71,13 @@ def test_ingest_explodes_answers_one_row_per_option(db: psycopg.Connection[DictR
         row["c_route"] in NOT_ANSWERED | {"Unsure"} for row in rows
     )
     # A multi-select answer is one row per chosen option, the comma option
-    # one of them; a blank cell is one blank row.
+    # one of them; a blank cell is one blank row. Chosen options are
+    # counted as substrings of the cell, which is independent of the
+    # tokeniser ingest uses and exact here because no label contains
+    # another.
     vocabulary = ("Cycle", "Walk", "Run", "Wheelchair, mobility scooter or similar", "Push a pram")
     chosen = sum(
-        len(tokenise(row["c_modes"], vocabulary).tokens)
+        len([label for label in vocabulary if label in row["c_modes"]])
         for row in rows
         if row["c_modes"] not in NOT_ANSWERED
     )
@@ -123,7 +125,7 @@ def test_ingest_builds_attrs_that_match_the_answer_rows(db: psycopg.Connection[D
         if row["c_route"] in {"Support", "Oppose", "Not sure"}:
             document["c_route"] = [row["c_route"]]
         if row["c_modes"] not in NOT_ANSWERED:
-            tokens = tokenise(row["c_modes"], vocabulary).tokens
+            tokens = [label for label in vocabulary if label in row["c_modes"]]
             if tokens:
                 document["c_modes"] = sorted(tokens)
         if row["c_safety"] not in NOT_ANSWERED:
@@ -197,9 +199,9 @@ def test_ingest_flags_duplicates_at_answer_and_respondent_level(
           JOIN respondent r ON r.id = a.respondent_id
           JOIN answer d ON d.id = a.duplicate_of_answer_id
           JOIN respondent f ON f.id = d.respondent_id
-         WHERE a.consultation_id = %s
+         WHERE a.consultation_id = %s AND a.question_id = ANY(%s)
         """,
-        (staged.consultation_id,),
+        (staged.consultation_id, [questions["o_reason"], questions["o_safety"]]),
     ).fetchall()
     assert {
         (w["column_ref"], w["source_row_no"]): w["first_row_no"] for w in written
@@ -243,7 +245,6 @@ def test_ingest_flags_duplicates_at_answer_and_respondent_level(
         "SELECT count(*) AS n FROM respondent WHERE consultation_id = %s", (staged.consultation_id,)
     ).fetchone()
     assert kept == {"n": 240}
-    assert questions["o_reason"] is not None
 
 
 def staging_tables(db: psycopg.Connection[DictRow]) -> list[str]:
