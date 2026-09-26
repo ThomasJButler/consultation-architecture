@@ -478,3 +478,42 @@ def test_run_job_refuses_a_spent_job_and_a_map_job(
         assert code == 1
         assert f"job {job_id}: not claimable" in out
         assert db.execute("SELECT * FROM job WHERE id = %s", (job_id,)).fetchone() == before
+
+
+def test_run_job_records_an_unexpected_failure_as_a_code(
+    db: psycopg.Connection[DictRow],
+    db_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # worker._run's fourth branch, in run-job too: anything that isn't a
+    # reply error, a gateway error or a lost lease goes on the row as
+    # worker_error under the fence, and the line names the code and the
+    # class, never the message (CLAUDE.md, rule 8; THREAT_MODEL.md,
+    # section 2). Left to escape, it leaves the committed claim running
+    # with no code until the lease goes stale ten minutes later.
+    jobs = ingested(db, db_settings)
+    message = "crashed while reading: The towpath floods"
+
+    def crash(conn: object, llm: object, lease: Lease, **_: object) -> Advance:
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(themes, "run_find_themes", crash)
+    code = main(
+        ["run-job", str(jobs["o_reason"]), "--worker", "w1", "--model", "fake"],
+        settings=db_settings,
+    )
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "worker_error" in captured.out and "RuntimeError" in captured.out
+    for printed in (captured.out, captured.err):
+        assert message not in printed and "towpath" not in printed
+    row = db.execute(
+        "SELECT status, error_code, provider_request_id FROM job WHERE id = %s",
+        (jobs["o_reason"],),
+    ).fetchone()
+    assert row == {
+        "status": "failed_retryable",
+        "error_code": "worker_error",
+        "provider_request_id": None,
+    }
