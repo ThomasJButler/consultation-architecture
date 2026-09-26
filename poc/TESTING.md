@@ -19,6 +19,12 @@ PR-08's `reconciler.reconcile` is the same shape: its commit (c012ca3)
 composed the five statements, each already proved on its own, with no
 pin of its own and said so; `test_cli_worker.py`'s test 15 is what
 finally drives it, through `consult reconcile`.
+PR-09's cross-question filter and duplicate toggle are the same shape
+again: `_other()` and the duplicate predicates were composed whole with
+`scope()` in 137ae45, so `test_the_other_filter_is_a_semi_join_across_questions`
+(7f5bddd) and `test_duplicates_are_hidden_unless_asked_for` (d89b3d7) are
+named proofs after the code rather than pins ahead of it, each saying so
+in its own commit body.
 Every other test here has a `Pin ...` commit ahead of the code it holds.
 
 ## Running
@@ -57,7 +63,7 @@ pull requests add that take more than a few seconds. `pytest.ini` sets
 |---|---|---|
 | `test_config.py` | `.env.example` and `consult/config.py` name the same settings; the environment wins over `.env`; a missing password is named, not defaulted; the input caps and the cost rates load from the environment and a rate that isn't a number is refused by name | nothing |
 | `test_cli.py` | `consult init` creates the fourteen tables, the `vault` and `staging` schemas and the four roles from `docs/04` and `docs/06`, and running it twice is harmless; `--reset` drops and recreates the same schema with no rows surviving | Postgres |
-| `test_fixtures.py` | The generator writes the three sheets with the headers in `docs/00`, comma-joined options including one containing a comma, one follow-up question with a placeholder, `-` and `N/A`; the committed fixtures are byte for byte what it writes | nothing |
+| `test_fixtures.py` | The generator writes the three sheets with the headers in `docs/00`, comma-joined options including one containing a comma, one follow-up question with a placeholder, `-` and `N/A`; the committed fixtures are byte for byte what it writes; `--scale N` writes N respondents deterministically for a given seed, a different byte for a different one, and keeps the fixed cases (the twelve-copy proforma, the one leading `=`, an out-of-vocabulary `Unsure`) on their own rows at any scale | nothing |
 | `test_fakes.py` | `RecordingLLM` (the package's `OfflineModel`) keeps every prompt and answers well; `FakeLLM` answers with what it was told to, including each fault in `THREAT_MODEL.md` row 3, and raises when its script runs out | nothing |
 | `test_store.py` | A failed job stores an error code and a provider request id; every column of `job` that can hold a string is on a named allow-list and `params` is held to a JSON object; the code vocabulary is a `CHECK` that names exactly the enum's values; a stale fence writes nothing | Postgres |
 | `test_logs.py` | The formatter keeps ids, counts, durations, states and codes and drops everything else by name and by shape; a sentence as a message becomes a marker; an exception contributes its class and never its message | nothing |
@@ -89,14 +95,20 @@ pull requests add that take more than a few seconds. `pytest.ini` sets
 | `test_worker.py` | `worker.BackingOff` retries a `GatewayError` six times with full-jitter waits from the injected sleeper, no transaction open for any call or any sleep, then records the code and the request id under the fence and logs them, never the provider's message; `worker.run_once` claims the oldest runnable job by `created_at` then id and runs it by kind, takes over a stale lease, leaves a spent retry budget alone whatever the job's status, and six workers on six connections racing for four queued jobs never share one | Postgres |
 | `test_reconciler.py` | The reconciler's statements against rows built by hand, never read off the code under test: statement 2 re-sends a stale job below the retry budget and fails one at it; statement 3 returns a due `failed_retryable` job to `pending` and fails one at five attempts, an undue one left alone; statement 4 re-runs both fan-ins for a consultation whose last question has just failed, flipping it to `awaiting_review` with its email; statement 5 relays outbox rows to `sent` once each, with two relays racing on two connections | Postgres |
 | `test_cli_worker.py` | `consult worker --once` and `consult reconcile` run the fixtures to `ready` through the commands: two worker runs to `themes_ready` and `awaiting_review` with one outbox row, two sign-offs, two more worker runs to `complete`, `ready` and every distinct answer tagged once against v2 with duplicates carrying the same tags, then reconcile, which moves only the two outbox rows to `sent` and changes no job or question row; a worker run with nothing runnable prints so and exits 0 | Postgres |
+| `test_query.py` | Pure: the filter grammar's four forms (`attr:<column>=<value>`, `theme:<key>` repeated and OR'd, `other:<question>.theme=<key>`, `with=duplicates`) parse to a typed value, in the order given; an unknown kind, an empty `attr:` or `theme:` value and a malformed `other:` are each refused by code, and the value that triggered a refusal never reaches the message | nothing |
+| `test_query_db.py` | The scope CTE's text is fixed by the filter's shape and never by a hostile value (both quotes, `%`, `;`, a comment marker, a tautology, a NUL, a 10,000-character value), every placeholder pairs with a parameter, the schema's fourteen tables are untouched after the run, and the theme table's counts and denominator match a hand count from `responses.csv` for a single `attr:` value, two OR'd values in one column, the `other:` semi-join across two questions, and the duplicate toggle both ways (74 and 221, the twelve-copy proforma's own 1 and 12) | Postgres |
+| `test_export_prefix.py` | Pure: every formula-trigger character (`=`, `+`, `-`, `@`, tab, carriage return) gets a leading apostrophe on write, the file's own no-answer marker, a lone `-`, is left alone, and a trigger after the first character doesn't trip the rule | nothing |
+| `test_export.py` | The workbook: the Responses sheet's columns (identity, demographic and closed, then open with one column per theme), a summary sheet per open question matching `query.theme_table`'s own counts, and a manifest naming the consultation, the run and each question's model aliases and tag counts; every non-empty cell on every sheet is a text cell, the fixture's `=1+1` answer reads back prefixed and a blank reads back as the file's own `-`; the reads run as `consult_export`, which can read the vault and holds no write grant | Postgres |
+| `test_plan_benchmark.py` | The fourth mechanic, the indexed filter query, marked `slow` (about 45 seconds): at 20,000 respondents, after `VACUUM (ANALYZE)`, the three-predicate filter's `EXPLAIN (ANALYZE, FORMAT JSON)` plan is walked for a Bitmap Index Scan on `respondent_attrs_gin` and, per respondent it finds, a probe of answer's own unique key, not `answer_question_id_id`, which no plan measured used (`docs/05`'s correction of 26 September 2026); the test's own run (a 4.7% Villages share, the GIN scan's actual rows, the answer key's probes) is printed, never an answer | Postgres, slow |
+| `test_cli_query.py` | `consult query` prints the theme table (key, label, count, percentage), the denominator line and the related distribution under a filter, and exits 2 on a malformed one with its code, never the value; `consult export` writes the workbook and prints the path and its counts; neither prints an answer's text, driven on the fixtures taken to `ready` through the worker commands | Postgres |
 
 ## What is proved, and what is not yet
 
-Three of the four mechanics the design rests on (`docs/02`, section 13)
-are proved here, each by a named test: the fan-in transaction
-(`test_fan_in_race.py`), lease takeover with a fence (`test_jobs.py`) and
-idempotent tag inserts (`test_tags.py`). The fourth, the indexed filter
-query, is PR-09 (`plans/00-plan.md`). The vault refusal for the pipeline
-role, promised in `docs/06` section 2.4, is `test_vault.py`. PR-04's
-parsing and validator tests are all pure: `pytest -m 'not db'` runs every
-one of them.
+The four mechanics the design rests on (`docs/02`, section 13) are all
+proved here, each by a named test: the fan-in transaction
+(`test_fan_in_race.py`), lease takeover with a fence (`test_jobs.py`),
+idempotent tag inserts (`test_tags.py`), and the indexed filter query
+(`test_plan_benchmark.py::test_the_filter_plan_uses_both_indexes_at_twenty_thousand`).
+The vault refusal for the pipeline role, promised in `docs/06` section
+2.4, is `test_vault.py`. PR-04's parsing and validator tests are all
+pure: `pytest -m 'not db'` runs every one of them.
