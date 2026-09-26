@@ -6,6 +6,12 @@ version (tests/rows.py, tests/pipeline.py).
 
 Marked db: `write_workbook` reads Postgres. The pure prefix rule has its
 own test, test_export_prefix.py, outside this mark (test_repo_rules.py).
+
+Each test commits its setup before it exports: `write_workbook` sets the
+isolation level for a transaction of its own, which psycopg applies only
+on an idle connection, and the setup is the test's to commit, not the
+export's. The `db` fixture empties every table on entry, so nothing a
+test commits outlives it.
 """
 
 from __future__ import annotations
@@ -59,6 +65,7 @@ def test_the_workbook_has_text_cells_every_sheet_and_the_manifest(
     tag_answers_by_rule(
         db, signed["o_safety"].version_id, signed["o_safety"].question_id, _o_safety_key
     )
+    db.commit()
 
     path = tmp_path / "export.xlsx"
     result = export.write_workbook(db, signed["o_reason"].consultation_id, path)
@@ -229,6 +236,7 @@ def test_export_reads_as_the_export_role(
         return original(conn, consultation_id)
 
     monkeypatch.setattr(export, "_respondents", recording)
+    db.commit()
 
     path = tmp_path / "export.xlsx"
     export.write_workbook(db, signed["o_reason"].consultation_id, path)
@@ -324,6 +332,7 @@ def test_export_reads_one_snapshot_despite_a_mid_export_retraction(
         return result
 
     monkeypatch.setattr(export, "_tags", retract_after_reading)
+    db.commit()
 
     path = tmp_path / "export.xlsx"
     export.write_workbook(db, signed["o_reason"].consultation_id, path)
@@ -376,6 +385,7 @@ def test_a_summary_sheet_title_is_always_valid(
         "UPDATE question SET column_ref = %s WHERE id = %s",
         (dirty_ref, signed["o_reason"].question_id),
     )
+    db.commit()
 
     path = tmp_path / "export.xlsx"
     export.write_workbook(db, signed["o_reason"].consultation_id, path)
@@ -432,6 +442,7 @@ def test_unprocessable_counts_the_versions_own_map_job(
     ).fetchone()
     assert second_job is not None
     make_job_batch(db, second_job["id"], [shared_answer_id], status="unprocessable")
+    db.commit()
 
     path = tmp_path / "export.xlsx"
     export.write_workbook(db, signed["o_reason"].consultation_id, path)
@@ -491,6 +502,7 @@ def test_a_control_character_never_rides_the_exports_error(
         "SELECT external_id FROM respondent WHERE id = %s", (target["respondent_id"],)
     ).fetchone()
     assert respondent is not None
+    db.commit()
 
     path = tmp_path / "export.xlsx"
     export.write_workbook(db, signed["o_reason"].consultation_id, path)
