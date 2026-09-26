@@ -16,6 +16,7 @@ under `store.EXPORT_ROLE` rather than the login user's own privileges.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -42,6 +43,38 @@ NO_ANSWER = "-"
 # docs/04 section 6's export query has no OFFSET; this is the page size
 # the cursor (the last id seen) is read in, looped until a page is short.
 _KEYSET_PAGE = 1000
+
+# openpyxl's own title setter (openpyxl.workbook.child.INVALID_TITLE_REGEX)
+# refuses any of these six in a sheet title, and Excel's own sheet-title
+# limit is 31 characters, measured against openpyxl 3.1.5, 26 September
+# 2026.
+_INVALID_SHEET_CHARS = re.compile(r"[\\*?:/\[\]]")
+_MAX_SHEET_TITLE = 31
+
+
+def _sheet_title(column_ref: str, used: set[str]) -> str:
+    """A per-question summary sheet's title, valid wherever `column_ref`
+    isn't: `column_ref` is a free-text header from the definition
+    workbook (docs/00), not a sheet-safe string, so the six characters
+    `_INVALID_SHEET_CHARS` names are stripped and the result truncated to
+    Excel's limit before openpyxl ever sees it. `used` is mutated: titles
+    are de-duplicated here, with a numbered suffix, rather than left to
+    openpyxl's own `avoid_duplicate_name`, which runs after the character
+    check above has already raised.
+    """
+    base = _INVALID_SHEET_CHARS.sub("", column_ref)
+    title = f"{base} summary"[:_MAX_SHEET_TITLE]
+    if title not in used:
+        used.add(title)
+        return title
+    n = 2
+    while True:
+        suffix = f" ({n})"
+        candidate = title[: _MAX_SHEET_TITLE - len(suffix)] + suffix
+        if candidate not in used:
+            used.add(candidate)
+            return candidate
+        n += 1
 
 
 def neutralise(value: str) -> str:
@@ -545,8 +578,11 @@ def write_workbook(
         theme_sets,
         tags,
     )
+    used_titles = {"Responses", "Manifest"}
     for question in open_questions:
-        summary_ws: WriteOnlyWorksheet = workbook.create_sheet(f"{question.column_ref} summary")
+        summary_ws: WriteOnlyWorksheet = workbook.create_sheet(
+            _sheet_title(question.column_ref, used_titles)
+        )
         _write_summary(summary_ws, summaries[question.id])
     manifest_ws: WriteOnlyWorksheet = workbook.create_sheet("Manifest")
     _write_manifest(manifest_ws, manifest)
