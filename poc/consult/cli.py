@@ -70,7 +70,7 @@ from consult.query import FilterError
 from consult.replies import ReplyError
 from consult.responses import Responses
 from consult.stage import INGEST_ROLE, stage
-from consult.store import EXPORT_ROLE, PIPELINE_ROLE, as_role
+from consult.store import PIPELINE_ROLE, as_role
 from consult.validate import Report, validate
 from consult.worker import Outcome
 
@@ -607,18 +607,18 @@ def _query(args: argparse.Namespace, settings: Settings) -> int:
     refused by its code and exits 2 before any query runs, and the value
     that failed it never reaches the line (CLAUDE.md rule 8: a filter
     value is whatever a user typed into the address bar). The two reads
-    run under `store.EXPORT_ROLE`: the proof-of-concept has no dashboard
-    role of its own, and the export role is the one read-only grant it
-    does have, with no grant on the pipeline's writes (docs/06, section
-    2.4; `export.write_workbook`'s own docstring runs its reads the same
-    way for the same reason).
+    run under `store.PIPELINE_ROLE`: the proof-of-concept has no
+    dashboard role of its own, the pipeline role holds every SELECT the
+    two reads need (schema.sql's grant on all public tables) and no
+    grant on the vault at all, so a read this path should never make
+    fails at the schema rather than succeeding (docs/06, section 2.4).
     """
     try:
         parsed = query.parse_filters(args.filter or [])
     except FilterError as exc:
         print(f"refused: {exc}")
         return 2
-    with store.connect(settings) as conn, as_role(conn, EXPORT_ROLE):
+    with store.connect(settings) as conn, as_role(conn, PIPELINE_ROLE):
         table = query.theme_table(conn, args.question, parsed)
         distribution = query.related_distribution(conn, args.question, parsed)
     logs.log_event(
