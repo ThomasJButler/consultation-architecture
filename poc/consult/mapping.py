@@ -4,10 +4,12 @@ Same shape as `themes.py`: the stages take a connection and never commit,
 so the caller owns the transaction and commits between batches. The plan
 reuses `themes.batches` at `MAP_BATCH_SIZE`, the same partition (by
 related closed answer) and shuffle (by the stored seed) a find_themes job
-uses, so a signed-off question's answers are covered exactly once, no
-duplicate's copy. A batch's tags and its checkpoint go in one transaction;
-`finish_map_themes` (the next chunk) starts a fresh one that locks the
-consultation first, so nothing here may take that lock.
+uses, so a signed-off question's distinct answers are planned and sent to
+the model exactly once; their exact duplicates are never sent, and get
+their canonical's tags copied instead. A batch's tags and its checkpoint
+go in one transaction; `finish_map_themes` (the next chunk) starts a
+fresh one that locks the consultation first, so nothing here may take
+that lock.
 """
 
 from __future__ import annotations
@@ -86,6 +88,26 @@ def plan(conn: psycopg.Connection[DictRow], job: MapThemesJob) -> list[themes.Ba
     return themes.batches(conn, job.question_id, seed=job.seed, size=MAP_BATCH_SIZE)
 
 
+def _duplicate_tags(
+    conn: psycopg.Connection[DictRow],
+    answer_ids: Sequence[int],
+    canonical_keys: dict[int, tuple[str, ...]],
+    theme_ids: dict[str, UUID],
+) -> list[Tag]:
+    """Every exact duplicate of the batch's answers, carrying its
+    canonical's theme keys (docs/02, step 9: duplicates are themed once
+    and the tags copied; answer.duplicate_of_answer_id, ingest's flag)."""
+    rows = conn.execute(
+        "SELECT id, duplicate_of_answer_id FROM answer WHERE duplicate_of_answer_id = ANY(%s::bigint[])",
+        (list(answer_ids),),
+    ).fetchall()
+    return [
+        Tag(int(row["id"]), theme_ids[key])
+        for row in rows
+        for key in canonical_keys.get(int(row["duplicate_of_answer_id"]), ())
+    ]
+
+
 def _shortlist(conn: psycopg.Connection[DictRow], version_id: UUID) -> list[DictRow]:
     # v2 carries the longlist too (sign_off copies every row for lineage);
     # only the shortlist plus its two fallbacks are the enum to map against.
@@ -131,13 +153,15 @@ def assign(
         )
         completion = llm.complete(prompt)
         assignments = parse_assignments(completion, prompt)
+        canonical_keys = {assignment.answer_id: assignment.theme_keys for assignment in assignments}
         canonical = [
             Tag(assignment.answer_id, theme_ids[key])
             for assignment in assignments
             for key in assignment.theme_keys
         ]
+        duplicates = _duplicate_tags(conn, prompt.answer_ids, canonical_keys, theme_ids)
         batch_no = jobs.next_batch_no(conn, lease.job_id)
-        insert_tags(conn, lease, job.version_id, batch_no=batch_no, tags=canonical)
+        insert_tags(conn, lease, job.version_id, batch_no=batch_no, tags=canonical + duplicates)
         jobs.checkpoint(
             conn,
             lease,
