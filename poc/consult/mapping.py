@@ -1,15 +1,17 @@
-"""The map_themes job, stage by stage (docs/02, step 9; ADR-002).
+"""The map_themes job, stage by stage (docs/02, steps 9 and 10; ADR-002).
 
 Same shape as `themes.py`: the stages take a connection and never commit,
 so the caller owns the transaction and commits between batches. The plan
 reuses `themes.batches` at `MAP_BATCH_SIZE`, the same partition (by
 related closed answer) and shuffle (by the stored seed) a find_themes job
-uses, so a signed-off question's distinct answers are planned and sent to
-the model exactly once; their exact duplicates are never sent, and get
-their canonical's tags copied instead. A batch's tags and its checkpoint
-go in one transaction; `finish_map_themes` (the next chunk) starts a
-fresh one that locks the consultation first, so nothing here may take
-that lock.
+uses, so each of a signed-off question's distinct answers is planned
+once; their exact duplicates are never sent, and get their canonical's
+tags copied instead. A batch the two-way check refuses is sent again one
+answer at a time, and a worker taking over resumes by coverage, from the
+answers no checkpoint names yet. A batch's tags and its checkpoint go in
+one transaction. `run_map_themes` ends in `transitions.finish_map_themes`,
+whose transaction locks the consultation before anything else in it
+touches that row, so nothing here may take that lock.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from uuid import UUID
 import psycopg
 from psycopg.rows import DictRow
 
-from consult import jobs, logs, themes
+from consult import jobs, logs, themes, transitions
 from consult.jobs import Lease
 from consult.llm import LLM, Completion, Prompt
 from consult.prompts import PromptAnswer, map_themes_prompt
@@ -279,3 +281,26 @@ def assign(
             _send(conn, llm, lease, job, shortlist, batch.related_answer, (answer,), after_batch)
             ran += 1
     return ran
+
+
+def run_map_themes(
+    conn: psycopg.Connection[DictRow],
+    llm: LLM,
+    lease: Lease,
+    *,
+    after_batch: Callable[[int], None] | None = None,
+) -> transitions.Advance:
+    """The whole job for a claimed lease, the twin of
+    `themes.run_find_themes`: the question moved on (or found already moved
+    by a takeover), the plan rebuilt from the seed, the answers no
+    checkpoint covers mapped, then `transitions.finish_map_themes`: the
+    question complete, fan-in 2 run and the job succeeded (docs/02, steps
+    9 and 10). The caller commits in `after_batch`; nothing here does.
+
+    Nothing before the finish touches the consultation row, so its lock is
+    the first touch in its transaction whether a batch has just committed
+    or a takeover found every answer covered and no batch ran."""
+    job = load_map_job(conn, lease.job_id)
+    transitions.start_map_themes(conn, job.question_id)
+    assign(conn, llm, lease, job, plan(conn, job), after_batch=after_batch)
+    return transitions.finish_map_themes(conn, lease, job.question_id, job.consultation_id)
