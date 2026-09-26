@@ -381,3 +381,14 @@ its review and recorded here rather than rewritten into the merged text.
    two runs racing on a new name have to land on one row; the section 3
    table gains the index: `department (name)`, one department per name
    however many times the command runs.
+4. **Section 6, the acceptance test.** PR-09's benchmark
+   (`poc/tests/test_plan_benchmark.py`, 20,000 respondents, PostgreSQL 16.13
+   locally and 17 in CI, 26 September 2026) shows the Bitmap Index Scan on
+   `respondent_attrs_gin` and no Index Scan on `answer_question_id_id`: for
+   the first page of the three-predicate filter the planner reaches `answer`
+   once per respondent the GIN scan found, through the unique key that leads
+   with `(respondent_id, question_id)` (section 3), and `answer_question_id_id`
+   was in no plan at any share tried. The test asserts the probe the planner
+   chooses. The shares the planner needed, the GIN pending list after an
+   ingest and what the fixture's duplicates do to the numbers are in docs/05's
+   correction of the same date.
