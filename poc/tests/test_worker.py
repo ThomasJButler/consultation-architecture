@@ -614,7 +614,9 @@ def test_a_paused_workers_job_is_taken_over(
 
         # The paused worker, waking, finds its transaction gone: its
         # heartbeat never commits, and the fence refuses what it tries next.
-        with pytest.raises(psycopg.OperationalError):
+        # Whether the client reads the server's own error or only the
+        # closed socket, it's a psycopg error either way.
+        with pytest.raises(psycopg.Error):
             holder.commit()
     finally:
         holder.close()
