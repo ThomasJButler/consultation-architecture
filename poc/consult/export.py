@@ -280,12 +280,23 @@ def _manifest_question(
             (question.id,),
         ).fetchall()
     }
-    # Always a batch of one (mapping._send retries a refused batch at size
-    # one before calling it unprocessable), so counting batches counts
-    # answers.
+    # Scoped to the version's own map_themes job, the same one `aliases`
+    # above already picks by created_at: a reopen's new run maps every
+    # answer again under a new job (docs/02, step 9), so counting every
+    # map_themes job the question has ever had double-counts an answer
+    # refused in both. Distinct answer ids, not batches: a retried batch
+    # that eventually succeeds leaves its earlier 'done' row in place
+    # beside the later one (ADR-002's checkpoint), so a plain count(*)
+    # over statuses without unnest would over-count that answer too.
     unprocessable = conn.execute(
-        "SELECT count(*) AS n FROM job_batch jb JOIN job j ON j.id = jb.job_id"
-        " WHERE j.question_id = %s AND jb.status = 'unprocessable'",
+        """
+        SELECT count(DISTINCT ua.answer_id) AS n
+          FROM job_batch jb, unnest(jb.answer_ids) AS ua (answer_id)
+         WHERE jb.status = 'unprocessable'
+           AND jb.job_id = (SELECT id FROM job
+                              WHERE question_id = %s AND kind = 'map_themes'
+                              ORDER BY created_at DESC LIMIT 1)
+        """,
         (question.id,),
     ).fetchone()
     return _ManifestQuestion(
