@@ -19,6 +19,8 @@ from consult.errors import ErrorCode
 from consult.llm import Completion, Prompt
 from consult.prompts import DATA_PREAMBLE, condense_prompt
 from consult.replies import (
+    MAX_DESCRIPTION,
+    MAX_LABEL,
     Assignment,
     CondensedTheme,
     ProposedTheme,
@@ -197,3 +199,47 @@ def test_a_condensation_reply_is_validated_in_code() -> None:
     for fault in FAULTS:
         with pytest.raises(ReplyError):
             parse_condensation(FakeLLM([fault]).complete(prompt), keys)
+
+
+def themes_text(**overrides: object) -> str:
+    theme: dict[str, object] = {"key": "SAFETY", "label": "Safety", "description": "Safety raised"}
+    theme.update(overrides)
+    return json.dumps({"themes": [theme]})
+
+
+def test_a_label_or_description_is_held_to_a_line_of_plain_text() -> None:
+    # Labels and descriptions come back from the model and go on to sit in
+    # every later prompt and on the sign-off screen, so on the way in they
+    # are one line each, of bounded length, with no control or format
+    # character (a newline could start an instruction; a bidi override
+    # could make the screen read backwards). Found by the security review.
+    assert MAX_LABEL == 80 and MAX_DESCRIPTION == 400
+    for text in ("two\nlines", "tab\tbed", "bidi\u202eflip", "zero\u200bwidth", "esc\x1b[0m"):
+        with pytest.raises(ReplyError) as refused:
+            parse_themes(Completion(text=themes_text(label=text)))
+        assert refused.value.reason is Reason.TEXT_MALFORMED
+        with pytest.raises(ReplyError) as refused:
+            parse_themes(Completion(text=themes_text(description=text)))
+        assert refused.value.reason is Reason.TEXT_MALFORMED
+    with pytest.raises(ReplyError) as refused:
+        parse_themes(Completion(text=themes_text(label="x" * (MAX_LABEL + 1))))
+    assert refused.value.reason is Reason.TEXT_TOO_LONG
+    with pytest.raises(ReplyError) as refused:
+        parse_themes(Completion(text=themes_text(description="x" * (MAX_DESCRIPTION + 1))))
+    assert refused.value.reason is Reason.TEXT_TOO_LONG
+    # The condensation shape gets the same checks.
+    condensed = json.dumps(
+        {
+            "themes": [
+                {"key": "SAFETY", "label": "Safe\nty", "description": "d", "merges": ["SAFETY_1"]}
+            ]
+        }
+    )
+    with pytest.raises(ReplyError) as refused:
+        parse_condensation(Completion(text=condensed), ["SAFETY_1"])
+    assert refused.value.reason is Reason.TEXT_MALFORMED
+    # An ordinary label and description pass, at the limit.
+    ok = parse_themes(
+        Completion(text=themes_text(label="l" * MAX_LABEL, description="d" * MAX_DESCRIPTION))
+    )
+    assert (len(ok[0].label), len(ok[0].description)) == (MAX_LABEL, MAX_DESCRIPTION)
