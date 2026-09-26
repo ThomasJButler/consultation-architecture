@@ -57,15 +57,17 @@ connection, identity columns in the vault with the pipeline role refused
 at the schema, both duplicate flags, a replay that writes nothing, and
 `consult ingest` taking the fixtures to a processing consultation, so the
 minimum proof-of-concept runs from a spreadsheet to a schema full of rows.
-In review: themes and sign-off (PR-07): the prompt contract from `docs/06`
+Merged: themes and sign-off (PR-07): the prompt contract from `docs/06`
 pinned as a test, model output held to the schema, the enum and the
 two-way id check in code, the `find_themes` job stage by stage with a
 checkpoint per batch and a proven takeover, condensation to a capped
 shortlist with lineage, a preview that gives every theme a count and
 quotes, the reviewer's edits under the version guard, and three commands
 that run a job with the fake, list a question's themes and sign them
-off. Planned: mapping, the worker and the reconciler (PR-08), queries and
-export (PR-09), final polish (PR-10). Deliberately not built: see above.
+off. Next: mapping, the worker and the reconciler (PR-08),
+with its plan checked against the merged code on 26 September; then
+queries and export (PR-09) and final polish (PR-10), run in order from
+`plans/final-run.md`. Deliberately not built: see above.
 
 ## How it was built
 
