@@ -40,6 +40,7 @@ class Refusal(StrEnum):
     TOO_MANY_COLUMNS = "too_many_columns"
     RESERVED_HEADER = "reserved_header"
     NUL_CHARACTER = "nul_character"
+    UNNAMED_COLUMN = "unnamed_column"
 
 
 @dataclass(frozen=True)
