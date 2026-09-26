@@ -51,7 +51,10 @@ def test_mapping_batches_ten_shuffled_answers_and_tags_under_the_fence(
     keys = [
         str(r["key"])
         for r in db.execute(
-            "SELECT key FROM theme WHERE theme_set_version_id = %s ORDER BY key",
+            """
+            SELECT key FROM theme
+             WHERE theme_set_version_id = %s AND NOT is_longlist ORDER BY key
+            """,
             (job.version_id,),
         ).fetchall()
     ]
