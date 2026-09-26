@@ -14,12 +14,15 @@ from uuid import UUID
 
 import psycopg
 import pytest
+from psycopg import sql
 from psycopg.rows import DictRow
 
 from consult.ingest import Ingested, IngestError, ingest
+from consult.stage import stage, staging_table
 from consult.tokenise import tokenise
 from consult.validate import Resolution, WarningKind
-from tests.pipeline import NOT_ANSWERED, fixture_rows, staged_fixture
+from tests.pipeline import NOT_ANSWERED, RESPONSES, fixture_rows, staged_fixture
+from tests.rows import make_consultation, make_department
 
 pytestmark = pytest.mark.db
 
@@ -433,3 +436,31 @@ def test_a_dash_in_the_id_column_is_no_id(db: psycopg.Connection[DictRow], tmp_p
     assert result.respondents == 240
     ids = external_ids(db, staged.consultation_id)
     assert (ids[2], ids[3], ids[4]) == (None, None, "R-0003")
+
+
+def test_ingest_refuses_the_wrong_state_nothing_configured_and_a_lost_table(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    # Found by the review: with nothing configured, ingest wrote 240 empty
+    # respondents, set processing and dropped the only copy of the answers.
+    department_id = make_department(db)
+    draft = make_consultation(db, department_id)
+    with pytest.raises(IngestError, match="draft"):
+        ingest(db, draft)
+
+    unconfigured = make_consultation(db, department_id)
+    stage(db, unconfigured, RESPONSES)
+    with pytest.raises(IngestError, match="no questions"):
+        ingest(db, unconfigured)
+    assert staging_tables(db) == [str(unconfigured)]
+    status = db.execute("SELECT status FROM consultation WHERE id = %s", (unconfigured,)).fetchone()
+    assert status == {"status": "staged"}
+
+    # A staged consultation whose table has gone: the production path
+    # re-stages from the upload (docs/02, correction 5); this
+    # proof-of-concept has no upload to re-stage from, so it says so
+    # instead of failing on the SELECT.
+    lost = staged_fixture(db)
+    db.execute(sql.SQL("DROP TABLE {}").format(staging_table(lost.consultation_id)))
+    with pytest.raises(IngestError, match="staging table"):
+        ingest(db, lost.consultation_id)
