@@ -47,7 +47,7 @@ from consult.jobs import LeaseLostError
 from consult.llm import GatewayError
 from consult.replies import ReplyError
 from consult.responses import Responses
-from consult.stage import stage
+from consult.stage import INGEST_ROLE, stage
 from consult.store import PIPELINE_ROLE, as_role
 from consult.validate import Report, validate
 from consult.worker import Outcome
@@ -203,7 +203,10 @@ def _ingest(args: argparse.Namespace, settings: Settings) -> int:
             return 1
         # The request that inserts a job dispatches it in the same breath
         # (docs/02, step 4): what the caps let through commits queued.
-        dispatch(conn, settings)
+        # Under the ingest role, which plan section 2 gives UPDATE on job
+        # for this (docs/06, section 2.4).
+        with as_role(conn, INGEST_ROLE):
+            dispatch(conn, settings)
         conn.commit()
     logs.log_event(
         logger,
@@ -240,9 +243,9 @@ def _run_job(args: argparse.Namespace, settings: Settings) -> int:
         # grants are the control on the worker's path (docs/06, section
         # 2.4): SET ROLE outlives the commits between batches, and RESET
         # ROLE follows the last one.
-        dispatch(conn, settings)
-        conn.commit()
         with as_role(conn, PIPELINE_ROLE):
+            dispatch(conn, settings)
+            conn.commit()
             lease = jobs.claim(conn, args.job, args.worker)
             if lease is None:
                 state = conn.execute("SELECT status FROM job WHERE id = %s", (args.job,)).fetchone()
@@ -413,7 +416,11 @@ def _sign_off(args: argparse.Namespace, settings: Settings) -> int:
             conn.rollback()
             print(f"question {args.question}: refused, not awaiting sign-off")
             return 1
-        dispatch(conn, settings)
+        # The proof-of-concept has no web-app role; the pipeline role's
+        # grants (SELECT on job and department, UPDATE on job) are what
+        # dispatch needs here too (docs/06, section 2.4).
+        with as_role(conn, PIPELINE_ROLE):
+            dispatch(conn, settings)
         conn.commit()
         # Read back rather than assumed: the caps can leave the job pending.
         status = conn.execute(
