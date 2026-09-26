@@ -4,16 +4,17 @@ reads it (CLAUDE.md, rule 9; THREAT_MODEL.md, row 3).
 The gateway asks for structured output; this module doesn't trust that it
 got it. A mapping reply has to be an object with an `assignments` list
 whose items carry exactly an integer `answer_id` and a list of one or
-more string `theme_keys`, every key from the enum the prompt carried,
-and every answer id the prompt sent has to come back exactly once with
-none added (docs/02, step 9's two-way check). A generation reply has to
-be an object with a `themes` list of key, label and description, keys
-well-formed and unique. A reply that fails is a ReplyError carrying
-job.error's code and a reason from a fixed list, never a word of the
-reply, because there is no column for one (docs/02, section 3.4). The
-checks here mirror the schemas in consult/prompts.py by hand rather than
-through a validator library, so the rules the model is told are the
-rules the code enforces.
+more string `theme_keys` (an empty list is allowed only to the preview,
+which counts and writes no tag), every key from the enum the prompt
+carried, and every answer id the prompt sent has to come back exactly
+once with none added (docs/02, step 9's two-way check). A generation
+reply has to be an object with a `themes` list of key, label and
+description, keys well-formed and unique. A reply that fails is a
+ReplyError carrying job.error's code and a reason from a fixed list,
+never a word of the reply, because there is no column for one (docs/02,
+section 3.4). The checks here mirror the schemas in consult/prompts.py
+by hand rather than through a validator library, so the rules the model
+is told are the rules the code enforces.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Literal
 
 from consult.errors import ErrorCode
 from consult.llm import Completion, Prompt
@@ -152,8 +154,18 @@ def _items(reply: dict[str, object], name: str, fields: tuple[str, ...]) -> list
     return checked
 
 
-def parse_assignments(completion: Completion, prompt: Prompt) -> tuple[Assignment, ...]:
-    """The mapping reply as typed assignments, or a ReplyError."""
+def parse_assignments(
+    completion: Completion,
+    prompt: Prompt,
+    *,
+    empty_keys: Literal["refuse", "allow"] = "refuse",
+) -> tuple[Assignment, ...]:
+    """The mapping reply as typed assignments, or a ReplyError.
+
+    `empty_keys="allow"` is the preview's: it only counts, so an answer
+    with no key adds to no theme and needs no retry (docs/02, step 6).
+    Mapping keeps the default, since there an answer with no key would
+    get no tag at all."""
     items = _items(_object(completion.text), "assignments", ("answer_id", "theme_keys"))
     assignments: list[Assignment] = []
     for item in items:
@@ -169,7 +181,7 @@ def parse_assignments(completion: Completion, prompt: Prompt) -> tuple[Assignmen
     # checkpoint and no tag, and never reach the retry at size one (docs/02,
     # step 9). The count is how many came back empty.
     unlabelled = sum(1 for assignment in assignments if not assignment.theme_keys)
-    if unlabelled:
+    if unlabelled and empty_keys == "refuse":
         raise ReplyError(Reason.NO_LABEL, unlabelled)
     # The two-way check: every id sent comes back exactly once, and nothing
     # else does. Which way it failed is the reason.
