@@ -82,20 +82,27 @@ _CUT_MARK = "..."
 
 
 class ExportError(Exception):
-    """`_cell`'s backstop. Escaping every `_XML_FORBIDDEN` match before
-    the cell is built should leave openpyxl's own `check_string` nothing
-    left to refuse; if some character it still refuses reaches
-    this anyway, `IllegalCharacterError` puts the whole value in its
-    message (openpyxl 3.1.5, cell.py lines 164-165), and THREAT_MODEL.md
-    section 2, line 2 forbids an open answer or a vault value at any
-    level, an exception message included. This carries a code and
-    nothing the value it failed on.
+    """An export refused, carrying a code and nothing else.
+
+    `CELL_VALUE_ILLEGAL` is `_cell`'s backstop. Escaping every
+    `_XML_FORBIDDEN` match before the cell is built should leave
+    openpyxl's own `check_string` nothing left to refuse; if some
+    character it still refuses reaches this anyway,
+    `IllegalCharacterError` puts the whole value in its message (openpyxl
+    3.1.5, cell.py lines 164-165), and THREAT_MODEL.md section 2, line 2
+    forbids an open answer or a vault value at any level, an exception
+    message included, so this carries nothing of the value it failed on.
+
+    `CONNECTION_BUSY` is `write_workbook`'s refusal of a connection with
+    a transaction open, which it has no business ending.
     """
 
-    code = "cell_value_illegal"
+    CELL_VALUE_ILLEGAL = "cell_value_illegal"
+    CONNECTION_BUSY = "connection_busy"
 
-    def __init__(self) -> None:
-        super().__init__(self.code)
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
 
 
 def _sheet_title(column_ref: str, used: set[str]) -> str:
@@ -179,7 +186,7 @@ def _cell(ws: WriteOnlyWorksheet, value: object) -> tuple[Cell, bool]:
     try:
         cell = WriteOnlyCell(ws, value=text)
     except IllegalCharacterError:
-        raise ExportError() from None
+        raise ExportError(ExportError.CELL_VALUE_ILLEGAL) from None
     cell.data_type = "s"
     return cell, cut
 
@@ -577,6 +584,15 @@ def _write_manifest(ws: WriteOnlyWorksheet, manifest: _Manifest, cut: int) -> No
         )
 
 
+def _in_transaction(conn: psycopg.Connection[DictRow]) -> bool:
+    """Anything but idle: a statement running, a transaction open or
+    failed, or the connection lost. A call rather than the comparison
+    inline, because the status changes under `write_workbook`'s own
+    statements and mypy would otherwise carry the first comparison's
+    answer into its `finally` and call the rollback unreachable."""
+    return conn.info.transaction_status != TransactionStatus.IDLE
+
+
 @dataclass(frozen=True)
 class Exported:
     respondents: int
@@ -599,19 +615,23 @@ def write_workbook(
     workbook across two states of the database, the summary sheet
     disagreeing with the Responses sheet it's meant to total. psycopg
     only applies `isolation_level` and `read_only` to the next
-    transaction, and only while the connection is idle, hence the commit
-    before either is set and the reset of both in `finally`, so `conn`
-    comes back to its caller at its own isolation level, not this
-    function's. `exported_at` is read back as that transaction's own
-    `now()` (`_snapshot_now`) rather than Python's clock, for the same
-    reason: it names the instant the snapshot was taken.
+    transaction, and only while the connection is idle, so a connection
+    with a transaction open is refused (`ExportError.CONNECTION_BUSY`)
+    rather than committed: those writes are the caller's to commit or
+    roll back. Both settings are saved before they're set and put back
+    in `finally`, so `conn` comes back to its caller at its own
+    isolation level, not this function's. `exported_at` is read back as
+    that transaction's own `now()` (`_snapshot_now`) rather than Python's
+    clock, for the same reason: it names the instant the snapshot was
+    taken.
 
     The reads run as `store.EXPORT_ROLE` (docs/06, section 2.4 as
     corrected), the one role with a grant on the vault and none on the
     pipeline's writes.
     """
-    if conn.info.transaction_status != TransactionStatus.IDLE:
-        conn.commit()
+    if _in_transaction(conn):
+        raise ExportError(ExportError.CONNECTION_BUSY)
+    isolation_level, read_only = conn.isolation_level, conn.read_only
     conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
     conn.read_only = True
     try:
@@ -653,10 +673,10 @@ def write_workbook(
         # is what releases the snapshot.
         conn.commit()
     finally:
-        if conn.info.transaction_status != TransactionStatus.IDLE:
+        if _in_transaction(conn):
             conn.rollback()
-        conn.isolation_level = None
-        conn.read_only = None
+        conn.isolation_level = isolation_level
+        conn.read_only = read_only
 
     manifest = _Manifest(
         consultation_id=consultation_id,
