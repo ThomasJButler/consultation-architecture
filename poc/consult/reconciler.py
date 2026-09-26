@@ -9,9 +9,10 @@ conditional claim is still what decides who runs a job (docs/02, step 5).
 
 Lock order is `transitions.fail_job`'s: the consultation row, then the
 job row, which is the order a worker's finishing transaction takes them
-in too. So a statement never holds a job row lock when it calls
-`fail_job`: its bulk UPDATE commits first, and each job at the retry
-budget is then failed in a transaction of its own. The worker keeps the
+in too. So a statement never holds a job row lock when it asks for a
+consultation's: its bulk UPDATE commits first, and each job at the retry
+budget is then failed in a transaction of its own that locks the
+consultation before the job (`_fail_each`). The worker keeps the
 same order by committing before its finish (the runners' `before_finish`,
 which `worker._run` and `cli._run_job` pass as `conn.commit`): a takeover
 with nothing left to send has only a heartbeat to its name, and that
@@ -38,6 +39,7 @@ import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import LiteralString
 
 import psycopg
 from psycopg.rows import DictRow
@@ -50,11 +52,26 @@ from consult.worker import MAX_ATTEMPTS
 
 logger = logging.getLogger(__name__)
 
-# The states fail_job fails a job from; anything else has moved on since
-# the scan that found it (see _fail_each).
-_FAILABLE = frozenset({"queued", "running", "failed_retryable"})
 # ADR-006's relay query takes twenty rows at a time.
 RELAY_LIMIT = 20
+
+# Each spent scan's own test, again for the one job `_fail_each` is about
+# to fail, under the consultation's lock (`recover` and `retry`).
+_STILL_STALE = """
+    SELECT id FROM job
+     WHERE id = %(job_id)s
+       AND status IN ('queued', 'running') AND attempts >= %(max_attempts)s
+       AND CASE status WHEN 'queued' THEN sent_at ELSE heartbeat_at END
+           < now() - %(stale_after)s
+       FOR UPDATE SKIP LOCKED
+"""
+_STILL_DUE = """
+    SELECT id FROM job
+     WHERE id = %(job_id)s
+       AND status = 'failed_retryable' AND next_attempt_at <= now()
+       AND attempts >= %(max_attempts)s
+       FOR UPDATE SKIP LOCKED
+"""
 
 
 @dataclass(frozen=True)
@@ -174,7 +191,7 @@ def recover(
         """,
         params,
     ).fetchall()
-    return resent, _fail_each(conn, spent)
+    return resent, _fail_each(conn, spent, _STILL_STALE, params)
 
 
 def retry(
@@ -212,7 +229,7 @@ def retry(
         """,
         params,
     ).fetchall()
-    return retried, _fail_each(conn, spent)
+    return retried, _fail_each(conn, spent, _STILL_DUE, params)
 
 
 def rerun_fan_ins(conn: psycopg.Connection[DictRow]) -> int:
@@ -295,22 +312,33 @@ def relay(
     return sent
 
 
-def _fail_each(conn: psycopg.Connection[DictRow], jobs: Sequence[DictRow]) -> int:
+def _fail_each(
+    conn: psycopg.Connection[DictRow],
+    jobs: Sequence[DictRow],
+    recheck: LiteralString,
+    params: dict[str, object],
+) -> int:
     """`fail_job` on each scanned job, each in a transaction of its own and
     committed; returns how many it failed.
 
-    The job's status is read again under the consultation's lock, because
-    the job may have moved since the scan: a fifth attempt that finished
-    after all, or another reconciler that failed it first. Neither can
-    land between that read and `fail_job`, since a job only succeeds in
-    `finish_find_themes` or `finish_map_themes`, under the same lock, and
-    `fail_job` takes it too.
+    The scan read no lock, so under the consultation's lock the job is
+    read again with the scan's own test, `recheck`, FOR UPDATE SKIP
+    LOCKED, and left when no row comes back. That covers a job that has
+    moved on since the scan (a fifth attempt that finished, another
+    reconciler that failed it first), one whose worker has committed a
+    heartbeat since, and one a worker holds right now inside its batch
+    transaction. The last two are live leases, and docs/02 section 5 fails
+    only "running with a stale heartbeat"; waiting on the held row would
+    also keep the consultation locked, and every statement after this one
+    waiting, for as long as that worker pauses. The row, once locked here,
+    can't move before `fail_job` writes it, and the order is still the
+    consultation, then the job (module docstring).
     """
     failed = 0
     for job in jobs:
         transitions.lock_consultation(conn, job["consultation_id"])
-        current = conn.execute("SELECT status FROM job WHERE id = %s", (job["id"],)).fetchone()
-        if current is not None and current["status"] in _FAILABLE:
+        still = conn.execute(recheck, {**params, "job_id": job["id"]}).fetchone()
+        if still is not None:
             transitions.fail_job(conn, job["id"])
             failed += 1
         conn.commit()
