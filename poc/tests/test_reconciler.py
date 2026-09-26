@@ -271,6 +271,46 @@ def test_recover_passes_over_a_job_row_a_paused_worker_holds(
     assert again[quiet] == after[quiet]
 
 
+def test_the_spent_scans_leave_a_job_of_a_kind_fail_job_cannot_fail(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    # fail_job has a failed edge for find_themes and map_themes and no
+    # other kind (docs/02, section 6), and raises for the rest. A stage job
+    # at five attempts with a quiet lease, which nothing inserts yet (plan
+    # section 0), would raise inside every pass and keep statements 3 to 5
+    # from ever running again. The pass leaves it where it is, fails the
+    # map_themes job beside it and returns. A question still finding keeps
+    # fan-in 1 shut, so the failure moves nothing but its own edge.
+    consultation_id = make_consultation(db, make_department(db), status="processing")
+    q_spent = make_open_question(db, consultation_id, "o_1", ordinal=1, status="assigning_themes")
+    make_open_question(db, consultation_id, "o_2", ordinal=2)
+    stage = make_queued_job(db, consultation_id, kind="stage", status="running")
+    _age(db, stage, attempts=RETRY_BUDGET, sent_ago=SENT_BEFORE_THE_CLAIM, heartbeat_ago=STALE)
+    spent = make_queued_job(db, consultation_id, q_spent, kind="map_themes")
+    assert claim(db, spent, "w-dead") is not None
+    _age(db, spent, attempts=RETRY_BUDGET, sent_ago=SENT_BEFORE_THE_CLAIM, heartbeat_ago=STALE)
+    db.commit()
+    before = _jobs(db, consultation_id)
+
+    assert reconciler.recover(db) == (0, 1)
+
+    after = _jobs(db, consultation_id)
+    assert after[stage] == before[stage]
+    assert after[spent] == {**before[spent], "status": "failed"}
+    assert _questions(db, consultation_id)[q_spent] == "map_failed"
+
+    # Statement 3's scan is the same shape: the stage job failing on its
+    # fifth attempt and due is left too, and the pass returns.
+    db.execute(
+        "UPDATE job SET status = 'failed_retryable', next_attempt_at = now() + %s WHERE id = %s",
+        (DUE, stage),
+    )
+    db.commit()
+    parked = _jobs(db, consultation_id)[stage]
+    assert reconciler.retry(db) == (0, 0)
+    assert _jobs(db, consultation_id)[stage] == parked
+
+
 def test_retry_returns_a_due_failure_to_pending_and_fails_the_fifth(
     db: psycopg.Connection[DictRow],
 ) -> None:
