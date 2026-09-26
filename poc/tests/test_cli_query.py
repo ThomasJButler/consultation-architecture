@@ -288,3 +288,30 @@ def test_a_filter_naming_an_unknown_column_or_question_is_refused(
     out = capsys.readouterr().out
     assert code == 2
     assert out == "refused: unknown_question\n"
+
+
+def test_the_query_line_says_what_it_hides(
+    db: psycopg.Connection[DictRow],
+    db_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ingested(db, db_settings)
+    reason_row = db.execute("SELECT id FROM question WHERE column_ref = 'o_reason'").fetchone()
+    assert reason_row is not None
+    reason_id = reason_row["id"]
+    capsys.readouterr()
+
+    # Hand count test_query_db.py's own test_duplicates_are_hidden_unless_asked_for
+    # pins: 74 with duplicates hidden, 221 with them shown, so the default
+    # scope hides 147.
+    assert main(["query", str(reason_id)], settings=db_settings) == 0
+    out = capsys.readouterr().out
+    assert (
+        f"question {reason_id}: of 74 respondents who answered "
+        "(147 duplicate answers hidden; add --filter with=duplicates to count them)"
+    ) in out
+
+    assert main(["query", str(reason_id), "--filter", "with=duplicates"], settings=db_settings) == 0
+    out = capsys.readouterr().out
+    assert f"question {reason_id}: of 221 respondents who answered" in out
+    assert "hidden" not in out
