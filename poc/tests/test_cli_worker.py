@@ -88,6 +88,21 @@ def test_the_worker_and_reconcile_commands_run_the_fixtures_to_ready(
 
     # Every distinct, non-blank answer tagged once against v2, and every
     # exact duplicate carrying its canonical's tag (docs/02, step 9).
+    canonical = db.execute(
+        """
+        SELECT id FROM answer
+         WHERE question_id = ANY(%s) AND duplicate_of_answer_id IS NULL AND NOT is_blank
+        """,
+        (question_ids,),
+    ).fetchall()
+    duplicates = db.execute(
+        """
+        SELECT id, duplicate_of_answer_id FROM answer
+         WHERE question_id = ANY(%s) AND duplicate_of_answer_id IS NOT NULL
+        """,
+        (question_ids,),
+    ).fetchall()
+    assert duplicates  # the campaign proforma test_ingest.py flags
     tags = db.execute(
         """
         SELECT t.answer_id, t.theme_id, v.version_no
@@ -103,22 +118,8 @@ def test_the_worker_and_reconcile_commands_run_the_fixtures_to_ready(
     for row in tags:
         by_answer.setdefault(row["answer_id"], set()).add(row["theme_id"])
     assert all(len(keys) == 1 for keys in by_answer.values())
-    canonical = db.execute(
-        """
-        SELECT id FROM answer
-         WHERE question_id = ANY(%s) AND duplicate_of_answer_id IS NULL AND NOT is_blank
-        """,
-        (question_ids,),
-    ).fetchall()
-    assert {row["id"] for row in canonical} == set(by_answer)
-    duplicates = db.execute(
-        """
-        SELECT id, duplicate_of_answer_id FROM answer
-         WHERE question_id = ANY(%s) AND duplicate_of_answer_id IS NOT NULL
-        """,
-        (question_ids,),
-    ).fetchall()
-    assert duplicates  # the campaign proforma test_ingest.py flags
+    # Tagged: every canonical answer, and every duplicate, nothing else.
+    assert set(by_answer) == {row["id"] for row in canonical} | {row["id"] for row in duplicates}
     for row in duplicates:
         assert by_answer[row["id"]] == by_answer[row["duplicate_of_answer_id"]]
 
