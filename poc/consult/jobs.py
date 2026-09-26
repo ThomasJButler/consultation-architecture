@@ -212,3 +212,20 @@ def succeed(conn: psycopg.Connection[DictRow], lease: Lease) -> None:
         """,
         {},
     )
+
+
+def queue(conn: psycopg.Connection[DictRow], job_id: UUID, *, model_alias: str, seed: int) -> bool:
+    """pending to queued, with the alias and the seed the runner reads. A
+    stand-in for dispatch: docs/02 step 4 dispatches under the caps and
+    sends a message, and PR-08 builds that; until then a command queues the
+    one job it is about to run. False when the job isn't pending."""
+    moved = conn.execute(
+        """
+        UPDATE job
+           SET status = 'queued', sent_at = now(), model_alias = %(alias)s,
+               params = params || jsonb_build_object('seed', %(seed)s::int)
+         WHERE id = %(job_id)s AND status = 'pending'
+        """,
+        {"job_id": job_id, "alias": model_alias, "seed": seed},
+    ).rowcount
+    return moved == 1

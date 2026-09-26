@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import secrets
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -23,12 +24,15 @@ from uuid import UUID
 import psycopg
 from psycopg.rows import DictRow
 
-from consult import config, logs, report, store
+from consult import config, jobs, logs, report, store, themes
 from consult.config import Settings
 from consult.configure import ConfigureError, configure, defaults
 from consult.definition import Definition, DefinitionError, read_definition
+from consult.fake_model import OfflineModel
 from consult.ingest import IngestError, ingest
 from consult.inputs import InputError
+from consult.jobs import LeaseLostError
+from consult.replies import ReplyError
 from consult.responses import Responses
 from consult.stage import stage
 from consult.validate import Report, validate
@@ -56,6 +60,10 @@ def build_parser() -> argparse.ArgumentParser:
     load.add_argument("--definition", type=Path, required=True, help="the definition workbook")
     load.add_argument("--name", required=True, help="the consultation's name")
     load.add_argument("--department", required=True, help="the department's name, created if new")
+    run = commands.add_parser("run-job", help="claim one find_themes job and run it to the end")
+    run.add_argument("job", type=UUID, help="the job id")
+    run.add_argument("--worker", required=True, help="this worker's name, for the lease")
+    run.add_argument("--model", choices=["fake"], default="fake", help="the model: only the fake")
     return parser
 
 
@@ -172,6 +180,83 @@ def _ingest(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def _run_job(args: argparse.Namespace, settings: Settings) -> int:
+    """One find_themes job, pending to succeeded, committing after every
+    batch so a crash between two leaves checkpoints a takeover can resume
+    from (ADR-002). The queue step stands in for dispatch (PR-08)."""
+    started = time.monotonic()
+    llm = OfflineModel()
+    with store.connect(settings) as conn:
+        jobs.queue(conn, args.job, model_alias=args.model, seed=secrets.randbelow(2**31))
+        conn.commit()
+        lease = jobs.claim(conn, args.job, args.worker)
+        if lease is None:
+            state = conn.execute("SELECT status FROM job WHERE id = %s", (args.job,)).fetchone()
+            print(f"job {args.job}: not claimable ({state['status'] if state else 'unknown'})")
+            return 1
+        conn.commit()
+        try:
+            themes.run_find_themes(conn, llm, lease, after_batch=lambda _batch_no: conn.commit())
+        except ReplyError as exc:
+            # The failure is a code and a request id, never the reply
+            # (THREAT_MODEL.md, section 2); whether it retries is the
+            # reconciler's call (PR-08).
+            conn.rollback()
+            jobs.record_failure(conn, lease, exc.code, provider_request_id=None)
+            conn.commit()
+            print(f"job {args.job}: failed ({exc.code.value}: {exc.reason.value})")
+            return 1
+        except LeaseLostError as exc:
+            conn.rollback()
+            print(f"job {args.job}: {exc.code.value}")
+            return 1
+        conn.commit()
+        summary = conn.execute(
+            """
+            SELECT j.question_id, q.status AS question, c.status AS consultation,
+                   (SELECT string_agg(stage || ' ' || n, ', ' ORDER BY first)
+                      FROM (SELECT stage, count(*) AS n, min(batch_no) AS first
+                              FROM job_batch WHERE job_id = j.id GROUP BY stage) s) AS stages,
+                   (SELECT count(*) FROM theme t JOIN theme_set_version v ON v.id = t.theme_set_version_id
+                     WHERE v.question_id = q.id AND NOT t.is_longlist) AS shortlist,
+                   (SELECT count(*) FROM theme t JOIN theme_set_version v ON v.id = t.theme_set_version_id
+                     WHERE v.question_id = q.id AND t.is_longlist) AS longlist
+              FROM job j JOIN question q ON q.id = j.question_id
+              JOIN consultation c ON c.id = j.consultation_id
+             WHERE j.id = %s
+            """,
+            (args.job,),
+        ).fetchone()
+    if summary is None:
+        raise LookupError(f"job {args.job} vanished")
+    counts: dict[str, int] = {}
+    for part in (summary["stages"] or "").split(", "):
+        stage_name, _, count = part.rpartition(" ")
+        if stage_name:
+            counts[stage_name] = int(count)
+    logs.log_event(
+        logger,
+        "find_themes_run",
+        job_id=args.job,
+        question_id=summary["question_id"],
+        status=summary["question"],
+        generate_count=counts.get("generate", 0),
+        condense_count=counts.get("condense", 0),
+        preview_count=counts.get("preview", 0),
+        shortlist_count=summary["shortlist"],
+        longlist_count=summary["longlist"],
+        model_call_count=len(llm.prompts),
+        duration_ms=round((time.monotonic() - started) * 1000),
+    )
+    batches = ", ".join(f"{n} {stage}" for stage, n in counts.items())
+    print(
+        f"job {args.job}: question {summary['question_id']} {summary['question']}; "
+        f"{batches} batches; shortlist {summary['shortlist']}, "
+        f"longlist {summary['longlist']}; consultation {summary['consultation']}"
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None, *, settings: Settings | None = None) -> int:
     # Here and not under __main__: the console script pyproject.toml
     # declares calls main directly, and the formatter is the control on the
@@ -190,6 +275,8 @@ def main(argv: Sequence[str] | None = None, *, settings: Settings | None = None)
         return 0
     if args.command == "ingest":
         return _ingest(args, resolved)
+    if args.command == "run-job":
+        return _run_job(args, resolved)
     return _validate(args, resolved)
 
 
