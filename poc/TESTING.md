@@ -107,8 +107,12 @@ pull requests add that take more than a few seconds. `pytest.ini` sets
 
 The four mechanics the design rests on (`docs/02`, section 13) are all
 proved here, each by a named test: the fan-in transaction
-(`test_fan_in_race.py`), lease takeover with a fence (`test_jobs.py`),
-idempotent tag inserts (`test_tags.py`), and the indexed filter query
+(`test_fan_in_race.py::test_the_fan_in_flips_exactly_once_under_twenty_threaded_finishers`),
+lease takeover with a fence
+(`test_jobs.py::test_a_stale_lease_can_be_taken_over_and_the_fence_moves_on`),
+idempotent tag inserts
+(`test_tags.py::test_tag_inserts_are_idempotent_and_a_retracted_tag_stays_retracted`),
+and the indexed filter query
 (`test_plan_benchmark.py::test_the_filter_plan_uses_both_indexes_at_twenty_thousand`).
 The vault refusal for the pipeline role, promised in `docs/06` section
 2.4, is `test_vault.py`. PR-04's parsing and validator tests are all
