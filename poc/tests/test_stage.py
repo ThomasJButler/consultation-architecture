@@ -18,7 +18,11 @@ import pytest
 from psycopg import sql
 from psycopg.rows import DictRow
 
+from consult.definition import Definition
+from consult.inputs import Caps, InputError
+from consult.responses import Responses
 from consult.stage import StageError, stage, staging_table
+from consult.validate import validate
 from tests.rows import make_consultation, make_department
 
 pytestmark = pytest.mark.db
@@ -112,3 +116,58 @@ def test_stage_refuses_a_repeated_or_blank_header(
         "SELECT count(*) AS n FROM pg_tables WHERE schemaname = 'staging'"
     ).fetchone()
     assert tables == {"n": 0}
+
+
+def test_the_validator_refuses_what_the_stager_cannot_hold(
+    db: psycopg.Connection[DictRow], tmp_path: Path
+) -> None:
+    # Four files the header checks pass and a staging table can't hold: a
+    # header named row_no, stage's own column; a NUL in a cell, which
+    # Postgres text can't store; a NUL in two headers, where libpq ends the
+    # identifier, so both would name one column "notes"; and 1,600
+    # columns, one more than a table takes beside row_no. validate()
+    # refuses each by a code and a count, never the value, and stage()
+    # refuses the same if a caller hands it the file unvalidated. The
+    # reader's width cap is raised to Excel's 16,384, as CONSULT_MAX_COLUMNS
+    # can raise it, so the refusal is the stager's limit and not the reader's.
+    wide = Caps(max_columns=16_384)
+    reserved = tmp_path / "reserved.csv"
+    reserved.write_text("respondent_ref,row_no,o_reason\nR-1,7,why\n", encoding="utf-8")
+    nul_cell = tmp_path / "nul-cell.csv"
+    nul_cell.write_text("respondent_ref,o_reason\nR-1,fine\nR-2,hid\x00den\n", encoding="utf-8")
+    nul_header = tmp_path / "nul-header.csv"
+    nul_header.write_text("notes\x00x,notes\x00y\nhidden,hidden\n", encoding="utf-8")
+    columns = tmp_path / "columns.csv"
+    columns.write_text(
+        ",".join(f"h{n}" for n in range(1, 1_601)) + "\n" + ",".join(["hidden"] * 1_600) + "\n",
+        encoding="utf-8",
+    )
+    # The code and the count as the command line prints them: the header's
+    # position, the row the NUL is on (the header is row 1), the width.
+    cases = [
+        (reserved, "reserved_header (2)"),
+        (nul_cell, "nul_character (3)"),
+        (nul_header, "nul_character (1)"),
+        (columns, "too_many_columns (1600)"),
+    ]
+    department_id = make_department(db)
+
+    for path, refusal in cases:
+        with pytest.raises(InputError) as refused:
+            validate(Definition(demographic=(), closed=(), open=()), Responses(path, wide))
+        assert str(refused.value) == refusal, path.name
+
+        consultation_id = make_consultation(db, department_id)
+        with pytest.raises(InputError) as refused, db.transaction():
+            stage(db, consultation_id, path, wide)
+        assert str(refused.value) == refusal, path.name
+        # What the caller's rollback leaves: the consultation where it was
+        # and no table holding the file.
+        status = db.execute(
+            "SELECT status FROM consultation WHERE id = %s", (consultation_id,)
+        ).fetchone()
+        assert status == {"status": "draft"}
+        tables = db.execute(
+            "SELECT count(*) AS n FROM pg_tables WHERE schemaname = 'staging'"
+        ).fetchone()
+        assert tables == {"n": 0}
