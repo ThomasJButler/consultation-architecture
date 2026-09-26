@@ -165,7 +165,10 @@ def test_the_workbook_has_text_cells_every_sheet_and_the_manifest(
         department_id=question_department["department_id"],
     )
     summary = workbook["o_reason summary"]
-    summary_rows = {row[0].value: row for row in summary.iter_rows(min_row=2)}
+    # The table's own rows, header excluded, and nothing the sheet says
+    # after them.
+    table_rows = summary.iter_rows(min_row=2, max_row=1 + len(expected.rows))
+    summary_rows = {row[0].value: row for row in table_rows}
     assert set(summary_rows) == {c.key for c in expected.rows}
     for count in expected.rows:
         row = summary_rows[count.key]
