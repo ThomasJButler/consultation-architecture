@@ -20,13 +20,16 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
 from consult.errors import ErrorCode
 from consult.llm import Completion, Prompt
-from consult.prompts import KEY_PATTERN
 
+# The shape a theme key must have: an enum value, not prose (docs/02, step
+# 9). consult/prompts.py puts the same pattern in the schemas it sends.
+KEY_PATTERN = r"^[A-Z][A-Z0-9_]{1,39}$"
 _KEY = re.compile(KEY_PATTERN)
 
 
@@ -40,6 +43,7 @@ class Reason(StrEnum):
     LABEL_OUTSIDE_ENUM = "label_outside_enum"
     KEY_MALFORMED = "key_malformed"
     KEY_REPEATED = "key_repeated"
+    KEY_UNKNOWN = "key_unknown"
     NO_THEMES = "no_themes"
 
 
@@ -66,6 +70,14 @@ class ProposedTheme:
     key: str
     label: str
     description: str
+
+
+@dataclass(frozen=True)
+class CondensedTheme:
+    key: str
+    label: str
+    description: str
+    merges: tuple[str, ...]
 
 
 def _object(text: str) -> dict[str, object]:
@@ -144,4 +156,42 @@ def parse_themes(completion: Completion) -> tuple[ProposedTheme, ...]:
     repeated = sum(count - 1 for count in Counter(t.key for t in themes).values() if count > 1)
     if repeated:
         raise ReplyError(Reason.KEY_REPEATED, repeated)
+    return tuple(themes)
+
+
+def parse_condensation(
+    completion: Completion, candidate_keys: Sequence[str]
+) -> tuple[CondensedTheme, ...]:
+    """The condensation reply as typed themes, each naming the candidates it
+    merges: every merged key one the prompt sent, no candidate folded
+    twice, and the keys as well-formed and unique as a generation's."""
+    items = _items(_object(completion.text), "themes", ("key", "label", "description", "merges"))
+    if not items:
+        raise ReplyError(Reason.NO_THEMES)
+    known = set(candidate_keys)
+    themes: list[CondensedTheme] = []
+    for item in items:
+        key, label, description, merges = (
+            item["key"],
+            item["label"],
+            item["description"],
+            item["merges"],
+        )
+        if not (isinstance(key, str) and isinstance(label, str) and isinstance(description, str)):
+            raise ReplyError(Reason.WRONG_SHAPE, len(items))
+        if not label or not isinstance(merges, list) or not all(isinstance(m, str) for m in merges):
+            raise ReplyError(Reason.WRONG_SHAPE, len(items))
+        if not _KEY.fullmatch(key):
+            raise ReplyError(Reason.KEY_MALFORMED, len(items))
+        themes.append(CondensedTheme(key, label, description, tuple(dict.fromkeys(merges))))
+    repeated = sum(count - 1 for count in Counter(t.key for t in themes).values() if count > 1)
+    if repeated:
+        raise ReplyError(Reason.KEY_REPEATED, repeated)
+    merged = Counter(m for t in themes for m in t.merges)
+    unknown = [m for m in merged if m not in known]
+    if unknown:
+        raise ReplyError(Reason.KEY_UNKNOWN, len(unknown))
+    folded_twice = sum(count - 1 for count in merged.values() if count > 1)
+    if folded_twice:
+        raise ReplyError(Reason.KEY_REPEATED, folded_twice)
     return tuple(themes)

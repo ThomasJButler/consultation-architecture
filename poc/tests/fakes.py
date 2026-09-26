@@ -13,8 +13,10 @@ call and gets `{"assignments": [{"answer_id": <int>, "theme_keys": [<key>,
 ...]}, ...]}`, every id sent back once, every key from the enum. A prompt
 with answer ids and no theme keys is a generation call and gets `{"themes":
 [{"key", "label", "description"}, ...]}`, three themes named from the
-batch's first id so condensation has something to merge. Each fault is
-built from the prompt it's answering so the fault is exact.
+batch's first id so condensation has something to merge. A prompt with
+neither is a condensation call and gets the candidates in its data folded
+by key stem, each with the keys it merges. Each fault is built from the
+prompt it's answering so the fault is exact.
 """
 
 from __future__ import annotations
@@ -74,7 +76,43 @@ def generation_reply_text(prompt: Prompt, fault: Fault) -> str:
     return text
 
 
+def good_condensation(prompt: Prompt) -> list[dict[str, object]]:
+    """The candidates in the prompt's data folded by key stem: SAFETY_1 and
+    SAFETY_51 become SAFETY. Grouping is the mechanic under proof in the
+    condensation tests, not the judgement, so a stem is enough."""
+    groups: dict[str, list[str]] = {}
+    descriptions: dict[str, str] = {}
+    for candidate in json.loads(prompt.user):
+        stem = str(candidate["key"]).rsplit("_", 1)[0]
+        groups.setdefault(stem, []).append(str(candidate["key"]))
+        descriptions.setdefault(stem, str(candidate["description"]))
+    return [
+        {"key": stem, "label": stem.capitalize(), "description": descriptions[stem], "merges": keys}
+        for stem, keys in groups.items()
+    ]
+
+
+def condensation_reply_text(prompt: Prompt, fault: Fault) -> str:
+    themes = good_condensation(prompt)
+    if fault is Fault.OUT_OF_ENUM_LABEL:
+        themes[0]["key"] = "not a key"
+    elif fault is Fault.DROPPED_ID:
+        del themes[0]["label"]
+    elif fault is Fault.EXTRA_ID:
+        themes[0]["confidence"] = 0.9
+    elif fault is Fault.DUPLICATED_ID:
+        themes.append(dict(themes[0]))
+    elif fault is Fault.PROSE:
+        return "Certainly! Here are the themes I found in the responses you sent."
+    text = json.dumps({"themes": themes})
+    if fault is Fault.MALFORMED_JSON:
+        return text[:-2]
+    return text
+
+
 def reply_text(prompt: Prompt, fault: Fault) -> str:
+    if not prompt.theme_keys and not prompt.answer_ids:
+        return condensation_reply_text(prompt, fault)
     if not prompt.theme_keys:
         return generation_reply_text(prompt, fault)
     assignments = good_assignments(prompt)
