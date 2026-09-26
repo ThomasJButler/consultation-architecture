@@ -428,9 +428,6 @@ open ~/Desktop/consult.xlsx                # the answer starting "=" reads '=1+1
 `make test-slow`), and its audit step needs the network; offline, run
 `make lint type test test-slow` instead.
 
-```bash
-```
-
 What to look for:
 - No answer text anywhere in the terminal. Ids, counts, codes and
   durations only.
