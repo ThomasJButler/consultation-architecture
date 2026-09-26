@@ -414,6 +414,11 @@ its review and recorded here rather than rewritten into the merged text.
    its next checkpoint while an ingest ran (the review of 26 September
    2026, finding 21, measured on PostgreSQL 16.13 with a 2 s lock timeout).
    `consult ingest` now runs `INSERT ... ON CONFLICT (name) DO NOTHING
-   RETURNING id` and reads the id by name when nothing comes back; two runs
-   racing on a new name still land on one row, and no row lock is kept
-   (`poc/tests/test_cli_ingest.py`).
+   RETURNING id` and reads the id by name when nothing comes back.
+   `poc/tests/test_cli_ingest.py` pins that two ingests naming one
+   department, run one after the other, land on one row, and that a
+   worker's checkpoint no longer waits on a running ingest. The race
+   itself has no pin: it rests on `ON CONFLICT DO NOTHING` waiting for a
+   concurrent uncommitted insert of the same name and the read that
+   follows seeing the row once it commits (PostgreSQL 17 manual, INSERT,
+   ON CONFLICT clause).
