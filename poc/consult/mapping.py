@@ -14,6 +14,7 @@ that lock.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from uuid import UUID
@@ -21,16 +22,18 @@ from uuid import UUID
 import psycopg
 from psycopg.rows import DictRow
 
-from consult import jobs, themes
+from consult import jobs, logs, themes
 from consult.jobs import Lease
-from consult.llm import LLM
-from consult.prompts import map_themes_prompt
-from consult.replies import parse_assignments
+from consult.llm import LLM, Completion, Prompt
+from consult.prompts import PromptAnswer, map_themes_prompt
+from consult.replies import Assignment, Reason, ReplyError, parse_assignments
 from consult.tags import Tag, insert_tags
+
+logger = logging.getLogger(__name__)
 
 # docs/02, step 9: batches of ten, a blast-radius decision. An injected
 # instruction the model obeys can spoil at most ten answers this way, and
-# the retry at size one (the next chunk) isolates the one that carried it.
+# the retry at size one in `assign` isolates the one that carried it.
 MAP_BATCH_SIZE = 10
 
 
@@ -120,6 +123,96 @@ def _shortlist(conn: psycopg.Connection[DictRow], version_id: UUID) -> list[Dict
     ).fetchall()
 
 
+def _checked(completion: Completion, prompt: Prompt) -> tuple[Assignment, ...] | Reason:
+    """The reply's assignments, or the reason the check refused it. Only
+    the reason leaves, so no write after a refusal can chain to the reply
+    (a JSONDecodeError carries the whole document on `.doc`)."""
+    try:
+        return parse_assignments(completion, prompt)
+    except ReplyError as exc:
+        return exc.reason
+
+
+def _send(
+    conn: psycopg.Connection[DictRow],
+    llm: LLM,
+    lease: Lease,
+    job: MapThemesJob,
+    shortlist: Sequence[DictRow],
+    related: str | None,
+    answers: Sequence[PromptAnswer],
+    after_batch: Callable[[int], None] | None,
+) -> bool:
+    """One call for `answers` and, in one transaction, what it writes: the
+    tags (fenced; source 'ai', this job and batch), the duplicates' copies
+    and a done checkpoint, or for a lone answer the check refuses, an
+    unprocessable checkpoint naming it and no tag (docs/02, step 9). The
+    refusal's code goes to the log and nowhere else. False, with nothing
+    written, when the check refuses more than one answer: the caller's cue
+    to retry them one at a time."""
+    prompt = map_themes_prompt(
+        model_alias=job.model_alias,
+        question_text=job.question_text,
+        related_answer=related,
+        themes=[(str(r["key"]), str(r["label"]), r["description"]) for r in shortlist],
+        answers=answers,
+    )
+    completion = llm.complete(prompt)
+    checked = _checked(completion, prompt)
+    answer_ids = [answer.id for answer in answers]
+    if isinstance(checked, Reason):
+        # A refused batch of more than one gets no checkpoint of its own, so
+        # this line is the one place its trace id is kept.
+        logs.log_event(
+            logger,
+            "map_reply_refused",
+            level=logging.WARNING,
+            job_id=lease.job_id,
+            answer_count=len(answer_ids),
+            error_code=ReplyError.code,
+            reason_code=checked,
+            trace_id=completion.trace_id,
+        )
+        if len(answer_ids) > 1:
+            return False
+        batch_no = jobs.next_batch_no(conn, lease.job_id)
+        jobs.checkpoint(
+            conn,
+            lease,
+            batch_no=batch_no,
+            stage="map",
+            answer_ids=answer_ids,
+            status="unprocessable",
+            trace_id=completion.trace_id,
+            tokens_in=completion.tokens_in,
+            tokens_out=completion.tokens_out,
+        )
+    else:
+        theme_ids = {str(r["key"]): r["id"] for r in shortlist}
+        canonical_keys = {assignment.answer_id: assignment.theme_keys for assignment in checked}
+        canonical = [
+            Tag(assignment.answer_id, theme_ids[key])
+            for assignment in checked
+            for key in assignment.theme_keys
+        ]
+        duplicates = _duplicate_tags(conn, answer_ids, canonical_keys, theme_ids)
+        batch_no = jobs.next_batch_no(conn, lease.job_id)
+        insert_tags(conn, lease, job.version_id, batch_no=batch_no, tags=canonical + duplicates)
+        jobs.checkpoint(
+            conn,
+            lease,
+            batch_no=batch_no,
+            stage="map",
+            answer_ids=answer_ids,
+            trace_id=completion.trace_id,
+            tokens_in=completion.tokens_in,
+            tokens_out=completion.tokens_out,
+        )
+    if after_batch is not None:
+        after_batch(batch_no)
+    return True
+
+
 def assign(
     conn: psycopg.Connection[DictRow],
     llm: LLM,
@@ -131,48 +224,25 @@ def assign(
 ) -> int:
     """Step 9's mapping: one map_themes_prompt per batch against v2's
     (key, label, description) list, parse_assignments, then in one
-    transaction per batch the tags through tags.insert_tags (fenced;
-    source 'ai', this job and batch) and a checkpoint. `after_batch` is
-    where the caller commits. Returns the number of batches this call ran.
+    transaction per batch the tags and a checkpoint. `after_batch` is
+    where the caller commits. A batch the check refuses is sent again one
+    answer at a time, each its own checkpoint, so a spoiled batch costs
+    the answer that spoiled it and not its nine neighbours (docs/02, step
+    9). Returns the number of checkpoints this call wrote.
 
     The batch number comes from `jobs.next_batch_no` when it is written,
-    not from the plan's position, because a later chunk's retry at size
-    one adds batches out of the plan's order (plan section 2, "resume is
-    by coverage")."""
+    not from the plan's position, because the retry at size one adds
+    batches the plan doesn't have (plan section 2, "resume is by
+    coverage")."""
     shortlist = _shortlist(conn, job.version_id)
-    theme_list = [(str(r["key"]), str(r["label"]), r["description"]) for r in shortlist]
-    theme_ids = {str(r["key"]): r["id"] for r in shortlist}
     ran = 0
     for batch in plan:
-        prompt = map_themes_prompt(
-            model_alias=job.model_alias,
-            question_text=job.question_text,
-            related_answer=batch.related_answer,
-            themes=theme_list,
-            answers=batch.answers,
-        )
-        completion = llm.complete(prompt)
-        assignments = parse_assignments(completion, prompt)
-        canonical_keys = {assignment.answer_id: assignment.theme_keys for assignment in assignments}
-        canonical = [
-            Tag(assignment.answer_id, theme_ids[key])
-            for assignment in assignments
-            for key in assignment.theme_keys
-        ]
-        duplicates = _duplicate_tags(conn, prompt.answer_ids, canonical_keys, theme_ids)
-        batch_no = jobs.next_batch_no(conn, lease.job_id)
-        insert_tags(conn, lease, job.version_id, batch_no=batch_no, tags=canonical + duplicates)
-        jobs.checkpoint(
-            conn,
-            lease,
-            batch_no=batch_no,
-            stage="map",
-            answer_ids=[answer.id for answer in batch.answers],
-            trace_id=completion.trace_id,
-            tokens_in=completion.tokens_in,
-            tokens_out=completion.tokens_out,
-        )
-        ran += 1
-        if after_batch is not None:
-            after_batch(batch_no)
+        if _send(
+            conn, llm, lease, job, shortlist, batch.related_answer, batch.answers, after_batch
+        ):
+            ran += 1
+            continue
+        for answer in batch.answers:
+            _send(conn, llm, lease, job, shortlist, batch.related_answer, (answer,), after_batch)
+            ran += 1
     return ran
