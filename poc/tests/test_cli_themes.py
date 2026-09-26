@@ -334,7 +334,7 @@ def test_themes_reads_the_same_after_sign_off(
     # A count on every shortlist theme: "-" rather than "None" for the
     # fallback themes sign_off adds with no preview_count of their own.
     assert "count None" not in out
-    assert re.search(r"^\s+OTHER\s+\S.*\bcount -\b", out, re.M)
+    assert re.search(r"^\s+OTHER\s+\S.*count -$", out, re.M)
 
     # The examples a reviewer saw before sign-off are still there:
     # sign_off doesn't copy theme_example, so this reads the source
