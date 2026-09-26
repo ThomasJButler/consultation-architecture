@@ -19,6 +19,7 @@ from psycopg.rows import DictRow
 
 from consult import store
 from consult.query import AttrFilter, Filter, OtherFilter, related_distribution, scope, theme_table
+from make_fixture_data import PROFORMA_REASON, PROFORMA_ROWS
 from tests.pipeline import signed_off_fixture, signed_off_questions
 from tests.rows import tag_answers_by_rule
 
@@ -243,3 +244,32 @@ def test_the_other_filter_is_a_semi_join_across_questions(
         Filter(others=(OtherFilter("o_safety", "LIGHTING"),)),
     )
     assert len(narrowed) == 15
+
+
+def _proforma_key(text: str) -> str:
+    # Isolates the proforma's own group from every other duplicate group
+    # in o_reason, so its count is the twelve copies and nothing else.
+    return "PROFORMA" if text == PROFORMA_REASON else "GENERAL"
+
+
+def test_duplicates_are_hidden_unless_asked_for(db: psycopg.Connection[DictRow]) -> None:
+    assert len(PROFORMA_ROWS) == 12
+    signed = signed_off_fixture(db)
+    tag_answers_by_rule(db, signed.version_id, signed.question_id, _proforma_key)
+
+    # Ingest flags eleven of the proforma's twelve copies as duplicates of
+    # the twelfth (docs/02 section 7, decision 9; PROFORMA_ROWS in
+    # scripts/make_fixture_data.py), so with the toggle off the denominator
+    # counts one of them, and the PROFORMA key with it.
+    hidden = theme_table(db, signed.question_id, Filter())
+    assert hidden.denominator == 74
+    proforma_hidden = {c.key: c.respondents for c in hidden.rows}["PROFORMA"]
+    assert proforma_hidden == 1
+
+    # with=duplicates drops both IS NULL predicates, so every physical row
+    # this factory tagged counts, the eleven copies included.
+    shown = theme_table(db, signed.question_id, Filter(with_duplicates=True))
+    assert shown.denominator == 221
+    proforma_shown = {c.key: c.respondents for c in shown.rows}["PROFORMA"]
+    assert proforma_shown == 12
+    assert proforma_shown - proforma_hidden == 11
