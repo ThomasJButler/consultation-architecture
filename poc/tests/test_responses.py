@@ -93,8 +93,11 @@ def test_the_responses_reader_streams_rows_and_keeps_the_markers_as_written(tmp_
 
 
 def test_a_short_row_is_padded_and_a_long_one_is_cut_to_the_header(tmp_path: Path) -> None:
+    # What a long row may carry past the header is empty cells, as a
+    # trailing comma makes; a filled one there is refused
+    # (test_a_data_column_with_no_header_is_refused).
     path = tmp_path / "ragged.csv"
-    path.write_text("a,b\n1\n1,2,3\n", encoding="utf-8")
+    path.write_text("a,b\n1\n1,2,\n", encoding="utf-8")
     assert list(Responses(path).rows()) == [
         Row(2, {"a": "1", "b": ""}),
         Row(3, {"a": "1", "b": "2"}),
