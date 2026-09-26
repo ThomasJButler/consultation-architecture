@@ -273,3 +273,36 @@ def test_run_job_works_as_the_pipeline_role(
     )
     capsys.readouterr()
     assert seen == ["consult_pipeline"]
+
+
+def test_run_job_reports_a_lost_lease_found_while_recording_a_failure(
+    db: psycopg.Connection[DictRow],
+    db_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A reply fails while the lease has already moved on: record_failure
+    # then raises LeaseLostError from inside the except branch. That has to
+    # come out as the code on one line and exit 1, not as a traceback with
+    # the job left without a failure code either way.
+    from consult import jobs as jobs_module
+    from consult.jobs import LeaseLostError
+    from consult.replies import Reason, ReplyError
+
+    jobs = ingested(db, db_settings)
+
+    def fail(conn: object, llm: object, lease: Lease, **_: object) -> Advance:
+        raise ReplyError(Reason.NOT_JSON)
+
+    def lost(conn: object, lease: Lease, code: object, **_: object) -> None:
+        raise LeaseLostError(lease)
+
+    monkeypatch.setattr(themes, "run_find_themes", fail)
+    monkeypatch.setattr(jobs_module, "record_failure", lost)
+    code = main(
+        ["run-job", str(jobs["o_reason"]), "--worker", "w1", "--model", "fake"],
+        settings=db_settings,
+    )
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "lease_lost" in out and "Traceback" not in out

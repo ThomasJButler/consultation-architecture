@@ -261,3 +261,14 @@ def test_the_fallback_keys_are_reserved() -> None:
         with pytest.raises(ReplyError) as refused:
             parse_condensation(Completion(text=condensed), ["SAFETY_1"])
         assert refused.value.reason is Reason.KEY_RESERVED
+
+
+def test_a_reply_error_carries_no_chained_exception_with_the_reply_in_it() -> None:
+    # json.JSONDecodeError keeps the whole document on its .doc attribute.
+    # Chained as the cause, a later logger.exception or an error tracker
+    # would print the reply that job.error has no column for. So the chain
+    # is cut. Found by the security review.
+    with pytest.raises(ReplyError) as refused:
+        parse_assignments(Completion(text="Certainly! Not JSON at all."), MAPPING)
+    assert refused.value.__cause__ is None
+    assert refused.value.__suppress_context__ is True
