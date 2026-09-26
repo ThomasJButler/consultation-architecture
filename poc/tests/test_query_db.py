@@ -18,8 +18,9 @@ from psycopg import sql
 from psycopg.rows import DictRow
 
 from consult import store
-from consult.query import AttrFilter, Filter, OtherFilter, scope
+from consult.query import AttrFilter, Filter, OtherFilter, related_distribution, scope, theme_table
 from tests.pipeline import signed_off_fixture
+from tests.rows import tag_answers_by_rule
 
 pytestmark = pytest.mark.db
 
@@ -143,3 +144,77 @@ def test_hostile_filter_values_stay_parameters(db: psycopg.Connection[DictRow]) 
     # The schema is untouched: the fourteen tables are all there, with the
     # rows they had before the hostile filters ran.
     assert _row_counts(db) == before
+
+
+def _o_reason_key(text: str) -> str:
+    # Both fragments name a real Oppose reason in REASONS
+    # (scripts/make_fixture_data.py): "We'd lose the only parking near the
+    # surgery on Mill Lane" and "The junction by the bridge is dangerous
+    # already", so PARKING and SAFETY each get more than one respondent to
+    # hand-count from responses.csv.
+    lowered = text.casefold()
+    if "parking" in lowered:
+        return "PARKING"
+    if "junction" in lowered:
+        return "SAFETY"
+    return "OTHER"
+
+
+def test_the_theme_table_counts_match_the_fixture(db: psycopg.Connection[DictRow]) -> None:
+    signed = signed_off_fixture(db)
+    tag_answers_by_rule(db, signed.version_id, signed.question_id, _o_reason_key)
+
+    # Hand count from responses.csv: distinct, non-blank o_reason answers,
+    # duplicates hidden (CLAUDE.md rule 2, docs/04 section 6's denominator).
+    everyone = theme_table(db, signed.question_id, Filter())
+    assert everyone.denominator == 74
+    assert {(c.key, c.respondents) for c in everyone.rows} == {
+        ("OTHER", 46),
+        ("PARKING", 17),
+        ("SAFETY", 11),
+    }
+    # Ordered by count descending, then key.
+    assert [c.key for c in everyone.rows] == ["OTHER", "PARKING", "SAFETY"]
+    assert {c.key: c.label for c in everyone.rows} == {
+        "OTHER": "Other",
+        "PARKING": "Parking",
+        "SAFETY": "Safety",
+    }
+    # OTHER is the fallback theme_set_version.sign_off already writes
+    # (transitions.FALLBACK_THEMES); PARKING and SAFETY are this factory's.
+    assert {c.key: c.is_fallback for c in everyone.rows} == {
+        "OTHER": True,
+        "PARKING": False,
+        "SAFETY": False,
+    }
+
+    villages = theme_table(
+        db, signed.question_id, Filter(attrs=(AttrFilter("d_area", "Villages"),))
+    )
+    assert villages.denominator == 17
+    assert {(c.key, c.respondents) for c in villages.rows} == {
+        ("OTHER", 12),
+        ("PARKING", 4),
+        ("SAFETY", 1),
+    }
+
+    # Two values in one column are OR'd (docs/04 section 5): Villages or
+    # Suburbs, no test reaches this branch's exact counts yet.
+    either_area = theme_table(
+        db,
+        signed.question_id,
+        Filter(attrs=(AttrFilter("d_area", "Villages"), AttrFilter("d_area", "Suburbs"))),
+    )
+    assert either_area.denominator == 42
+    assert {(c.key, c.respondents) for c in either_area.rows} == {
+        ("OTHER", 25),
+        ("PARKING", 12),
+        ("SAFETY", 5),
+    }
+
+    # The related closed question, c_route, among the Villages respondents
+    # counted above: docs/02 screen 4's own second panel.
+    distribution = related_distribution(
+        db, signed.question_id, Filter(attrs=(AttrFilter("d_area", "Villages"),))
+    )
+    assert distribution == [("Support", 8), ("Oppose", 4), ("Not sure", 4)]
