@@ -13,8 +13,10 @@ import psycopg
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 
+from consult.config import Settings
 from consult.configure import Configured, Resolutions, configure, defaults
 from consult.definition import Definition, read_definition
+from consult.dispatch import dispatch
 from consult.ingest import ingest
 from consult.jobs import claim
 from consult.responses import Responses
@@ -63,6 +65,17 @@ def staged_fixture(
         chosen = resolve(chosen)
     configured = configure(db, consultation_id, definition, report, chosen)
     return Staged(consultation_id, definition, report, chosen, configured)
+
+
+def dispatched_fixture(db: psycopg.Connection[DictRow], settings: Settings) -> UUID:
+    """The fixtures ingested and dispatched under the caps, then committed,
+    so a worker on any connection finds their find_themes jobs queued with
+    an alias and a seed (docs/02, steps 3 and 4). Returns the consultation."""
+    staged = staged_fixture(db)
+    ingest(db, staged.consultation_id)
+    dispatch(db, settings)
+    db.commit()
+    return staged.consultation_id
 
 
 @dataclass(frozen=True)

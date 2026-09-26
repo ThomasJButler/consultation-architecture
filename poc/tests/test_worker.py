@@ -1,11 +1,17 @@
-"""What the worker's model boundary promises on a gateway failure (docs/02,
-section 9; ADR-005's "one to sixty seconds, six attempts").
+"""What the worker promises: its model boundary on a gateway failure, and
+the loop that picks, claims and runs a job.
 
-Driven on a queued and claimed map_themes job, with the fake scripted to
-raise `llm.GatewayError` on every attempt: the retry count, the full-jitter
-waits, that no transaction is open for a call or a sleep, and that the
-failure that lands on the job row and the log line is a code and a request
-id, never the provider's text.
+The first test drives a queued and claimed map_themes job with the fake
+scripted to raise `llm.GatewayError` on every attempt (docs/02, section 9;
+ADR-005's "one to sixty seconds, six attempts"): the retry count, the
+full-jitter waits, that no transaction is open for a call or a sleep, and
+that the failure that lands on the job row and the log line is a code and
+a request id, never the provider's text.
+
+The second drives `worker.run_once` on the fixtures (docs/02, step 5): the
+oldest runnable job first, each kind through its own runner, a stale lease
+taken over, a spent retry budget left alone, and workers racing on their
+own connections never sharing a job.
 """
 
 from __future__ import annotations
@@ -13,26 +19,36 @@ from __future__ import annotations
 import io
 import logging
 import random
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
 from psycopg.pq import TransactionStatus
 from psycopg.rows import DictRow
 
+from consult import store
+from consult.config import Settings
+from consult.dispatch import dispatch
 from consult.errors import ErrorCode
 from consult.jobs import claim
 from consult.llm import LLM, Completion, GatewayError, Prompt
 from consult.logs import Formatter
 from consult.mapping import run_map_themes
+from consult.transitions import sign_off
 from consult.worker import (
     BACKOFF_ATTEMPTS,
     BACKOFF_BASE_SECONDS,
     BACKOFF_CAP_SECONDS,
     BackingOff,
+    Outcome,
     record_gateway_failure,
+    run_once,
 )
-from tests.fakes import FakeLLM
-from tests.pipeline import signed_off_fixture
+from tests.fakes import FakeLLM, RecordingLLM
+from tests.pipeline import dispatched_fixture, signed_off_fixture
 
 pytestmark = pytest.mark.db
 
@@ -162,3 +178,192 @@ def test_a_gateway_error_backs_off_then_records_a_code(db: psycopg.Connection[Di
     assert f"job_id={lease.job_id}" in output
     assert "error_code=gateway_unavailable" in output
     assert "provider_request_id=req_abc123" in output
+
+
+# ADR-002: "the retry budget is job.attempts < 5".
+RETRY_BUDGET = 5
+# docs/02, step 5: ten minutes of silence and a lease can be taken over.
+# A minute either side of that is a lease gone stale and one that hasn't.
+STALE = timedelta(minutes=11)
+LIVE = timedelta(minutes=9)
+# More workers than the race has jobs, so the ones left over show too.
+RACERS = 6
+
+
+def _by_id(db: psycopg.Connection[DictRow], consultation_id: UUID, kind: str) -> list[DictRow]:
+    return db.execute(
+        """
+        SELECT id, question_id, created_at FROM job
+         WHERE consultation_id = %s AND kind = %s ORDER BY id
+        """,
+        (consultation_id, kind),
+    ).fetchall()
+
+
+def _job(db: psycopg.Connection[DictRow], job_id: UUID) -> DictRow | None:
+    return db.execute("SELECT * FROM job WHERE id = %s", (job_id,)).fetchone()
+
+
+def _stages(db: psycopg.Connection[DictRow], job_id: UUID) -> set[str]:
+    rows = db.execute("SELECT DISTINCT stage FROM job_batch WHERE job_id = %s", (job_id,))
+    return {str(row["stage"]) for row in rows.fetchall()}
+
+
+def _questions(db: psycopg.Connection[DictRow], consultation_id: UUID) -> dict[UUID, str]:
+    rows = db.execute(
+        "SELECT id, status FROM question WHERE consultation_id = %s AND kind = 'open'",
+        (consultation_id,),
+    ).fetchall()
+    return {row["id"]: str(row["status"]) for row in rows}
+
+
+def _consultation(db: psycopg.Connection[DictRow], consultation_id: UUID) -> DictRow | None:
+    return db.execute(
+        """
+        SELECT c.status,
+               (SELECT count(*) FROM notification_outbox o
+                 WHERE o.consultation_id = c.id AND o.kind = 'analysis_ready') AS analysis_ready
+          FROM consultation c WHERE c.id = %s
+        """,
+        (consultation_id,),
+    ).fetchone()
+
+
+def test_the_worker_claims_the_oldest_job_and_runs_it_by_kind(
+    db: psycopg.Connection[DictRow], db_settings: Settings
+) -> None:
+    # One ingest gives both find_themes jobs its now(), so the one whose id
+    # sorts second is moved a minute older: the pick goes by created_at
+    # first and the id only breaks a tie (docs/02, step 5; plan section 2,
+    # "Pick").
+    consultation_id = dispatched_fixture(db, db_settings)
+    lower, higher = _by_id(db, consultation_id, "find_themes")
+    assert lower["created_at"] == higher["created_at"]
+    db.execute(
+        "UPDATE job SET created_at = created_at - %s WHERE id = %s",
+        (timedelta(minutes=1), higher["id"]),
+    )
+    db.commit()
+    llm = _TransactionCheckingLLM(db, RecordingLLM())
+    sleeper = _RecordingSleeper(db)
+
+    older = run_once(db, llm, worker="w1", sleep=sleeper)
+
+    assert older == Outcome(higher["id"], "find_themes", "succeeded", 1)
+    assert _questions(db, consultation_id) == {
+        higher["question_id"]: "themes_ready",
+        lower["question_id"]: "configured",
+    }
+
+    newer = run_once(db, llm, worker="w1", sleep=sleeper)
+
+    assert newer == Outcome(lower["id"], "find_themes", "succeeded", 1)
+    assert _consultation(db, consultation_id) == {"status": "awaiting_review", "analysis_ready": 0}
+    # By kind: a find_themes job checkpoints generation, condensation and
+    # preview (docs/02, step 6).
+    assert (
+        _stages(db, lower["id"])
+        == _stages(db, higher["id"])
+        == {
+            "generate",
+            "condense",
+            "preview",
+        }
+    )
+
+    # Both signed off in one transaction, so their map_themes jobs share a
+    # created_at and the lower id goes first.
+    for job in (lower, higher):
+        assert sign_off(db, job["question_id"], uuid4()) is not None
+    dispatch(db, db_settings)
+    db.commit()
+    first_map, second_map = _by_id(db, consultation_id, "map_themes")
+    assert first_map["created_at"] == second_map["created_at"]
+
+    mapped = [run_once(db, llm, worker="w1", sleep=sleeper) for _ in range(2)]
+
+    assert mapped == [
+        Outcome(first_map["id"], "map_themes", "succeeded", 1),
+        Outcome(second_map["id"], "map_themes", "succeeded", 1),
+    ]
+    # A map_themes job checkpoints nothing but map batches (docs/02, step 9).
+    assert _stages(db, first_map["id"]) == _stages(db, second_map["id"]) == {"map"}
+    assert set(_questions(db, consultation_id).values()) == {"complete"}
+    assert _consultation(db, consultation_id) == {"status": "ready", "analysis_ready": 1}
+    assert run_once(db, llm, worker="w1", sleep=sleeper) is None
+    # No transaction open at any call, and nothing backed off: the wiring
+    # test_a_gateway_error_backs_off_then_records_a_code pins on BackingOff,
+    # here through run_once (docs/02, section 9).
+    assert llm.statuses
+    assert set(llm.statuses) == {TransactionStatus.IDLE}
+    assert sleeper.waits == []
+
+    # A stale lease is taken over and a live one left alone. The live one
+    # sorts first, so a pick that ignored the heartbeat would take it.
+    taken_over = dispatched_fixture(db, db_settings)
+    live, stale = _by_id(db, taken_over, "find_themes")
+    for job, worker, silence in ((live, "w-alive", LIVE), (stale, "w-dead", STALE)):
+        assert claim(db, job["id"], worker) is not None
+        db.execute("UPDATE job SET heartbeat_at = now() - %s WHERE id = %s", (silence, job["id"]))
+    db.commit()
+    live_before = _job(db, live["id"])
+
+    takeover = run_once(db, RecordingLLM(), worker="w2", sleep=sleeper)
+
+    assert takeover == Outcome(stale["id"], "find_themes", "succeeded", 2)
+    after = _job(db, stale["id"])
+    assert after is not None
+    assert (after["status"], after["attempts"], after["claimed_by"]) == ("succeeded", 2, "w2")
+    assert _job(db, live["id"]) == live_before
+    assert run_once(db, RecordingLLM(), worker="w2", sleep=sleeper) is None
+
+    # A spent retry budget is left alone whatever the job's status: two
+    # queued jobs at five attempts, and the live lease above gone silent on
+    # its fifth. Failing them is the reconciler's call (docs/02, section 5).
+    spent = dispatched_fixture(db, db_settings)
+    db.execute("UPDATE job SET attempts = %s WHERE consultation_id = %s", (RETRY_BUDGET, spent))
+    db.execute(
+        "UPDATE job SET attempts = %s, heartbeat_at = now() - %s WHERE id = %s",
+        (RETRY_BUDGET, STALE, live["id"]),
+    )
+    db.commit()
+    before = db.execute("SELECT * FROM job ORDER BY id").fetchall()
+
+    assert run_once(db, RecordingLLM(), worker="w3", sleep=sleeper) is None
+    assert db.execute("SELECT * FROM job ORDER BY id").fetchall() == before
+
+    # Six workers on six connections race for four queued jobs from two
+    # ingests. The row lock the pick skips past and the conditional claim
+    # give each job to exactly one worker, and the two left over get None
+    # (docs/02, step 5; the pattern in test_fan_in_race.py).
+    raced = [dispatched_fixture(db, db_settings) for _ in range(2)]
+    queued = sorted(job["id"] for c in raced for job in _by_id(db, c, "find_themes"))
+    assert len(queued) == 4
+    db.commit()
+    # With a timeout, a thread that fails before the barrier breaks it for
+    # the rest and the test fails loudly instead of joining for ever.
+    barrier = threading.Barrier(RACERS, timeout=30)
+    waits: list[float] = []
+
+    def race(index: int) -> Outcome | None:
+        with store.connect(db_settings) as conn:
+            barrier.wait()
+            return run_once(conn, RecordingLLM(), worker=f"w-race-{index}", sleep=waits.append)
+
+    with ThreadPoolExecutor(max_workers=RACERS) as pool:
+        futures = [pool.submit(race, index) for index in range(RACERS)]
+    failures = [f.exception() for f in futures if f.exception() is not None]
+    assert failures == []
+    outcomes = [f.result() for f in futures]
+
+    assert sorted(o.job_id for o in outcomes if o is not None) == queued
+    assert outcomes.count(None) == RACERS - len(queued)
+    rows = db.execute(
+        "SELECT status, attempts, claimed_by FROM job WHERE id = ANY(%s)", (queued,)
+    ).fetchall()
+    assert [(row["status"], row["attempts"]) for row in rows] == [("succeeded", 1)] * len(queued)
+    assert len({row["claimed_by"] for row in rows}) == len(queued)
+    assert all(
+        _consultation(db, c) == {"status": "awaiting_review", "analysis_ready": 0} for c in raced
+    )
+    assert waits == []
