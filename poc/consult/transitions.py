@@ -174,6 +174,23 @@ def record_column_roles(
     )
 
 
+def start_find_themes(conn: psycopg.Connection[DictRow], question_id: UUID) -> bool:
+    """The worker's first move on a find_themes job: configured to
+    finding_themes (docs/02, section 6). False rather than an error when
+    the question is already there, which is what a takeover finds; anything
+    else is the wrong state and refuses."""
+    moved = conn.execute(
+        "UPDATE question SET status = 'finding_themes' WHERE id = %s AND status = 'configured'",
+        (question_id,),
+    ).rowcount
+    if moved == 1:
+        return True
+    current = conn.execute("SELECT status FROM question WHERE id = %s", (question_id,)).fetchone()
+    if current is not None and current["status"] == "finding_themes":
+        return False
+    raise TransitionError(f"question {question_id} is not configured")
+
+
 def _move_question(
     conn: psycopg.Connection[DictRow], question_id: UUID, from_status: str, to_status: str
 ) -> None:

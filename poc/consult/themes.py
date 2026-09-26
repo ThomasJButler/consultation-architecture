@@ -5,7 +5,10 @@ stages here take a connection and never commit; the caller owns the
 transaction and commits between batches, which is what makes a checkpoint
 worth having. The plan of batches is recomputed from a seed stored on the
 job rather than stored itself, so a worker taking over can rebuild it and
-start at the batch after the last checkpoint.
+start at the batch after the last checkpoint. `run_find_themes` strings
+the stages together for a claimed job and ends in the transaction docs/02
+step 7 describes: v1 complete, the question themes_ready, fan-in 1 run,
+the job succeeded.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from uuid import UUID
 import psycopg
 from psycopg.rows import DictRow
 
-from consult import jobs
+from consult import jobs, transitions
 from consult.jobs import Lease, LeaseLostError
 from consult.llm import LLM
 from consult.prompts import PromptAnswer, condense_prompt, find_themes_prompt, map_themes_prompt
@@ -478,3 +481,27 @@ def _count_and_quote(conn: psycopg.Connection[DictRow], theme_id: UUID, answer_i
         """,
         {"answer": answer_id, "theme": theme_id, "cap": EXAMPLES_PER_THEME},
     )
+
+
+def run_find_themes(
+    conn: psycopg.Connection[DictRow],
+    llm: LLM,
+    lease: Lease,
+    *,
+    after_batch: Callable[[int], None] | None = None,
+) -> transitions.Advance:
+    """The whole job for a claimed lease: the question moved on (or found
+    already moved by a takeover), v1 ensured, the plan rebuilt from the
+    seed, then generation, condensation and preview, each skipping what a
+    checkpoint already covers, then the finishing transaction. The caller
+    commits in `after_batch`; nothing here does."""
+    job = load_job(conn, lease.job_id)
+    transitions.start_find_themes(conn, job.question_id)
+    version_id = ensure_version(conn, lease, job.question_id)
+    plan = batches(conn, job.question_id, seed=job.seed)
+    generate(conn, llm, lease, job, version_id, plan, after_batch=after_batch)
+    condense(conn, llm, lease, job, version_id, generated=len(plan))
+    if after_batch is not None:
+        after_batch(len(plan) + 1)
+    preview(conn, llm, lease, job, version_id, generated=len(plan), after_batch=after_batch)
+    return transitions.finish_find_themes(conn, lease, job.question_id, job.consultation_id)
