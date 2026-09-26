@@ -95,8 +95,14 @@ generator at any scale, and the fourth mechanic proved: at 20,000
 respondents the planner takes the GIN index and probes the answer table
 by its unique key, with what that corrected in `docs/04`, `docs/05` and
 ADR-004 recorded as dated corrections. Two commands, `consult query` and
-`consult export`. Next: final polish (PR-10), run from
-`plans/final-run.md`. Deliberately not built: see above.
+`consult export`.
+In review: the submission, finished (PR-10): `TESTING.md` names a test for
+each of the four mechanics, pinned by a test that reads it; every design
+document carries a dated correction where the proof-of-concept found it
+otherwise; `poc/README.md` says only what is still unproved; and the
+evidence for every submission bullet is in the pull request for the
+owner's rewrite, which happens by hand before the PDF is rebuilt and
+`v1.0-submission` is tagged. Deliberately not built: see above.
 
 ## How it was built
 
