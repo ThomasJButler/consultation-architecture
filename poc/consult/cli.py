@@ -276,7 +276,7 @@ def _ingest(args: argparse.Namespace, settings: Settings) -> int:
     )
     print(
         f"consultation {consultation_id}: {staged.rows} rows staged, "
-        f"{ingested.respondents} respondents, {ingested.answers} answers, "
+        f"{ingested.respondents} respondents, {ingested.answers} answer rows, "
         f"{ingested.vault_rows} identity rows, {ingested.duplicate_answers} duplicate answers, "
         f"{ingested.duplicate_respondents} duplicate respondents, {ingested.jobs} jobs; processing"
     )

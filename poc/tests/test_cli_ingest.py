@@ -64,7 +64,7 @@ def test_the_ingest_command_runs_the_fixtures_end_to_end(
     for expected in (
         "240 rows staged",
         "240 respondents",
-        f"{written['answers']} answers",
+        f"{written['answers']} answer rows",
         "240 identity rows",
         f"{written['duplicate_answers']} duplicate answers",
         f"{written['duplicate_respondents']} duplicate respondents",
