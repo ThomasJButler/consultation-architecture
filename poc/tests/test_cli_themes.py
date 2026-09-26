@@ -255,6 +255,44 @@ def test_the_sign_off_command_freezes_v2_and_refuses_a_second(
     assert state == {"status": "themes_ready", "versions": 1}
 
 
+def test_a_version_conflict_names_both_edit_counters(
+    db: psycopg.Connection[DictRow], db_settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    jobs = ingested(db, db_settings)
+    assert (
+        main(
+            ["run-job", str(jobs["o_reason"]), "--worker", "w1", "--model", "fake"],
+            settings=db_settings,
+        )
+        == 0
+    )
+    question = db.execute(
+        "SELECT question_id FROM job WHERE id = %s", (jobs["o_reason"],)
+    ).fetchone()
+    assert question is not None
+    question_id = question["question_id"]
+    capsys.readouterr()
+
+    # consult themes prints the value --expect-version wants, the edit
+    # counter, not the version number: "edit 0", not "version 1".
+    assert main(["themes", str(question_id)], settings=db_settings) == 0
+    out = capsys.readouterr().out
+    assert "version 1 (candidate, edit 0; sign off with --expect-version 0)" in out
+    capsys.readouterr()
+
+    # A reviewer who typed the version number instead gets a conflict that
+    # names both counters, not a message that misreads the state as
+    # "moved on from edit 1" when the list is still at edit 0.
+    reviewer = "11111111-2222-3333-4444-555555555555"
+    code = main(
+        ["sign-off", str(question_id), "--reviewer", reviewer, "--expect-version", "1"],
+        settings=db_settings,
+    )
+    out = capsys.readouterr().out
+    assert code == 1
+    assert out == f"question {question_id}: conflict, expected edit 1, the list is at edit 0\n"
+
+
 def test_dispatch_runs_under_a_role_from_every_command(
     db: psycopg.Connection[DictRow],
     db_settings: Settings,
