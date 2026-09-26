@@ -36,6 +36,11 @@ class TransitionError(Exception):
     it expected: a question already moved on, or a consultation reopened."""
 
 
+class SignOffConflictError(TransitionError):
+    """The candidate isn't at the edit the reviewer was looking at: someone
+    edited it between their look and their click (docs/04, edit_version)."""
+
+
 @dataclass(frozen=True)
 class Advance:
     themes_ready: bool
@@ -244,15 +249,21 @@ RESERVED_KEYS = frozenset(key for key, _label in FALLBACK_THEMES)
 
 
 def sign_off(
-    conn: psycopg.Connection[DictRow], question_id: UUID, reviewer: UUID
+    conn: psycopg.Connection[DictRow],
+    question_id: UUID,
+    reviewer: UUID,
+    *,
+    expected_version: int | None = None,
 ) -> SignOff | None:
     """Confirm the themes for one question (docs/02, step 8; ADR-003).
 
     The guard is the mutex: two reviewers clicking at once produce one
     signed-off question and one None. In the same transaction the
-    candidate is frozen as the next version with stable keys plus OTHER
-    and NO_REASON, the candidate is superseded, and a map_themes job for
-    this question only is inserted under job_one_per_run.
+    candidate is superseded, at the edit_version the reviewer saw when one
+    is given (a SignOffConflictError otherwise, for the caller to roll
+    back), then frozen as the next version with stable keys plus OTHER and
+    NO_REASON, and a map_themes job for this question only is inserted
+    under job_one_per_run.
     """
     confirmed = conn.execute(
         "UPDATE question SET status = 'signed_off' WHERE id = %s AND status = 'themes_ready'",
@@ -270,6 +281,21 @@ def sign_off(
     ).fetchone()
     if candidate is None:
         raise TransitionError(f"question {question_id} has no candidate version to sign off")
+    # Supersede first, in the statement that checks the counter: an edit
+    # that lands after this is refused by its own guard, and one that landed
+    # before it is a conflict here rather than a silent freeze.
+    superseded = conn.execute(
+        """
+        UPDATE theme_set_version SET status = 'superseded'
+         WHERE id = %(candidate)s
+           AND (%(expected)s::int IS NULL OR edit_version = %(expected)s::int)
+        """,
+        {"candidate": candidate["id"], "expected": expected_version},
+    ).rowcount
+    if superseded != 1:
+        raise SignOffConflictError(
+            f"question {question_id}: the candidate is not at edit {expected_version}"
+        )
     frozen = conn.execute(
         """
         INSERT INTO theme_set_version (department_id, question_id, version_no, status,
@@ -304,9 +330,6 @@ def sign_off(
             """,
             {"version": version_id, "key": key, "label": label},
         )
-    conn.execute(
-        "UPDATE theme_set_version SET status = 'superseded' WHERE id = %s", (candidate["id"],)
-    )
     job = conn.execute(
         """
         INSERT INTO job (department_id, consultation_id, question_id, kind, run_id, status)

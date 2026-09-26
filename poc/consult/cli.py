@@ -325,27 +325,25 @@ def _themes(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def _sign_off(args: argparse.Namespace, settings: Settings) -> int:
-    """Confirm as-is (docs/02, step 8; ADR-003). The edit counter is checked
-    first so a reviewer who saw an older list gets a conflict, then the
-    guarded UPDATE is the mutex; the rest is transitions.sign_off's."""
+    """Confirm as-is (docs/02, step 8; ADR-003). The guarded UPDATE is the
+    mutex and the edit counter is checked in the statement that supersedes
+    the candidate, so a reviewer who saw an older list gets a conflict."""
     with store.connect(settings) as conn:
-        candidate = conn.execute(
-            """
-            SELECT edit_version FROM theme_set_version
-             WHERE question_id = %s AND status = 'candidate' ORDER BY version_no DESC LIMIT 1
-            """,
-            (args.question,),
-        ).fetchone()
-        if candidate is None:
-            print(f"question {args.question}: refused, no candidate version to sign off")
-            return 1
-        if candidate["edit_version"] != args.expect_version:
+        try:
+            signed = transitions.sign_off(
+                conn, args.question, args.reviewer, expected_version=args.expect_version
+            )
+        except transitions.SignOffConflictError:
+            conn.rollback()
             print(
-                f"question {args.question}: conflict, the list is at edit "
-                f"{candidate['edit_version']} and you were looking at edit {args.expect_version}"
+                f"question {args.question}: conflict, the list has moved on from edit "
+                f"{args.expect_version}"
             )
             return 1
-        signed = transitions.sign_off(conn, args.question, args.reviewer)
+        except transitions.TransitionError:
+            conn.rollback()
+            print(f"question {args.question}: refused, no candidate version to sign off")
+            return 1
         if signed is None:
             conn.rollback()
             print(f"question {args.question}: refused, not awaiting sign-off")
