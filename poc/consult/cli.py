@@ -76,7 +76,11 @@ from consult.store import PIPELINE_ROLE, as_role
 from consult.validate import Report, validate
 from consult.worker import Outcome
 
-logger = logging.getLogger(__name__)
+# Named explicitly, not by __name__: the Makefile's targets run this
+# module as __main__ (`python -m consult.cli`), where __name__ is
+# "__main__" and every line here would log under that name instead of
+# consult.cli, the name .venv/bin/consult's console script gives it.
+logger = logging.getLogger("consult.cli")
 
 
 def build_parser() -> argparse.ArgumentParser:
