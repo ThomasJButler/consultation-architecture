@@ -153,12 +153,16 @@ _TAIL = sql.SQL("\n)\n")
 _THIS_QUESTION = sql.SQL("a.question_id = {} AND NOT a.is_blank").format(
     sql.Placeholder("question_id")
 )
-# Answer and respondent both carry department_id, and each has to carry
-# the question's, so an id guessed from another department reaches no row
-# (THREAT_MODEL.md row 5; docs/02 section 10's mandatory scope).
-_SAME_DEPARTMENT = sql.SQL(
-    "a.department_id = q.department_id AND r.department_id = q.department_id"
-)
+# The mandatory scope (docs/06 section 2; THREAT_MODEL.md row 5): the
+# question has to sit in the caller's department, which the caller names
+# and no question id carries, so an id guessed from another department
+# reaches no row. Answer and respondent carry department_id too, and each
+# has to carry the question's, which holds every row the joins reach to
+# that same department.
+_CALLERS_DEPARTMENT = sql.SQL(
+    "q.department_id = {} AND a.department_id = q.department_id"
+    " AND r.department_id = q.department_id"
+).format(sql.Placeholder("department_id"))
 # Answer-level and respondent-level duplicates, hidden unless the filter
 # says with=duplicates (docs/02 section 7, decision 9).
 _NO_DUPLICATES = (
@@ -221,12 +225,13 @@ def _by_column(attrs: Iterable[AttrFilter]) -> list[list[AttrFilter]]:
     return list(groups.values())
 
 
-def scope(question_id: UUID, filter: Filter) -> Scope:
-    """docs/04 section 6's CTE for one question under `filter`. Each
+def scope(question_id: UUID, filter: Filter, *, department_id: UUID) -> Scope:
+    """docs/04 section 6's CTE for one question under `filter`, held to
+    `department_id`, the caller's (docs/06 section 2). Each filter
     predicate is there only when the filter carries it, in the design's
     order: the duplicate toggle, attr:, theme:, then other:."""
-    params: dict[str, object] = {"question_id": question_id}
-    predicates: list[sql.Composable] = [_THIS_QUESTION, _SAME_DEPARTMENT]
+    params: dict[str, object] = {"question_id": question_id, "department_id": department_id}
+    predicates: list[sql.Composable] = [_THIS_QUESTION, _CALLERS_DEPARTMENT]
     if not filter.with_duplicates:
         predicates.extend(_NO_DUPLICATES)
 
@@ -301,11 +306,14 @@ _THEME_COUNTS = sql.SQL(
 )
 
 
-def theme_table(conn: psycopg.Connection[DictRow], question_id: UUID, filter: Filter) -> ThemeTable:
+def theme_table(
+    conn: psycopg.Connection[DictRow], question_id: UUID, filter: Filter, *, department_id: UUID
+) -> ThemeTable:
     """docs/04 section 6's theme-count query over `scope`, against the
     question's latest signed-off version (a reopen leaves the earlier one
-    signed off beside it, `_latest_signed_off`'s reasoning here too)."""
-    compiled = scope(question_id, filter)
+    signed off beside it, `_latest_signed_off`'s reasoning here too).
+    `department_id` is the caller's, as `scope` takes it."""
+    compiled = scope(question_id, filter, department_id=department_id)
     denominator = _scope_count(conn, compiled)
     query = compiled.sql + _THEME_COUNTS.format(
         version=_latest_signed_off(sql.Placeholder("question_id"))
@@ -334,12 +342,12 @@ _RELATED_DISTRIBUTION = sql.SQL(
 
 
 def related_distribution(
-    conn: psycopg.Connection[DictRow], question_id: UUID, filter: Filter
+    conn: psycopg.Connection[DictRow], question_id: UUID, filter: Filter, *, department_id: UUID
 ) -> list[tuple[str, int]]:
     """docs/04 section 6's related closed question distribution, among the
-    respondents `scope` narrows to. Empty when the question names no
-    `related_closed_question_id` (docs/04 section 1): o_safety, on screen
-    4's own example, has none."""
+    respondents `scope` narrows to under the caller's `department_id`.
+    Empty when the question names no `related_closed_question_id` (docs/04
+    section 1): o_safety, on screen 4's own example, has none."""
     row = conn.execute(
         "SELECT related_closed_question_id FROM question WHERE id = %s", (question_id,)
     ).fetchone()
@@ -348,7 +356,7 @@ def related_distribution(
     related_id = row["related_closed_question_id"]
     if related_id is None:
         return []
-    compiled = scope(question_id, filter)
+    compiled = scope(question_id, filter, department_id=department_id)
     query = compiled.sql + _RELATED_DISTRIBUTION.format(
         related=sql.Placeholder("related_question_id")
     )
