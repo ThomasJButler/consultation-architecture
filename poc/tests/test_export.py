@@ -614,3 +614,44 @@ def test_the_responses_sheet_has_a_column_per_shortlist_theme_only(
     columns = [name.removeprefix("o_reason: ") for name in header if name.startswith("o_reason: ")]
     assert columns == shortlist
     assert not longlist & set(columns)
+
+
+def test_a_cell_at_the_cap_keeps_a_visible_cut(
+    db: psycopg.Connection[DictRow], tmp_path: Path
+) -> None:
+    """openpyxl 3.1.5's check_string cuts every string to 32,767
+    characters, Excel's own cell limit, without a word (cell.py line 163),
+    and the input's cell cap is the same number (CONSULT_MAX_CELL_CHARS in
+    .env.example), so an answer at the cap that `neutralise` prefixes, or
+    that an escape lengthens, loses its tail silently. The cut has to show
+    where it is and the manifest has to count it. Hand count: 1 + 32,765 +
+    1 is the cap, 32,768 once prefixed, cut to 32,764 and "..." appended;
+    one character shorter, it fits exactly once prefixed."""
+    signed = signed_off_questions(db, ("o_reason",))
+    targets = db.execute(
+        "SELECT a.id, r.external_id FROM answer a JOIN respondent r ON r.id = a.respondent_id"
+        " WHERE a.question_id = %s AND NOT a.is_blank ORDER BY a.id LIMIT 2",
+        (signed["o_reason"].question_id,),
+    ).fetchall()
+    assert len(targets) == 2
+    at_cap = "=" + "a" * 32765 + "Z"
+    under = "=" + "a" * 32764 + "Z"
+    assert (len(at_cap), len(under)) == (32767, 32766)
+    for target, text in zip(targets, (at_cap, under), strict=True):
+        db.execute("UPDATE answer SET value_text = %s WHERE id = %s", (text, target["id"]))
+    db.commit()
+
+    path = tmp_path / "export.xlsx"
+    export.write_workbook(db, signed["o_reason"].consultation_id, path)
+
+    workbook = load_workbook(path)
+    responses = workbook["Responses"]
+    header = [cell.value for cell in next(responses.iter_rows(max_row=1))]
+    index = {name: i for i, name in enumerate(header)}
+    by_ref = {row[index["respondent_ref"]].value: row for row in responses.iter_rows(min_row=2)}
+    cut = by_ref[targets[0]["external_id"]][index["o_reason"]].value
+    assert cut == "'=" + "a" * 32762 + "..."
+    assert by_ref[targets[1]["external_id"]][index["o_reason"]].value == "'" + under
+
+    manifest = {row[0].value: row[1].value for row in workbook["Manifest"].iter_rows(min_row=2)}
+    assert manifest["truncated_cells"] == "1"
