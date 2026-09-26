@@ -38,6 +38,7 @@ import socket
 import threading
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from uuid import UUID
 
@@ -697,20 +698,36 @@ def _query(args: argparse.Namespace, settings: Settings) -> int:
             distribution = query.related_distribution(
                 conn, args.question, parsed, department_id=department_id
             )
+            # What with=duplicates would add: the same scope with the two
+            # IS NULL predicates dropped, less what the default scope
+            # already counts (docs/02 section 7, decision 9). Naming it is
+            # cli.py's half of the finding export.py's own summary line
+            # already carries.
+            shown = query.theme_table(
+                conn,
+                args.question,
+                replace(parsed, with_duplicates=True),
+                department_id=department_id,
+            )
         except LookupError:
             print(f"question {args.question}: not found")
             return 1
         except FilterError as exc:
             print(f"refused: {exc}")
             return 2
+    hidden = shown.denominator - table.denominator
     logs.log_event(
         logger,
         "queried",
         question_id=args.question,
         theme_count=len(table.rows),
         respondent_count=table.denominator,
+        hidden_count=hidden,
     )
-    print(f"question {args.question}: of {table.denominator} respondents who answered")
+    line = f"question {args.question}: of {table.denominator} respondents who answered"
+    if hidden:
+        line += f" ({hidden} duplicate answers hidden; add --filter with=duplicates to count them)"
+    print(line)
     for row in table.rows:
         pct = (row.respondents / table.denominator * 100) if table.denominator else 0.0
         print(f"  {row.key}  {report.shown(row.label)}  {row.respondents}  {pct:.1f}%")
