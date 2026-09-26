@@ -1,0 +1,160 @@
+"""What the reconciler's statements promise (docs/02, section 5).
+
+Every five minutes, in order, each idempotent: a second pass over what
+the first left changes nothing. Each test builds the rows a statement
+scans by hand, runs it, and compares the rows read back with what the
+section says it does. Expected values are the design's or a hand count,
+never the code's.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+from uuid import UUID
+
+import psycopg
+import pytest
+from psycopg.rows import DictRow
+
+from consult import reconciler
+from consult.jobs import claim
+from tests.rows import make_consultation, make_department, make_open_question, make_queued_job
+
+pytestmark = pytest.mark.db
+
+# Either side of the ten-minute lease (docs/02, step 5).
+STALE = timedelta(minutes=11)
+# A job is sent before it's claimed, so a lease that went quiet eleven
+# minutes back was sent a little before that.
+SENT_BEFORE_THE_CLAIM = timedelta(minutes=12)
+# ADR-002: the retry budget is attempts < 5.
+RETRY_BUDGET = 5
+
+
+def _jobs(db: psycopg.Connection[DictRow], consultation_id: UUID) -> dict[UUID, DictRow]:
+    rows = db.execute("SELECT * FROM job WHERE consultation_id = %s", (consultation_id,))
+    return {row["id"]: row for row in rows.fetchall()}
+
+
+def _questions(db: psycopg.Connection[DictRow], consultation_id: UUID) -> dict[UUID, str]:
+    rows = db.execute(
+        "SELECT id, status FROM question WHERE consultation_id = %s", (consultation_id,)
+    )
+    return {row["id"]: str(row["status"]) for row in rows.fetchall()}
+
+
+def _consultation(db: psycopg.Connection[DictRow], consultation_id: UUID) -> DictRow | None:
+    return db.execute(
+        "SELECT status, attention_reason FROM consultation WHERE id = %s", (consultation_id,)
+    ).fetchone()
+
+
+def _outbox(db: psycopg.Connection[DictRow], consultation_id: UUID) -> list[DictRow]:
+    return db.execute(
+        """
+        SELECT kind, subject_id, status FROM notification_outbox
+         WHERE consultation_id = %s ORDER BY id
+        """,
+        (consultation_id,),
+    ).fetchall()
+
+
+def _now(db: psycopg.Connection[DictRow]) -> datetime:
+    """The database's clock, read in a transaction of its own and
+    committed, so a stamp any later transaction writes is at or past it."""
+    row = db.execute("SELECT now() AS now").fetchone()
+    db.commit()
+    assert row is not None
+    stamp: datetime = row["now"]
+    return stamp
+
+
+def _age(
+    db: psycopg.Connection[DictRow],
+    job_id: UUID,
+    *,
+    attempts: int,
+    sent_ago: timedelta,
+    heartbeat_ago: timedelta | None = None,
+) -> None:
+    """Hand-set a job's attempts and its clocks, the heartbeat only when given."""
+    db.execute(
+        """
+        UPDATE job SET attempts = %s, sent_at = now() - %s,
+               heartbeat_at = coalesce(now() - %s::interval, heartbeat_at)
+         WHERE id = %s
+        """,
+        (attempts, sent_ago, heartbeat_ago, job_id),
+    )
+
+
+def test_recover_resends_a_stale_job_and_fails_it_at_five_attempts(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    # Statement 2 (docs/02, section 5): a queued job whose send is over
+    # ten minutes old, or a running one whose heartbeat is, is re-sent
+    # below five attempts and failed at five. Two questions stay
+    # configured, so fan-in 1 stays shut and the failure moves nothing
+    # but its own edge.
+    consultation_id = make_consultation(db, make_department(db), status="processing")
+    q_stale_queued = make_open_question(db, consultation_id, "o_1", ordinal=1, status="configured")
+    q_stale_running = make_open_question(db, consultation_id, "o_2", ordinal=2)
+    q_spent = make_open_question(db, consultation_id, "o_3", ordinal=3, status="assigning_themes")
+    q_fresh_queued = make_open_question(db, consultation_id, "o_4", ordinal=4, status="configured")
+    q_live = make_open_question(db, consultation_id, "o_5", ordinal=5)
+
+    stale_queued = make_queued_job(db, consultation_id, q_stale_queued)
+    _age(db, stale_queued, attempts=1, sent_ago=STALE)
+
+    stale_running = make_queued_job(db, consultation_id, q_stale_running)
+    assert claim(db, stale_running, "w-dead") is not None
+    _age(db, stale_running, attempts=2, sent_ago=SENT_BEFORE_THE_CLAIM, heartbeat_ago=STALE)
+
+    spent = make_queued_job(db, consultation_id, q_spent, kind="map_themes")
+    assert claim(db, spent, "w-dead") is not None
+    _age(db, spent, attempts=RETRY_BUDGET, sent_ago=SENT_BEFORE_THE_CLAIM, heartbeat_ago=STALE)
+
+    fresh_queued = make_queued_job(db, consultation_id, q_fresh_queued)
+    live = make_queued_job(db, consultation_id, q_live)
+    assert claim(db, live, "w-alive") is not None
+    db.commit()
+
+    before = _jobs(db, consultation_id)
+    questions_before = _questions(db, consultation_id)
+    started = _now(db)
+
+    assert reconciler.recover(db) == (2, 1)
+
+    after = _jobs(db, consultation_id)
+    # Re-sent: a fresh sent_at and nothing else. The message is a hint and
+    # the job table the truth (ADR-006, last paragraph), and nothing here
+    # claims, so the running one keeps its stale lease for a worker's
+    # conditional claim to take over (docs/02, step 5).
+    for job_id in (stale_queued, stale_running):
+        resent = after[job_id]
+        assert resent["sent_at"] >= started
+        assert resent == {**before[job_id], "sent_at": resent["sent_at"]}
+    # A fresh send and a live lease are left as they were.
+    for job_id in (fresh_queued, live):
+        assert after[job_id] == before[job_id]
+    # At five attempts, fail_job: the job failed, its question on the
+    # failed edge, the consultation's attention_reason naming both, and one
+    # attention_needed row whose subject is the job (docs/02, section 6
+    # and correction 3). The consultation's status doesn't move.
+    assert after[spent] == {**before[spent], "status": "failed"}
+    assert _questions(db, consultation_id) == {**questions_before, q_spent: "map_failed"}
+    assert _consultation(db, consultation_id) == {
+        "status": "processing",
+        "attention_reason": f"map_failed:{q_spent}",
+    }
+    outbox = _outbox(db, consultation_id)
+    assert outbox == [{"kind": "attention_needed", "subject_id": spent, "status": "pending"}]
+
+    # A second pass finds nothing to do. The running job's heartbeat is
+    # still stale, but its re-send opened a ten-minute window of its own,
+    # as a queued job's send does (ADR-006: "a lost message is caught by
+    # the ten-minute re-send"); re-sending it on every pass would make the
+    # statement anything but idempotent (docs/02, section 5).
+    assert reconciler.recover(db) == (0, 0)
+    assert _jobs(db, consultation_id) == after
+    assert _outbox(db, consultation_id) == outbox
