@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from uuid import UUID
 
 import psycopg
@@ -20,9 +21,12 @@ import pytest
 from psycopg.errors import UniqueViolation
 from psycopg.rows import DictRow
 
+from consult.fake_model import completion
 from consult.ingest import ingest
 from consult.jobs import claim
+from consult.llm import Completion, Prompt
 from consult.prompts import DATA_PREAMBLE, PromptAnswer
+from consult.replies import Reason, ReplyError, parse_assignments
 from consult.store import PIPELINE_ROLE, as_role
 from consult.themes import (
     BATCH_SIZE,
@@ -406,6 +410,75 @@ def test_preview_gives_every_candidate_a_count_and_quotes(db: psycopg.Connection
     )
     # And nothing counted twice across the takeover: the count is the sample.
     assert sum(c["preview_count"] for c in counts) == distinct
+
+
+@dataclass
+class FirstPreviewAnswerUnlabelled:
+    """The fake's good replies, except that the first mapping-shaped reply,
+    the preview's first batch, leaves its first answer with an empty key
+    list. It keeps that prompt and reply for the test to read back."""
+
+    inner: RecordingLLM = field(default_factory=RecordingLLM)
+    emptied: tuple[Prompt, Completion] | None = None
+
+    def complete(self, prompt: Prompt) -> Completion:
+        good = self.inner.complete(prompt)
+        if not prompt.theme_keys or self.emptied is not None:
+            return good
+        reply = json.loads(good.text)
+        reply["assignments"][0]["theme_keys"] = []
+        emptied = completion(json.dumps(reply), prompt, len(self.inner.prompts))
+        self.emptied = (prompt, emptied)
+        return emptied
+
+
+def test_the_preview_counts_nothing_for_an_empty_key_list(db: psycopg.Connection[DictRow]) -> None:
+    # The preview only counts (docs/02, step 6), so an answer the model
+    # leaves with no key adds to no theme and the job goes on. Refused
+    # here, the reply failed the whole find_themes attempt, and the retry
+    # draws the same sample from the same seed. Mapping writes tags, so
+    # there the same reply is still refused and goes to the retry at size
+    # one (docs/02, step 9).
+    staged = staged_fixture(db)
+    ingest(db, staged.consultation_id)
+    job_id = queued_find_themes_job(db, staged, "o_reason")
+    lease = claim(db, job_id, "worker-1")
+    assert lease is not None
+    llm = FirstPreviewAnswerUnlabelled()
+
+    run_find_themes(db, llm, lease)
+
+    assert db.execute("SELECT status FROM job WHERE id = %s", (job_id,)).fetchone() == {
+        "status": "succeeded"
+    }
+    assert llm.emptied is not None
+    prompt, reply = llm.emptied
+    unlabelled = prompt.answer_ids[0]
+    # Every distinct answer is in the sample (fewer than 200), and the fake
+    # labels each with the first key, ACCESS, except the one left empty.
+    shortlist = db.execute(
+        """
+        SELECT t.id, t.key, t.preview_count FROM theme t
+          JOIN theme_set_version v ON v.id = t.theme_set_version_id
+         WHERE v.question_id = %s AND NOT t.is_longlist ORDER BY t.key
+        """,
+        (staged.configured.questions["o_reason"],),
+    ).fetchall()
+    assert [(t["key"], t["preview_count"]) for t in shortlist] == [
+        ("ACCESS", len(distinct_reasons()) - 1),
+        ("PARKING", 0),
+        ("SAFETY", 0),
+    ]
+    quoted = db.execute(
+        "SELECT answer_id FROM theme_example WHERE theme_id = ANY(%s)",
+        ([t["id"] for t in shortlist],),
+    ).fetchall()
+    assert len(quoted) == EXAMPLES_PER_THEME
+    assert unlabelled not in {q["answer_id"] for q in quoted}
+
+    with pytest.raises(ReplyError) as refused:
+        parse_assignments(reply, prompt)
+    assert (refused.value.reason, refused.value.count) == (Reason.NO_LABEL, 1)
 
 
 def test_find_themes_writes_v1_and_flips_the_question_in_one_transaction(
