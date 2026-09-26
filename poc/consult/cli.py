@@ -190,19 +190,21 @@ def _validate(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def _department(conn: psycopg.Connection[DictRow], name: str) -> UUID:
-    # Find or create in one statement on the unique name, so two runs
-    # racing on a new department can't each make one. The no-op SET is what
-    # gets RETURNING to yield the existing row.
-    found = conn.execute(
-        """
-        INSERT INTO department (name) VALUES (%s)
-        ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
-        RETURNING id
-        """,
+    # Find or create on the unique name, so two runs racing on a new
+    # department can't each make one. DO NOTHING takes no lock on a row
+    # that's already there, where a DO UPDATE setting the unique column
+    # would lock it FOR UPDATE until the ingest commits, and that blocks
+    # the FOR KEY SHARE every insert referencing department takes, a
+    # worker's checkpoints and tags among them (PostgreSQL 17 manual,
+    # 13.3.2). A racing insert of the same name makes DO NOTHING wait for
+    # it to commit, so the SELECT that follows finds its row.
+    created = conn.execute(
+        "INSERT INTO department (name) VALUES (%s) ON CONFLICT (name) DO NOTHING RETURNING id",
         (name,),
     ).fetchone()
+    found = created or conn.execute("SELECT id FROM department WHERE name = %s", (name,)).fetchone()
     if found is None:
-        raise LookupError("department insert returned no row")
+        raise LookupError("department neither inserted nor found")
     return UUID(str(found["id"]))
 
 
