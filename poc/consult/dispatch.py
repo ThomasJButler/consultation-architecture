@@ -180,10 +180,16 @@ def dispatch(conn: psycopg.Connection[DictRow], settings: Settings) -> int:
     )
     # One seed per job, below 2**31 to fit the int[] the UPDATE casts to.
     seeds = [secrets.randbelow(2**31) for _ in picked]
+    # The send's time is the clock's, not now(): now() is the start of the
+    # caller's transaction (PostgreSQL 17 manual, 9.9.5), and the ingest
+    # command's has staged, configured and ingested by here. A send stamped
+    # with it would look as old as all that, and statement 2 re-sends a
+    # send over ten minutes old (docs/02, section 5). Its staleness tests
+    # compare against now() less the lease, which a later stamp still meets.
     return conn.execute(
         """
         UPDATE job
-           SET status = 'queued', sent_at = now(),
+           SET status = 'queued', sent_at = clock_timestamp(),
                model_alias = coalesce(job.model_alias, %(alias)s),
                params = CASE WHEN job.params ? 'seed' THEN job.params
                              ELSE job.params || jsonb_build_object('seed', picked.seed) END
