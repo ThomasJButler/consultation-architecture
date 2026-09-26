@@ -19,7 +19,7 @@ import pytest
 from openpyxl import load_workbook
 from psycopg.rows import DictRow
 
-from consult import query
+from consult import export, query
 from consult.cli import main
 from consult.config import Settings
 from consult.store import PIPELINE_ROLE
@@ -320,3 +320,45 @@ def test_the_query_line_says_what_it_hides(
     out = capsys.readouterr().out
     assert f"question {reason_id}: of 221 respondents who answered" in out
     assert "hidden" not in out
+
+
+def test_export_refuses_its_own_error_and_names_truncated_cells(
+    db: psycopg.Connection[DictRow],
+    db_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ingested(db, db_settings)
+    consultation_row = db.execute("SELECT id FROM consultation").fetchone()
+    assert consultation_row is not None
+    consultation_id = consultation_row["id"]
+
+    # write_workbook's own refusal (a connection busy, or a cell no escape
+    # could fix) has to come out as a code and exit 1, never a traceback
+    # that could carry the value it failed on.
+    def refuse(*_args: object, **_kwargs: object) -> export.Exported:
+        raise export.ExportError(export.ExportError.CONNECTION_BUSY)
+
+    monkeypatch.setattr(export, "write_workbook", refuse)
+    out_path = tmp_path / "refused.xlsx"
+    capsys.readouterr()
+
+    code = main(["export", str(consultation_id), "--out", str(out_path)], settings=db_settings)
+    out = capsys.readouterr().out
+    assert code == 1
+    assert out == "refused: connection_busy\n"
+    assert not out_path.exists()
+
+    # Exported carries the count write_workbook already writes into the
+    # manifest, and the line names it once it isn't 0.
+    def canned(*_args: object, **_kwargs: object) -> export.Exported:
+        return export.Exported(respondents=1, answers=1, tags=0, sheets=2, truncated_cells=3)
+
+    monkeypatch.setattr(export, "write_workbook", canned)
+    capsys.readouterr()
+
+    code = main(["export", str(consultation_id), "--out", str(out_path)], settings=db_settings)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "3 cells truncated at the cap" in out
