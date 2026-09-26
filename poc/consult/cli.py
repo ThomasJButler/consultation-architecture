@@ -173,6 +173,10 @@ def _ingest(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def main(argv: Sequence[str] | None = None, *, settings: Settings | None = None) -> int:
+    # Here and not under __main__: the console script pyproject.toml
+    # declares calls main directly, and the formatter is the control on the
+    # one log path that's ours (THREAT_MODEL.md, section 2). Idempotent.
+    logs.configure()
     args = build_parser().parse_args(argv)
     resolved = config.load() if settings is None else settings
     if args.command == "init":
@@ -190,5 +194,4 @@ def main(argv: Sequence[str] | None = None, *, settings: Settings | None = None)
 
 
 if __name__ == "__main__":
-    logs.configure()
     raise SystemExit(main())
