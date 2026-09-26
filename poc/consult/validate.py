@@ -318,7 +318,10 @@ def validate(definition: Definition, responses: Responses, rates: Rates = DEFAUL
                     count,
                     tuple(tally.unknown_rows[value]),
                     UNKNOWN_VALUE_RESOLUTIONS,
-                    Resolution.MAP_TO_OPTION,
+                    # The default has to be one that needs no choice from
+                    # the reviewer, and it's what configure.defaults() and
+                    # ingest apply when nobody chose.
+                    Resolution.TREAT_AS_NOT_ANSWERED,
                 )
             )
         options = closed[ref].options if ref in closed else ()
