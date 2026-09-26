@@ -25,21 +25,85 @@ section 0 leaves them out, so the relay relays and does nothing more.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import timedelta
 
 import psycopg
 from psycopg.rows import DictRow
 
-from consult import transitions
+from consult import dispatch, logs, transitions
+from consult.config import Settings
 from consult.jobs import STALE_AFTER
+from consult.store import PIPELINE_ROLE, as_role
 from consult.worker import MAX_ATTEMPTS
+
+logger = logging.getLogger(__name__)
 
 # The states fail_job fails a job from; anything else has moved on since
 # the scan that found it (see _fail_each).
 _FAILABLE = frozenset({"queued", "running", "failed_retryable"})
 # ADR-006's relay query takes twenty rows at a time.
 RELAY_LIMIT = 20
+
+
+@dataclass(frozen=True)
+class Reconciled:
+    """What one pass did, statement by statement, for the command to print
+    and log. Counts only, so nothing from a reply or an answer can ride
+    along."""
+
+    dispatched: int
+    resent: int
+    failed: int  # jobs fail_job marked failed, statements 2 and 3 together
+    retried: int
+    advanced: int  # consultations either fan-in moved
+    relayed: int
+
+
+def reconcile(conn: psycopg.Connection[DictRow], settings: Settings) -> Reconciled:
+    """The five statements in order, each committed before the next
+    starts, so a failure in one leaves the ones before it done (docs/02,
+    section 5). Dispatch is step 4's own statement, the slow path for a
+    crash or a slot the caps have just freed.
+
+    All of it as the pipeline role, whose grants are the control on the
+    pipeline's path (docs/06, section 2.4), as `worker.run_once` runs, so
+    the command needn't set one. One log line carries the six counts.
+    """
+    with as_role(conn, PIPELINE_ROLE):
+        dispatched = dispatch.dispatch(conn, settings)
+        conn.commit()
+        resent, failed_stale = recover(conn)
+        conn.commit()
+        retried, failed_due = retry(conn)
+        conn.commit()
+        advanced = rerun_fan_ins(conn)
+        conn.commit()
+        relayed = relay(conn)
+        conn.commit()
+    # RESET ROLE opens a transaction of its own.
+    conn.commit()
+    reconciled = Reconciled(
+        dispatched=dispatched,
+        resent=resent,
+        failed=failed_stale + failed_due,
+        retried=retried,
+        advanced=advanced,
+        relayed=relayed,
+    )
+    logs.log_event(
+        logger,
+        "reconciled",
+        dispatched_count=reconciled.dispatched,
+        resent_count=reconciled.resent,
+        failed_count=reconciled.failed,
+        retried_count=reconciled.retried,
+        advanced_count=reconciled.advanced,
+        relayed_count=reconciled.relayed,
+    )
+    return reconciled
 
 
 def recover(
