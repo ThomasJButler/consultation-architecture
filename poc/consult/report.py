@@ -19,7 +19,10 @@ from consult.validate import ColumnKind, Report, Warning
 # A cell can hold a newline (any textarea) or an escape sequence (a crafted
 # file), and either would let a respondent write a line of this report or
 # a terminal command into it. Shown as their escaped form instead.
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# C0 and C1 controls, and the Unicode format characters that can reorder
+# or hide text on a screen: zero-width, bidirectional embeddings and
+# overrides, bidirectional isolates. Each is shown as its escape.
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
 
 
 def shown(text: str) -> str:

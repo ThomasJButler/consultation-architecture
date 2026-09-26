@@ -19,6 +19,7 @@ from psycopg.rows import DictRow
 from consult.jobs import claim
 from consult.transitions import (
     Advance,
+    SignOffConflictError,
     TransitionError,
     advance_consultation,
     finish_find_themes,
@@ -340,3 +341,31 @@ def test_the_early_edges_refuse_a_consultation_in_the_wrong_state(
         ).fetchall()
     }
     assert statuses == {staged: "staged", draft: "draft"}
+
+
+def test_sign_off_refuses_an_edit_it_has_not_seen(db: psycopg.Connection[DictRow]) -> None:
+    # docs/04: edit_version "is the counter the sign-off screen's
+    # expected_version checks". The check has to be in the statement that
+    # supersedes the candidate, so an edit that lands between the
+    # reviewer's look and their click is a conflict and not a silent
+    # freeze. Found by the security review.
+    consultation_id = make_consultation(db, make_department(db), status="awaiting_review")
+    question_id = make_open_question(db, consultation_id, status="themes_ready")
+    candidate = make_theme_set_version(db, question_id)
+    make_theme(db, candidate, "PARKING")
+    db.execute("UPDATE theme_set_version SET edit_version = 2 WHERE id = %s", (candidate,))
+
+    with pytest.raises(SignOffConflictError), db.transaction():
+        sign_off(db, question_id, uuid4(), expected_version=1)
+
+    state = db.execute(
+        """
+        SELECT q.status, (SELECT count(*) FROM theme_set_version WHERE question_id = q.id) AS versions,
+               (SELECT status FROM theme_set_version WHERE id = %s) AS candidate
+          FROM question q WHERE q.id = %s
+        """,
+        (candidate, question_id),
+    ).fetchone()
+    assert state == {"status": "themes_ready", "versions": 1, "candidate": "candidate"}
+    signed = sign_off(db, question_id, uuid4(), expected_version=2)
+    assert signed is not None

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from consult import report
 from consult.cli import main
 from consult.config import Settings
 from consult.inputs import Caps
@@ -115,6 +116,10 @@ def test_a_cell_cannot_forge_a_line_of_the_report(
     assert "\n  FORGED" not in out
     # One real "errors:" line; the forged one is text inside a value now.
     assert out.count("\nerrors: ") == 1
+    # Unicode format characters are escaped the same way: a bidirectional
+    # override or a zero-width space in a cell can't make a line read as
+    # something it isn't (the security review of PR-07).
+    assert report.shown("safe\u202eelbatable\u200b") == "safe\\u202eelbatable\\u200b"
 
 
 def test_a_definition_problem_cannot_forge_a_line_either(

@@ -8,6 +8,10 @@ runs validate, stage, configure and ingest in turn with every warning's
 default resolution and commits once, so the proof-of-concept goes from a
 spreadsheet to a schema full of rows with no model yet (docs/02, steps 2
 to 3a). Its output is counts and ids, never a value from the file.
+`consult run-job` claims one find_themes job and runs it to the end with
+the fake, committing after every batch; `consult themes` lists a
+question's candidates as keys, labels, counts and answer ids; `consult
+sign-off` confirms them as they stand (docs/02, steps 6 to 8).
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import secrets
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -23,14 +28,18 @@ from uuid import UUID
 import psycopg
 from psycopg.rows import DictRow
 
-from consult import config, logs, report, store
+from consult import config, jobs, logs, report, store, themes, transitions
 from consult.config import Settings
 from consult.configure import ConfigureError, configure, defaults
 from consult.definition import Definition, DefinitionError, read_definition
+from consult.fake_model import OfflineModel
 from consult.ingest import IngestError, ingest
 from consult.inputs import InputError
+from consult.jobs import LeaseLostError
+from consult.replies import ReplyError
 from consult.responses import Responses
 from consult.stage import stage
+from consult.store import PIPELINE_ROLE, as_role
 from consult.validate import Report, validate
 
 logger = logging.getLogger(__name__)
@@ -56,6 +65,21 @@ def build_parser() -> argparse.ArgumentParser:
     load.add_argument("--definition", type=Path, required=True, help="the definition workbook")
     load.add_argument("--name", required=True, help="the consultation's name")
     load.add_argument("--department", required=True, help="the department's name, created if new")
+    run = commands.add_parser("run-job", help="claim one find_themes job and run it to the end")
+    run.add_argument("job", type=UUID, help="the job id")
+    run.add_argument("--worker", required=True, help="this worker's name, for the lease")
+    run.add_argument("--model", choices=["fake"], default="fake", help="the model: only the fake")
+    show = commands.add_parser("themes", help="list a question's candidate themes")
+    show.add_argument("question", type=UUID, help="the question id")
+    confirm = commands.add_parser("sign-off", help="confirm a question's themes as they stand")
+    confirm.add_argument("question", type=UUID, help="the question id")
+    confirm.add_argument("--reviewer", type=UUID, required=True, help="the reviewer's user id")
+    confirm.add_argument(
+        "--expect-version",
+        type=int,
+        required=True,
+        help="the edit counter the reviewer was looking at (docs/02, screen 3)",
+    )
     return parser
 
 
@@ -172,6 +196,194 @@ def _ingest(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def _run_job(args: argparse.Namespace, settings: Settings) -> int:
+    """One find_themes job, pending to succeeded, committing after every
+    batch so a crash between two leaves checkpoints a takeover can resume
+    from (ADR-002). The queue step stands in for dispatch (PR-08)."""
+    started = time.monotonic()
+    llm = OfflineModel()
+    with store.connect(settings) as conn:
+        # Queued by the stand-in, then claimed and run as the pipeline role,
+        # whose grants are the control on the worker's path (docs/06,
+        # section 2.4): SET ROLE outlives the commits between batches, and
+        # RESET ROLE follows the last one.
+        jobs.queue(conn, args.job, model_alias=args.model, seed=secrets.randbelow(2**31))
+        conn.commit()
+        with as_role(conn, PIPELINE_ROLE):
+            lease = jobs.claim(conn, args.job, args.worker)
+            if lease is None:
+                state = conn.execute("SELECT status FROM job WHERE id = %s", (args.job,)).fetchone()
+                print(f"job {args.job}: not claimable ({state['status'] if state else 'unknown'})")
+                conn.rollback()
+                return 1
+            conn.commit()
+            try:
+                themes.run_find_themes(
+                    conn, llm, lease, after_batch=lambda _batch_no: conn.commit()
+                )
+            except ReplyError as exc:
+                # The failure is a code and a request id, never the reply
+                # (THREAT_MODEL.md, section 2); whether it retries is the
+                # reconciler's call (PR-08). Recording it is a fenced write
+                # too, so the lease can turn out to have gone here as well.
+                conn.rollback()
+                try:
+                    jobs.record_failure(conn, lease, exc.code, provider_request_id=None)
+                except LeaseLostError as lost:
+                    conn.rollback()
+                    print(f"job {args.job}: {lost.code.value}")
+                    return 1
+                conn.commit()
+                print(f"job {args.job}: failed ({exc.code.value}: {exc.reason.value})")
+                return 1
+            except LeaseLostError as exc:
+                conn.rollback()
+                print(f"job {args.job}: {exc.code.value}")
+                return 1
+            conn.commit()
+        summary = conn.execute(
+            """
+            SELECT j.question_id, q.status AS question, c.status AS consultation,
+                   (SELECT string_agg(stage || ' ' || n, ', ' ORDER BY first)
+                      FROM (SELECT stage, count(*) AS n, min(batch_no) AS first
+                              FROM job_batch WHERE job_id = j.id GROUP BY stage) s) AS stages,
+                   (SELECT count(*) FROM theme t JOIN theme_set_version v ON v.id = t.theme_set_version_id
+                     WHERE v.question_id = q.id AND NOT t.is_longlist) AS shortlist,
+                   (SELECT count(*) FROM theme t JOIN theme_set_version v ON v.id = t.theme_set_version_id
+                     WHERE v.question_id = q.id AND t.is_longlist) AS longlist
+              FROM job j JOIN question q ON q.id = j.question_id
+              JOIN consultation c ON c.id = j.consultation_id
+             WHERE j.id = %s
+            """,
+            (args.job,),
+        ).fetchone()
+    if summary is None:
+        raise LookupError(f"job {args.job} vanished")
+    counts: dict[str, int] = {}
+    for part in (summary["stages"] or "").split(", "):
+        stage_name, _, count = part.rpartition(" ")
+        if stage_name:
+            counts[stage_name] = int(count)
+    logs.log_event(
+        logger,
+        "find_themes_run",
+        job_id=args.job,
+        question_id=summary["question_id"],
+        status=summary["question"],
+        generate_count=counts.get("generate", 0),
+        condense_count=counts.get("condense", 0),
+        preview_count=counts.get("preview", 0),
+        shortlist_count=summary["shortlist"],
+        longlist_count=summary["longlist"],
+        model_call_count=len(llm.prompts),
+        duration_ms=round((time.monotonic() - started) * 1000),
+    )
+    batches = ", ".join(f"{n} {stage}" for stage, n in counts.items())
+    print(
+        f"job {args.job}: question {summary['question_id']} {summary['question']}; "
+        f"{batches} batches; shortlist {summary['shortlist']}, "
+        f"longlist {summary['longlist']}; consultation {summary['consultation']}"
+    )
+    return 0
+
+
+def _themes(args: argparse.Namespace, settings: Settings) -> int:
+    """The latest version's shortlist with counts and example answer ids,
+    then the longlist with what each folded into. Keys, labels and numbers;
+    the quotes themselves are the sign-off screen's to show (docs/02, step 8)."""
+    with store.connect(settings) as conn:
+        version = conn.execute(
+            """
+            SELECT id, version_no, status, edit_version FROM theme_set_version
+             WHERE question_id = %s ORDER BY version_no DESC LIMIT 1
+            """,
+            (args.question,),
+        ).fetchone()
+        if version is None:
+            print(f"question {args.question}: no theme set yet")
+            return 1
+        rows = conn.execute(
+            """
+            SELECT t.key, t.label, t.description, t.is_longlist, t.preview_count,
+                   l.key AS folded_into,
+                   (SELECT string_agg(e.answer_id::text, ', ' ORDER BY e.rank)
+                      FROM theme_example e WHERE e.theme_id = t.id) AS examples
+              FROM theme t LEFT JOIN theme l ON l.id = t.lineage_theme_id
+             WHERE t.theme_set_version_id = %s
+             ORDER BY t.is_longlist, t.preview_count DESC NULLS LAST, t.key
+            """,
+            (version["id"],),
+        ).fetchall()
+    print(
+        f"question {args.question}: version {version['version_no']} "
+        f"({version['status']}, edit {version['edit_version']})"
+    )
+    print("shortlist:")
+    for row in rows:
+        if row["is_longlist"]:
+            continue
+        line = f"  {row['key']}  {report.shown(row['label'])}  count {row['preview_count']}"
+        if row["examples"]:
+            line += f"  examples {row['examples']}"
+        print(line)
+        if row["description"]:
+            # What sign-off freezes and every mapping prompt will carry; the
+            # reviewer has to have read it here (the security review, docs/07).
+            print(f"      {report.shown(row['description'])}")
+    longlist = [row for row in rows if row["is_longlist"]]
+    folded = ", ".join(
+        f"{row['key']} > {row['folded_into']}" if row["folded_into"] else row["key"]
+        for row in longlist
+    )
+    print(f"longlist ({len(longlist)}): {folded}")
+    return 0
+
+
+def _sign_off(args: argparse.Namespace, settings: Settings) -> int:
+    """Confirm as-is (docs/02, step 8; ADR-003). The guarded UPDATE is the
+    mutex and the edit counter is checked in the statement that supersedes
+    the candidate, so a reviewer who saw an older list gets a conflict."""
+    with store.connect(settings) as conn:
+        try:
+            signed = transitions.sign_off(
+                conn, args.question, args.reviewer, expected_version=args.expect_version
+            )
+        except transitions.SignOffConflictError:
+            conn.rollback()
+            print(
+                f"question {args.question}: conflict, the list has moved on from edit "
+                f"{args.expect_version}"
+            )
+            return 1
+        except transitions.TransitionError:
+            conn.rollback()
+            print(f"question {args.question}: refused, no candidate version to sign off")
+            return 1
+        if signed is None:
+            conn.rollback()
+            print(f"question {args.question}: refused, not awaiting sign-off")
+            return 1
+        conn.commit()
+        status = conn.execute(
+            "SELECT c.status FROM consultation c JOIN question q ON q.consultation_id = c.id WHERE q.id = %s",
+            (args.question,),
+        ).fetchone()
+    logs.log_event(
+        logger,
+        "signed_off",
+        question_id=args.question,
+        version_id=signed.version_id,
+        job_id=signed.job_id,
+        reviewer_id=args.reviewer,
+    )
+    print(
+        f"question {args.question} signed off: version {signed.version_id}, "
+        f"map_themes job {signed.job_id} pending; consultation "
+        f"{status['status'] if status else 'unknown'}"
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None, *, settings: Settings | None = None) -> int:
     # Here and not under __main__: the console script pyproject.toml
     # declares calls main directly, and the formatter is the control on the
@@ -190,6 +402,12 @@ def main(argv: Sequence[str] | None = None, *, settings: Settings | None = None)
         return 0
     if args.command == "ingest":
         return _ingest(args, resolved)
+    if args.command == "run-job":
+        return _run_job(args, resolved)
+    if args.command == "themes":
+        return _themes(args, resolved)
+    if args.command == "sign-off":
+        return _sign_off(args, resolved)
     return _validate(args, resolved)
 
 
