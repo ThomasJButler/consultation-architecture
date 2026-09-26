@@ -25,6 +25,7 @@ import psycopg
 from psycopg.rows import DictRow
 
 from consult.replies import KEY_PATTERN
+from consult.transitions import RESERVED_KEYS
 
 _KEY = re.compile(KEY_PATTERN)
 
@@ -74,6 +75,8 @@ def _theme_id(conn: psycopg.Connection[DictRow], version_id: UUID, key: str) -> 
 def _check_new(conn: psycopg.Connection[DictRow], version_id: UUID, key: str, label: str) -> None:
     if not _KEY.fullmatch(key):
         raise ReviewError("a key is upper case letters, digits and underscores, 2 to 40 long")
+    if key in RESERVED_KEYS:
+        raise ReviewError("that key is one sign-off adds itself")
     if not label:
         raise ReviewError("a label is required")
     taken = conn.execute(

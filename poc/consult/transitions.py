@@ -238,6 +238,9 @@ class SignOff:
 
 
 FALLBACK_THEMES = (("OTHER", "Other"), ("NO_REASON", "No reason given"))
+# Nobody else gets to propose these: a model's or a reviewer's OTHER would
+# stand in for the fallback with is_fallback false (the ON CONFLICT below).
+RESERVED_KEYS = frozenset(key for key, _label in FALLBACK_THEMES)
 
 
 def sign_off(

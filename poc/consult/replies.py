@@ -26,6 +26,7 @@ from enum import StrEnum
 
 from consult.errors import ErrorCode
 from consult.llm import Completion, Prompt
+from consult.transitions import RESERVED_KEYS
 
 # The shape a theme key must have: an enum value, not prose (docs/02, step
 # 9). consult/prompts.py puts the same pattern in the schemas it sends.
@@ -56,6 +57,7 @@ class Reason(StrEnum):
     NO_THEMES = "no_themes"
     TEXT_MALFORMED = "text_malformed"
     TEXT_TOO_LONG = "text_too_long"
+    KEY_RESERVED = "key_reserved"
 
 
 class ReplyError(Exception):
@@ -89,6 +91,15 @@ class CondensedTheme:
     label: str
     description: str
     merges: tuple[str, ...]
+
+
+def _key(key: str, count: int) -> str:
+    """A well-formed key that isn't one of sign-off's fallbacks."""
+    if not _KEY.fullmatch(key):
+        raise ReplyError(Reason.KEY_MALFORMED, count)
+    if key in RESERVED_KEYS:
+        raise ReplyError(Reason.KEY_RESERVED, count)
+    return key
 
 
 def _plain(text: str, limit: int, count: int) -> str:
@@ -170,11 +181,9 @@ def parse_themes(completion: Completion) -> tuple[ProposedTheme, ...]:
             raise ReplyError(Reason.WRONG_SHAPE, len(items))
         if not label:
             raise ReplyError(Reason.WRONG_SHAPE, len(items))
-        if not _KEY.fullmatch(key):
-            raise ReplyError(Reason.KEY_MALFORMED, len(items))
         themes.append(
             ProposedTheme(
-                key,
+                _key(key, len(items)),
                 _plain(label, MAX_LABEL, len(items)),
                 _plain(description, MAX_DESCRIPTION, len(items)),
             )
@@ -207,11 +216,9 @@ def parse_condensation(
             raise ReplyError(Reason.WRONG_SHAPE, len(items))
         if not label or not isinstance(merges, list) or not all(isinstance(m, str) for m in merges):
             raise ReplyError(Reason.WRONG_SHAPE, len(items))
-        if not _KEY.fullmatch(key):
-            raise ReplyError(Reason.KEY_MALFORMED, len(items))
         themes.append(
             CondensedTheme(
-                key,
+                _key(key, len(items)),
                 _plain(label, MAX_LABEL, len(items)),
                 _plain(description, MAX_DESCRIPTION, len(items)),
                 tuple(dict.fromkeys(merges)),
