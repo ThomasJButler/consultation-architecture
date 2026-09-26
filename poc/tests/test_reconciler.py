@@ -16,6 +16,7 @@ from uuid import UUID
 
 import psycopg
 import pytest
+from psycopg.pq import TransactionStatus
 from psycopg.rows import DictRow
 
 from consult import reconciler, store
@@ -48,6 +49,8 @@ NOT_YET_DUE = timedelta(minutes=1)
 RELAY_LIMIT = 20
 OWED = 30
 RELAYS = 2
+# Enough rows for a send to come after a row's own commit twice over.
+SENDS = 3
 # How long a pass may take before the test calls it stuck: the bound
 # test_fan_in_race.py gives its barrier.
 RETURNS_WITHIN_SECONDS = 30
@@ -439,3 +442,41 @@ def test_the_relay_marks_outbox_rows_sent_once(
 
     # Nothing is owed now, so a third relay sends nothing.
     assert reconciler.relay(db) == 0
+
+
+def _sent(conn: psycopg.Connection[DictRow]) -> list[int]:
+    """The outbox rows committed as sent with a time, read and let go."""
+    rows = conn.execute(
+        "SELECT id FROM notification_outbox WHERE status = 'sent' AND sent_at IS NOT NULL"
+        " ORDER BY id"
+    ).fetchall()
+    conn.commit()
+    return [row["id"] for row in rows]
+
+
+def test_the_relay_sends_with_no_transaction_open_and_commits_each_row(
+    db: psycopg.Connection[DictRow], db_settings: Settings
+) -> None:
+    # The send is a call out to Notify, so no transaction is open across
+    # it and no lock held (ADR-006), and each row's sent mark commits
+    # before the next send. A crash part-way then leaves at most the row
+    # it was sending in 'sending', for ADR-006's reference lookup, and not
+    # every row sent so far. The stand-in send records, as it's called,
+    # the relay connection's transaction status and which rows another
+    # connection already sees sent with a time.
+    consultation_id = make_consultation(db, make_department(db), status="processing")
+    owed = [make_outbox_row(db, consultation_id) for _ in range(SENDS)]
+    db.commit()
+
+    seen: list[tuple[int, TransactionStatus, list[int]]] = []
+    with store.connect(db_settings) as observer:
+
+        def send(outbox_id: int) -> str:
+            seen.append((outbox_id, db.info.transaction_status, _sent(observer)))
+            return f"fake-notify-{outbox_id}"
+
+        assert reconciler.relay(db, send=send) == SENDS
+
+    # At the nth send, the n rows before it are committed and nothing is open.
+    assert seen == [(row_id, TransactionStatus.IDLE, owed[:n]) for n, row_id in enumerate(owed)]
+    assert _sent(db) == owed
