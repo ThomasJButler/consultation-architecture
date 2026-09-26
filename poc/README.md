@@ -29,19 +29,28 @@ make validate                   # consult validate on the fixtures
 make ingest                     # consult ingest on the fixtures: a consultation in processing
 ```
 
-From there the review side runs by id. `consult ingest` prints the
-consultation id; the two `find_themes` jobs it inserted are in the `job`
-table. Then:
+From there the review side runs by id, on `.venv/bin/consult` (plain
+`consult` needs the venv on `PATH` instead). `consult ingest` prints the
+consultation id; `worker --once`, `themes` and `sign-off` each run once
+per open question, twice on the fixtures:
 
 ```bash
-consult run-job <job id> --worker w1 --model fake   # once per open question
-consult themes <question id>                         # keys, labels, counts, example answer ids
-consult sign-off <question id> --reviewer <uuid> --expect-version 0
-consult worker --once                                 # runs the map_themes job sign-off queued
-consult reconcile                                      # dispatch, recover, retry, fan-ins, relay
-consult query <question id> --filter attr:d_area=Villages --filter theme:<key>
-consult export <consultation id> --out out.xlsx
+.venv/bin/consult worker --once                     # runs the oldest find_themes job
+.venv/bin/consult worker --once                     # and the other one: awaiting_review
+docker compose exec db psql -U consult -d consult -c \
+  "select id, column_ref, status from question where kind = 'open'"
+.venv/bin/consult themes <question id>               # once per open question
+.venv/bin/consult sign-off <question id> --reviewer <uuid> --expect-version 0
+.venv/bin/consult worker --once                     # runs the map_themes job sign-off queued
+.venv/bin/consult worker --once                     # and the other one: ready
+.venv/bin/consult reconcile                          # dispatch, recover, retry, fan-ins, relay
+.venv/bin/consult query <question id> --filter attr:d_area=Villages --filter theme:<key>
+.venv/bin/consult export <consultation id> --out out.xlsx
 ```
+
+`consult run-job <job id> --worker w1 --model fake` runs one named job
+by hand instead of a `worker --once` pick; the psql line above gives the
+job table's ids too.
 
 The model is `consult/fake_model.py`: it answers every prompt well, so
 what these commands prove is the mechanics around the call and nothing
