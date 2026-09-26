@@ -359,3 +359,22 @@ def test_the_theme_table_is_one_statement(
     assert len(statements) == 1
     assert tagged.denominator == 17
     assert [(c.key, c.respondents) for c in tagged.rows] == [("PARKING", 17)]
+
+
+def test_the_scope_holds_only_an_open_question(db: psycopg.Connection[DictRow]) -> None:
+    signed = signed_off_fixture(db)
+    department_id = _department_of(db, signed.question_id)
+    row = db.execute(
+        "SELECT id FROM question WHERE consultation_id = %s AND column_ref = 'c_modes'",
+        (signed.consultation_id,),
+    ).fetchone()
+    assert row is not None
+
+    # c_modes is a multi-select closed question: one answer row per option
+    # ticked, so its rows aren't respondents, and docs/04 section 6's
+    # denominator is "one non-blank row per respondent" of an open one.
+    # The scope of a closed question is empty.
+    closed = theme_table(db, row["id"], Filter(), department_id=department_id)
+    assert closed.denominator == 0
+    assert closed.rows == []
+    assert _run(db, row["id"], Filter()) == []
