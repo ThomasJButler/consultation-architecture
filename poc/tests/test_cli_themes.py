@@ -136,6 +136,17 @@ def test_the_themes_command_prints_keys_labels_counts_and_ids(
     # what each folded into.
     for row in counted:
         assert re.search(rf"^\s+{row['key']}\s+\S.*\bcount {row['preview_count']}\b", out, re.M)
+    # The description is printed too: it is frozen into v2 at sign-off and
+    # sits in every mapping prompt, so the reviewer at this terminal has to
+    # have seen it (the security review of PR-07).
+    described = db.execute(
+        """
+        SELECT t.description FROM theme t JOIN theme_set_version v ON v.id = t.theme_set_version_id
+         WHERE v.question_id = %s AND NOT t.is_longlist
+        """,
+        (question_id,),
+    ).fetchall()
+    assert all(d["description"] and d["description"] in out for d in described)
     access = re.search(r"^\s+ACCESS\b.*\bexamples (\d+), (\d+), (\d+)", out, re.M)
     assert access is not None
     example_ids = {int(n) for n in access.groups()}
