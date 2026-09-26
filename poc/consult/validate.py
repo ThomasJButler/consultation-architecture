@@ -14,9 +14,10 @@ What a cell means: `-` or blank is not answered for every kind of question;
 `N/A` is a real value on a demographic or closed column (kept unless the
 configure step says otherwise) and not answered on an open one. A
 multi-select cell is tokenised against the option vocabulary, never split
-on commas (consult.tokenise). Two options that never appear apart are the
-tell-tale of an option containing a comma that the workbook split in two
-(docs/00), and get their own warning with the resolution to merge them.
+on commas (consult.tokenise). Adjacent options that never appear apart are
+the tell-tale of an option containing a comma that the workbook split
+(docs/00), and each run of them gets one warning, naming the label it
+spells, with the resolution to merge them.
 
 The report carries column names, counts, row numbers and the distinct
 values of demographic and closed columns. It never carries an open answer.
@@ -29,7 +30,6 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from itertools import pairwise
 
 from consult.cost import DEFAULT_RATES, Estimate, Rates, estimate
 from consult.definition import ClosedQuestion, Definition, ResponseType
@@ -175,18 +175,29 @@ def _count_closed(tally: _Tally, question: ClosedQuestion, cell: str, row_no: in
 
 
 def _never_apart(tally: _Tally, options: tuple[str, ...]) -> Iterable[Warning]:
-    # Only a pair that sits next to each other in the option list can be the
-    # two halves of one comma option (that's how split_options made them).
-    adjacent_in_definition = set(pairwise(options))
-    for (first, second), together in sorted(tally.adjacent.items()):
-        if (first, second) not in adjacent_in_definition:
-            continue
-        if together and tally.values[first] == together and tally.values[second] == together:
+    # Only a pair that sits next to each other in the option list can be two
+    # pieces of one comma option (that's how split_options made them). A
+    # label with two commas is three pieces and two such pairs, so each
+    # maximal run of joined pairs is one option and gets one warning, named
+    # by the label the run spells.
+    joined = {
+        pair
+        for pair, together in tally.adjacent.items()
+        if together and tally.values[pair[0]] == together == tally.values[pair[1]]
+    }
+    runs: list[list[str]] = []
+    for index, option in enumerate(options):
+        if index and (options[index - 1], option) in joined:
+            runs[-1].append(option)
+        else:
+            runs.append([option])
+    for run in runs:
+        if len(run) > 1:
             yield Warning(
                 WarningKind.OPTIONS_NEVER_APART,
                 "",
-                f"{first}, {second}",
-                together,
+                ", ".join(run),
+                tally.values[run[0]],
                 (),
                 (Resolution.MERGE_OPTIONS,),
                 Resolution.MERGE_OPTIONS,

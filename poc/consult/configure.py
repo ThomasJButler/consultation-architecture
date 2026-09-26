@@ -5,7 +5,7 @@ The workbook pre-fills the screen; it isn't the configuration. Options are
 rows, so a label can contain a comma (docs/00). Each warning the
 validator raised has a resolution recorded here, as a value policy on the
 question (the N/A decision, the mapping for an unknown value) or as a
-merge of two options, and each unmatched header a role. Saving twice
+merge of adjacent options, and each unmatched header a role. Saving twice
 upserts on (consultation_id, column_ref) rather than duplicating
 (docs/04, section 3). Nothing here commits.
 """
@@ -21,7 +21,7 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 
 from consult import transitions
-from consult.definition import ClosedQuestion, Definition, ResponseType
+from consult.definition import ClosedQuestion, Definition, ResponseType, spelt_by
 from consult.validate import Report, Resolution, WarningKind
 
 RESPONSE_TYPES = {
@@ -43,13 +43,14 @@ class Resolutions:
     unknown_values maps (column, value) to the option it stands for, added
     to the vocabulary if it's new, or to None for "treat as not answered".
     not_applicable says per column whether N/A stays a value. merges lists
-    the adjacent option pairs that were one option before the workbook
-    split them. roles gives each unmatched header its role.
+    per column the labels the workbook split, each one option again in
+    place of the run of adjacent options that spells it. roles gives each
+    unmatched header its role.
     """
 
     unknown_values: Mapping[tuple[str, str], str | None]
     not_applicable: Mapping[str, bool]
-    merges: Mapping[str, tuple[tuple[str, str], ...]]
+    merges: Mapping[str, tuple[str, ...]]
     roles: Mapping[str, Resolution]
     duplicate_ids: Resolution | None
 
@@ -61,10 +62,10 @@ class Configured:
 
 def defaults(report: Report) -> Resolutions:
     """Every warning's default: unknown values not answered, N/A kept, the
-    never-apart pairs merged, roles as suggested, duplicates kept-first."""
+    never-apart runs merged, roles as suggested, duplicates kept-first."""
     unknown: dict[tuple[str, str], str | None] = {}
     not_applicable: dict[str, bool] = {}
-    merges: dict[str, tuple[tuple[str, str], ...]] = {}
+    merges: dict[str, tuple[str, ...]] = {}
     roles: dict[str, Resolution] = {}
     duplicate_ids: Resolution | None = None
     for warning in report.warnings:
@@ -73,8 +74,7 @@ def defaults(report: Report) -> Resolutions:
         elif warning.kind is WarningKind.NOT_APPLICABLE:
             not_applicable[warning.column_ref] = warning.default is Resolution.KEEP_AS_VALUE
         elif warning.kind is WarningKind.OPTIONS_NEVER_APART and warning.value is not None:
-            first, _, second = warning.value.partition(", ")
-            merges[warning.column_ref] = (*merges.get(warning.column_ref, ()), (first, second))
+            merges[warning.column_ref] = (*merges.get(warning.column_ref, ()), warning.value)
         elif warning.kind is WarningKind.UNMATCHED_HEADER:
             roles[warning.column_ref] = warning.default
         elif warning.kind is WarningKind.DUPLICATE_RESPONDENT_ID:
@@ -83,14 +83,14 @@ def defaults(report: Report) -> Resolutions:
 
 
 def merged_options(question: ClosedQuestion, resolutions: Resolutions) -> list[str]:
-    """The options as configured: adjacent pairs the workbook split are one
-    option again, and a mapping to a new label adds it."""
+    """The options as configured: each label the workbook split is one
+    option again, however many commas it holds, and a mapping to a new
+    label adds it."""
     options = list(question.options)
-    for first, second in resolutions.merges.get(question.column_ref, ()):
-        for index in range(len(options) - 1):
-            if (options[index], options[index + 1]) == (first, second):
-                options[index : index + 2] = [f"{first}, {second}"]
-                break
+    for label in resolutions.merges.get(question.column_ref, ()):
+        run = spelt_by(label, options)
+        if run is not None:
+            options[run] = [label]
     for (column_ref, _value), target in resolutions.unknown_values.items():
         if column_ref == question.column_ref and target is not None and target not in options:
             options.append(target)

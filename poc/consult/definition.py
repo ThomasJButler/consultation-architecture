@@ -94,6 +94,20 @@ def split_options(cell: str) -> tuple[str, ...]:
     return tuple(option.strip() for option in cell.split(",") if option.strip())
 
 
+def spelt_by(label: str, options: Sequence[str]) -> slice | None:
+    """Where in `options` a run of two or more adjacent options, joined by
+    ", ", spells `label`: the pieces split_options made of it, or None."""
+    for start in range(len(options)):
+        joined = options[start]
+        for end in range(start + 1, len(options)):
+            joined = f"{joined}, {options[end]}"
+            if joined == label:
+                return slice(start, end + 1)
+            if not label.startswith(joined):
+                break
+    return None
+
+
 def _cell(value: object) -> str:
     return "" if value is None else str(value).strip()
 
