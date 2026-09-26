@@ -3,8 +3,8 @@
 Pure: no psycopg import, no db fixture, so this module runs under
 `pytest -m 'not db'` (test_repo_rules.py bans `pytestmark = pytest.mark.db`
 on a module that doesn't need one). The database half of dispatch, the
-locked `UPDATE` that acts on what `select` picks, is a later chunk's and
-lives in its own module.
+locked `UPDATE` that acts on what `select` picks, is
+`tests/test_dispatch_db.py`.
 
 Every expected list below is worked out by hand from docs/02 step 4's
 caps (six a department, four a consultation, twenty service-wide,
