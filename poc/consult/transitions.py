@@ -127,9 +127,11 @@ def advance_consultation(conn: psycopg.Connection[DictRow], consultation_id: UUI
 
 def start_staging(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> None:
     """Draft to staging. docs/02 section 6 gives the trigger as "headers
-    confirmed; stage job inserted"; the stage and ingest job rows are
-    dispatch's to insert and are deferred with it (PR-08), so for now the
-    step runs inline and the edge is the record of it."""
+    confirmed; stage job inserted", but stage and ingest run inline in
+    `cli._ingest` with no upload store to re-run either from: a row with
+    no runner would take a cap slot and hand the worker a job it can't do
+    (plans/PR-08-poc-mapping-worker.md, section 0), so neither gets a job
+    row and this edge is the whole record of the step."""
     moved = conn.execute(
         """
         UPDATE consultation SET status = 'staging', status_changed_at = now()

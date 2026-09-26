@@ -1,5 +1,5 @@
 """What the three review-side commands promise: `consult run-job` takes a
-find_themes job from pending to succeeded with the model a fake, `consult
+find_themes job from queued to succeeded with the model a fake, `consult
 themes` shows a question's candidates as keys, labels, counts and answer
 ids, and `consult sign-off` freezes them (docs/02, steps 6 to 8; ADR-003).
 

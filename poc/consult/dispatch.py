@@ -3,14 +3,13 @@
 Caps: six jobs a department, four a consultation, twenty service-wide,
 round-robin across departments when contended. `select` only ranks the
 pending jobs against those caps and the live (queued plus running) counts;
-it does no I/O, so the hard part of dispatch is testable without Docker.
-`dispatch(conn, settings)` calls it inside a transaction and turns its
-answer into one locked `UPDATE`.
-
-The ranking runs here and not as a SQL window function because Postgres
-refuses `FOR UPDATE` in the same query as one (plan section 2, PR-08), and
-turning a pick into a queue needs the picked rows locked while they're
-claimed.
+it does no I/O, which is why the ranking runs here in Python and not as a
+SQL window function: the hard part of dispatch is then testable without
+Docker. `dispatch(conn, settings)` calls it inside a transaction and
+turns its answer into one locked `UPDATE`, guarded on `status = 'pending'`
+so the pick can only be applied once. That guard is the whole of what the
+`UPDATE` decides; the advisory lock below is what stops two dispatchers
+reading the same free slots and filling them both.
 """
 
 from __future__ import annotations
@@ -131,6 +130,11 @@ def select(pending: Sequence[Pending], live: LiveCounts, caps: JobCaps) -> list[
 def dispatch(conn: psycopg.Connection[DictRow], settings: Settings) -> int:
     """Queue what `select` picks from the pending find_themes and map_themes
     jobs, in the caller's transaction, and return how many went.
+
+    Only these two kinds: a stage or an ingest job would take a cap slot
+    and hand the worker something it has no runner for, so neither gets a
+    job row to dispatch (transitions.start_staging;
+    plans/PR-08-poc-mapping-worker.md, section 0).
 
     A job with no alias or seed gets the settings' alias and a fresh seed; a
     retried job keeps both, so the plan its checkpoints were cut from can be
