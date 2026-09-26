@@ -202,14 +202,28 @@ def _count_closed(tally: _Tally, question: ClosedQuestion, cell: str, row_no: in
         for first, second in zip(tokenised.tokens, tokenised.tokens[1:], strict=False):
             tally.adjacent[first, second] += 1
         return
-    # A single-select or likert cell is the chosen option written whole, so
-    # an option with a comma arrives as one value that a run of the split
-    # pieces spells. It's counted as that value and _never_apart offers the
-    # merge, rather than an unknown value defaulting to not answered.
-    if cell in question.options or spelt_by(cell, question.options) is not None:
+    # Anything else is unknown until every row is counted, when
+    # _claim_whole_labels takes back the whole labels of comma options.
+    if cell in question.options:
         tally.values[cell] += 1
     else:
         tally.note_unknown(cell, row_no)
+
+
+def _claim_whole_labels(tally: _Tally, options: tuple[str, ...]) -> None:
+    """A single-select or likert cell is the chosen option written whole,
+    so an option with a comma arrives as one value that a run of its split
+    pieces spells (docs/00). Such a value is counted as that label, and
+    _never_apart offers the merge, only when no piece was ever chosen
+    alone: pieces chosen alone are real options, and a cell naming two of
+    them is a stray answer that the default merge would fuse, blanking
+    every answer to either (194 of c_route's 240 on the fixture with one
+    "Support, Oppose" cell). A stray stays an unknown value."""
+    for value in list(tally.unknown):
+        run = spelt_by(value, options)
+        if run is not None and not any(tally.values[piece] for piece in options[run]):
+            tally.values[value] = tally.unknown.pop(value)
+            del tally.unknown_rows[value]
 
 
 def _never_apart(tally: _Tally, options: tuple[str, ...]) -> Iterable[Warning]:
@@ -231,7 +245,7 @@ def _never_apart(tally: _Tally, options: tuple[str, ...]) -> Iterable[Warning]:
             runs.append([option])
     labels = [(", ".join(run), tally.values[run[0]]) for run in runs if len(run) > 1]
     # The whole labels a single-select or likert column counted
-    # (_count_closed); a multi-select column counts pieces, all options.
+    # (_claim_whole_labels); a multi-select column counts pieces, all options.
     labels.extend(
         (value, count)
         for value, count in tally.values.items()
@@ -328,6 +342,8 @@ def validate(definition: Definition, responses: Responses, rates: Rates = DEFAUL
     columns: list[ColumnSummary] = []
     for ref in header:
         tally = tallies[ref]
+        if ref in closed and closed[ref].response_type is not ResponseType.MULTI_SELECT:
+            _claim_whole_labels(tally, closed[ref].options)
         columns.append(
             ColumnSummary(
                 ref, tally.kind, tally.answered, tally.not_answered, _sorted_values(tally.values)
