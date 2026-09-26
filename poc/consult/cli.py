@@ -39,6 +39,7 @@ from consult.jobs import LeaseLostError
 from consult.replies import ReplyError
 from consult.responses import Responses
 from consult.stage import stage
+from consult.store import PIPELINE_ROLE, as_role
 from consult.validate import Report, validate
 
 logger = logging.getLogger(__name__)
@@ -202,30 +203,38 @@ def _run_job(args: argparse.Namespace, settings: Settings) -> int:
     started = time.monotonic()
     llm = OfflineModel()
     with store.connect(settings) as conn:
+        # Queued by the stand-in, then claimed and run as the pipeline role,
+        # whose grants are the control on the worker's path (docs/06,
+        # section 2.4): SET ROLE outlives the commits between batches, and
+        # RESET ROLE follows the last one.
         jobs.queue(conn, args.job, model_alias=args.model, seed=secrets.randbelow(2**31))
         conn.commit()
-        lease = jobs.claim(conn, args.job, args.worker)
-        if lease is None:
-            state = conn.execute("SELECT status FROM job WHERE id = %s", (args.job,)).fetchone()
-            print(f"job {args.job}: not claimable ({state['status'] if state else 'unknown'})")
-            return 1
-        conn.commit()
-        try:
-            themes.run_find_themes(conn, llm, lease, after_batch=lambda _batch_no: conn.commit())
-        except ReplyError as exc:
-            # The failure is a code and a request id, never the reply
-            # (THREAT_MODEL.md, section 2); whether it retries is the
-            # reconciler's call (PR-08).
-            conn.rollback()
-            jobs.record_failure(conn, lease, exc.code, provider_request_id=None)
+        with as_role(conn, PIPELINE_ROLE):
+            lease = jobs.claim(conn, args.job, args.worker)
+            if lease is None:
+                state = conn.execute("SELECT status FROM job WHERE id = %s", (args.job,)).fetchone()
+                print(f"job {args.job}: not claimable ({state['status'] if state else 'unknown'})")
+                conn.rollback()
+                return 1
             conn.commit()
-            print(f"job {args.job}: failed ({exc.code.value}: {exc.reason.value})")
-            return 1
-        except LeaseLostError as exc:
-            conn.rollback()
-            print(f"job {args.job}: {exc.code.value}")
-            return 1
-        conn.commit()
+            try:
+                themes.run_find_themes(
+                    conn, llm, lease, after_batch=lambda _batch_no: conn.commit()
+                )
+            except ReplyError as exc:
+                # The failure is a code and a request id, never the reply
+                # (THREAT_MODEL.md, section 2); whether it retries is the
+                # reconciler's call (PR-08).
+                conn.rollback()
+                jobs.record_failure(conn, lease, exc.code, provider_request_id=None)
+                conn.commit()
+                print(f"job {args.job}: failed ({exc.code.value}: {exc.reason.value})")
+                return 1
+            except LeaseLostError as exc:
+                conn.rollback()
+                print(f"job {args.job}: {exc.code.value}")
+                return 1
+            conn.commit()
         summary = conn.execute(
             """
             SELECT j.question_id, q.status AS question, c.status AS consultation,

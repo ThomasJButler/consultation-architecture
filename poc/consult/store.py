@@ -36,6 +36,11 @@ TABLES: tuple[str, ...] = (
 
 SCHEMAS: tuple[str, ...] = ("vault", "staging")
 
+# The role a worker runs as: SELECT, INSERT and UPDATE on the public tables
+# and no grant on the vault or the staging schema (docs/06, section 2.4 as
+# corrected). The ingest role is named next to the code that uses it.
+PIPELINE_ROLE = "consult_pipeline"
+
 
 def qualified(name: str) -> sql.Composable:
     """`vault.respondent_identity` as two identifiers, never as a format string."""
