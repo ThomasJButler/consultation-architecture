@@ -17,7 +17,7 @@ under `store.EXPORT_ROLE` rather than the login user's own privileges.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -26,6 +26,7 @@ from openpyxl import Workbook
 from openpyxl.cell import WriteOnlyCell
 from openpyxl.cell.cell import Cell
 from openpyxl.worksheet._write_only import WriteOnlyWorksheet
+from psycopg.pq import TransactionStatus
 from psycopg.rows import DictRow
 
 from consult import query
@@ -298,6 +299,20 @@ def _department_id(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> 
     return UUID(str(row["department_id"]))
 
 
+def _snapshot_now(conn: psycopg.Connection[DictRow]) -> datetime:
+    """The exporting transaction's own `now()`, fixed at the instant the
+    REPEATABLE READ snapshot was taken (PostgreSQL 17 manual, 13.2.2):
+    the instant the rows around it describe, not the instant Python
+    happens to reach this line in the calling process."""
+    row = conn.execute("SELECT now() AS now").fetchone()
+    if row is None:
+        # now() with no FROM always returns one row; a database that
+        # answers otherwise has broken more than this query.
+        raise LookupError("now() returned no row")
+    value: datetime = row["now"]
+    return value
+
+
 def _consultation_summary(
     conn: psycopg.Connection[DictRow], consultation_id: UUID
 ) -> tuple[str, UUID, date | None]:
@@ -437,40 +452,74 @@ def write_workbook(
     conn: psycopg.Connection[DictRow], consultation_id: UUID, path: Path
 ) -> Exported:
     """docs/02 step 12's XLSX: the Responses sheet, one summary sheet per
-    open question and a manifest, saved to `path`. The reads run as
-    `store.EXPORT_ROLE` (docs/06, section 2.4 as corrected), the one role
-    with a grant on the vault and none on the pipeline's writes.
-    """
-    with as_role(conn, EXPORT_ROLE):
-        questions = _questions(conn, consultation_id)
-        respondent_id_header = _respondent_id_header(conn, consultation_id)
-        respondents = _respondents(conn, consultation_id)
-        identity = _identity(conn, consultation_id)
-        open_questions = [question for question in questions if question.kind == "open"]
+    open question and a manifest, saved to `path`.
 
-        answers = {question.id: _open_answers(conn, question.id) for question in open_questions}
-        theme_sets = {
-            question.id: _latest_signed_off(conn, question.id) for question in open_questions
-        }
-        tags = {
-            question.id: _tags(conn, theme_sets[question.id].version_id)
-            for question in open_questions
-        }
-        tag_counts = {
-            question.id: sum(len(keys) for keys in tags[question.id].values())
-            for question in open_questions
-        }
-        department_id = _department_id(conn, consultation_id)
-        summaries = {
-            question.id: query.theme_table(conn, question.id, Filter(), department_id=department_id)
-            for question in open_questions
-        }
-        manifest_questions = tuple(
-            _manifest_question(conn, question, theme_sets[question.id], tag_counts[question.id])
-            for question in open_questions
-        )
-        name, run_id, retention_until = _consultation_summary(conn, consultation_id)
-        duplicate_answers, duplicate_respondents = _duplicate_counts(conn, consultation_id)
+    The whole gather runs inside one REPEATABLE READ, read-only
+    transaction: Postgres fixes the snapshot at that transaction's first
+    statement and holds it for every statement after (PostgreSQL 17
+    manual, 13.2.2), so a retraction, a human tag, a worker insert or a
+    new sign-off committed by another session mid-export can't split the
+    workbook across two states of the database, the summary sheet
+    disagreeing with the Responses sheet it's meant to total. psycopg
+    only applies `isolation_level` and `read_only` to the next
+    transaction, and only while the connection is idle, hence the commit
+    before either is set and the reset of both in `finally`, so `conn`
+    comes back to its caller at its own isolation level, not this
+    function's. `exported_at` is read back as that transaction's own
+    `now()` (`_snapshot_now`) rather than Python's clock, for the same
+    reason: it names the instant the snapshot was taken.
+
+    The reads run as `store.EXPORT_ROLE` (docs/06, section 2.4 as
+    corrected), the one role with a grant on the vault and none on the
+    pipeline's writes.
+    """
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        conn.commit()
+    conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+    conn.read_only = True
+    try:
+        with as_role(conn, EXPORT_ROLE):
+            questions = _questions(conn, consultation_id)
+            respondent_id_header = _respondent_id_header(conn, consultation_id)
+            respondents = _respondents(conn, consultation_id)
+            identity = _identity(conn, consultation_id)
+            open_questions = [question for question in questions if question.kind == "open"]
+
+            answers = {question.id: _open_answers(conn, question.id) for question in open_questions}
+            theme_sets = {
+                question.id: _latest_signed_off(conn, question.id) for question in open_questions
+            }
+            tags = {
+                question.id: _tags(conn, theme_sets[question.id].version_id)
+                for question in open_questions
+            }
+            tag_counts = {
+                question.id: sum(len(keys) for keys in tags[question.id].values())
+                for question in open_questions
+            }
+            department_id = _department_id(conn, consultation_id)
+            summaries = {
+                question.id: query.theme_table(
+                    conn, question.id, Filter(), department_id=department_id
+                )
+                for question in open_questions
+            }
+            manifest_questions = tuple(
+                _manifest_question(conn, question, theme_sets[question.id], tag_counts[question.id])
+                for question in open_questions
+            )
+            name, run_id, retention_until = _consultation_summary(conn, consultation_id)
+            duplicate_answers, duplicate_respondents = _duplicate_counts(conn, consultation_id)
+            exported_at = _snapshot_now(conn)
+        # Read-only, so there's nothing this loses; closing the
+        # transaction here, rather than leaving it open for the caller,
+        # is what releases the snapshot.
+        conn.commit()
+    finally:
+        if conn.info.transaction_status != TransactionStatus.IDLE:
+            conn.rollback()
+        conn.isolation_level = None
+        conn.read_only = None
 
     manifest = _Manifest(
         consultation_id=consultation_id,
@@ -480,7 +529,7 @@ def write_workbook(
         duplicate_answers=duplicate_answers,
         duplicate_respondents=duplicate_respondents,
         questions=manifest_questions,
-        exported_at=datetime.now(UTC),
+        exported_at=exported_at,
     )
 
     workbook = Workbook(write_only=True)
