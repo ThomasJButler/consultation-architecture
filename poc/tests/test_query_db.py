@@ -19,7 +19,7 @@ from psycopg.rows import DictRow
 
 from consult import store
 from consult.query import AttrFilter, Filter, OtherFilter, related_distribution, scope, theme_table
-from tests.pipeline import signed_off_fixture
+from tests.pipeline import signed_off_fixture, signed_off_questions
 from tests.rows import tag_answers_by_rule
 
 pytestmark = pytest.mark.db
@@ -218,3 +218,28 @@ def test_the_theme_table_counts_match_the_fixture(db: psycopg.Connection[DictRow
         db, signed.question_id, Filter(attrs=(AttrFilter("d_area", "Villages"),))
     )
     assert distribution == [("Support", 8), ("Oppose", 4), ("Not sure", 4)]
+
+
+def _o_safety_key(text: str) -> str:
+    # "Proper lighting after dark along the towpath" is one of the eight
+    # SAFETY fragments (scripts/make_fixture_data.py); the rest give OTHER.
+    return "LIGHTING" if "lighting" in text.casefold() else "OTHER"
+
+
+def test_the_other_filter_is_a_semi_join_across_questions(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    signed = signed_off_questions(db, ("o_reason", "o_safety"))
+    tag_answers_by_rule(
+        db, signed["o_safety"].version_id, signed["o_safety"].question_id, _o_safety_key
+    )
+
+    # Hand count from responses.csv: canonical, non-blank o_reason rows
+    # whose respondent's own o_safety answer contains "lighting" (screen
+    # 4's own other: example, on a different pair of questions and keys).
+    narrowed = _run(
+        db,
+        signed["o_reason"].question_id,
+        Filter(others=(OtherFilter("o_safety", "LIGHTING"),)),
+    )
+    assert len(narrowed) == 15
