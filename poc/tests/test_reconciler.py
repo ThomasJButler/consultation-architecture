@@ -261,8 +261,10 @@ def _consultations(db: psycopg.Connection[DictRow]) -> dict[UUID, DictRow]:
 
 
 def _all_outbox(db: psycopg.Connection[DictRow]) -> list[DictRow]:
+    # By kind, not by id: a pass takes consultations in whatever order it
+    # likes, and their ids are random, so the rows' order is too.
     return db.execute(
-        "SELECT consultation_id, kind, subject_id, status FROM notification_outbox ORDER BY id"
+        "SELECT consultation_id, kind, subject_id, status FROM notification_outbox ORDER BY kind, id"
     ).fetchall()
 
 
@@ -306,15 +308,15 @@ def test_the_reconciler_reruns_the_fan_ins(db: psycopg.Connection[DictRow]) -> N
     outbox = _all_outbox(db)
     assert outbox == [
         {
-            "consultation_id": stalled,
-            "kind": "themes_ready",
-            "subject_id": before[stalled]["run_id"],
-            "status": "pending",
-        },
-        {
             "consultation_id": finished,
             "kind": "analysis_ready",
             "subject_id": before[finished]["run_id"],
+            "status": "pending",
+        },
+        {
+            "consultation_id": stalled,
+            "kind": "themes_ready",
+            "subject_id": before[stalled]["run_id"],
             "status": "pending",
         },
     ]
