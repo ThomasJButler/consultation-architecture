@@ -151,3 +151,14 @@ The shape that matters: the median consultation is small, the tail is enormous, 
 | GRA average answer length ~43 words | 37 million words over 860,000 answers | 19 Sep 2026 | rounded |
 | IWC campaign share "nine in ten" | 45,169 of 50,114 | 19 Sep 2026 | rounded |
 | Excel limits: 32,767 characters a cell, 16,384 columns a worksheet (the proof-of-concept's cell and width caps) | https://support.microsoft.com/en-us/office/excel-specifications-and-limits-1672b34d-7043-467e-8e27-269d656771c3 | 25 Sep 2026 | verified by fetch today |
+
+## Correction, 26 September 2026
+
+The last row of the verification log calls Excel's 16,384 columns the
+proof-of-concept's width cap. It was until 26 September 2026, when the fix
+branch for that day's review lowered `CONSULT_MAX_COLUMNS` to 1,599: the
+staging table has a text column per field beside its own `row_no`, and a
+Postgres table takes 1,600 columns (the review's finding 16, measured on
+PostgreSQL 16.13; `poc/consult/inputs.py`, the `Caps` docstring). The
+cell cap is still Excel's 32,767 characters. The row is left as checked;
+this note is the correction.
