@@ -12,6 +12,9 @@ The second drives `worker.run_once` on the fixtures (docs/02, step 5): the
 oldest runnable job first, each kind through its own runner, a stale lease
 taken over, a spent retry budget left alone, and workers racing on their
 own connections never sharing a job.
+
+The last races a takeover with nothing left to send against the
+reconciler failing the same job, and pins the lock order the two share.
 """
 
 from __future__ import annotations
@@ -22,22 +25,26 @@ import random
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from psycopg.errors import DeadlockDetected
 from psycopg.pq import TransactionStatus
 from psycopg.rows import DictRow
 
-from consult import store
+from consult import mapping, store, transitions
+from consult import worker as worker_module
 from consult.config import Settings
 from consult.dispatch import dispatch
 from consult.errors import ErrorCode
-from consult.jobs import claim
+from consult.jobs import Lease, LeaseLostError, claim
 from consult.llm import LLM, Completion, GatewayError, Prompt
 from consult.logs import Formatter
-from consult.mapping import run_map_themes
-from consult.transitions import sign_off
+from consult.mapping import assign, load_map_job, plan, run_map_themes
+from consult.reconciler import recover
+from consult.transitions import Advance, fail_job, sign_off, start_map_themes
 from consult.worker import (
     BACKOFF_ATTEMPTS,
     BACKOFF_BASE_SECONDS,
@@ -545,3 +552,97 @@ def test_the_worker_records_a_refused_reply_a_lost_lease_and_a_crash_as_codes(
     for job_id in (first, second, signed.job_id):
         assert f"job_id={job_id}" in output
     assert CRASH_MESSAGE not in " ".join(str(v) for row in rows.values() for v in row.values())
+
+
+def test_a_takeover_with_nothing_left_does_not_deadlock_the_reconciler(
+    db: psycopg.Connection[DictRow], db_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A map job whose fourth worker mapped every answer and died before its
+    # finish: each planned answer is under a checkpoint, the question is
+    # assigning_themes, and the lease is silent past its ten minutes.
+    signed = signed_off_fixture(db)
+    job = load_map_job(db, signed.job_id)
+    dead = claim(db, signed.job_id, "w-dead")
+    assert dead is not None
+    start_map_themes(db, signed.question_id)
+    assign(db, RecordingLLM(), dead, job, plan(db, job))
+    db.execute(
+        "UPDATE job SET attempts = %s, heartbeat_at = now() - %s, sent_at = now() - %s"
+        " WHERE id = %s",
+        (RETRY_BUDGET - 1, STALE, STALE, signed.job_id),
+    )
+    db.commit()
+
+    # Two events fix the interleaving, so the race is the same one every
+    # run. The worker's fifth attempt holds the job row (assign's opening
+    # heartbeat) before the reconciler scans, and the reconciler holds the
+    # consultation (_fail_each's lock) before the worker's finish asks for
+    # it. fail_job takes the consultation and then the job (transitions.py);
+    # a finish in the heartbeat's transaction takes them the other way round.
+    worker_holds_job = threading.Event()
+    reconciler_holds_consultation = threading.Event()
+    worker_raised: list[Exception] = []
+
+    def assign_after_a_silence(*args: Any, **kwargs: Any) -> int:
+        # Silent past the lease between its claim and its first heartbeat,
+        # so the reconciler's scan finds the fifth attempt spent.
+        with store.connect(db_settings) as side:
+            side.execute(
+                "UPDATE job SET heartbeat_at = now() - %s WHERE id = %s", (STALE, signed.job_id)
+            )
+            side.commit()
+        ran = assign(*args, **kwargs)
+        worker_holds_job.set()
+        reconciler_holds_consultation.wait(timeout=30)
+        return ran
+
+    def announce_then_fail(conn: psycopg.Connection[DictRow], job_id: UUID) -> Advance:
+        reconciler_holds_consultation.set()
+        return fail_job(conn, job_id)
+
+    def recording_runner(
+        conn: psycopg.Connection[DictRow], llm: LLM, lease: Lease, **kwargs: Any
+    ) -> Advance:
+        # run_once turns whatever the runner raises into a code, so the
+        # worker's side of a deadlock is caught here or not at all.
+        try:
+            return run_map_themes(conn, llm, lease, **kwargs)
+        except Exception as exc:
+            worker_raised.append(exc)
+            raise
+
+    def reconcile() -> tuple[int, int]:
+        assert worker_holds_job.wait(timeout=30)
+        with store.connect(db_settings) as conn:
+            return recover(conn)
+
+    monkeypatch.setattr(mapping, "assign", assign_after_a_silence)
+    monkeypatch.setattr(transitions, "fail_job", announce_then_fail)
+    monkeypatch.setitem(worker_module._RUNNERS, "map_themes", recording_runner)
+    llm = FakeLLM([])
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        reconciling = pool.submit(reconcile)
+        outcome = run_once(db, llm, worker="w-fifth")
+        reconciler_error = reconciling.exception(timeout=60)
+
+    # Postgres breaks a lock cycle by aborting one transaction in it, and
+    # which one is "difficult to predict" (PostgreSQL 17 manual, 13.3.4),
+    # so both sides are checked.
+    raised = [*worker_raised, *([reconciler_error] if reconciler_error else [])]
+    assert [exc for exc in raised if isinstance(exc, DeadlockDetected)] == []
+    assert reconciler_error is None
+    # Statement 2 fails the spent fifth attempt, and the worker's finish
+    # meets its fence: the lease is lost and nothing more is written.
+    assert reconciling.result() == (0, 1)
+    assert [type(exc) for exc in worker_raised] == [LeaseLostError]
+    assert outcome == Outcome(
+        signed.job_id, "map_themes", "failed", RETRY_BUDGET, ErrorCode.LEASE_LOST
+    )
+    assert llm.prompts == []
+    row = db.execute(
+        "SELECT j.status AS job, q.status AS question FROM job j"
+        " JOIN question q ON q.id = j.question_id WHERE j.id = %s",
+        (signed.job_id,),
+    ).fetchone()
+    assert row == {"job": "failed", "question": "map_failed"}
