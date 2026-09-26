@@ -60,6 +60,17 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     Setting("CONSULT_USD_PER_MILLION_OUTPUT", "8.00", "Model price per million output tokens"),
     Setting("CONSULT_GBP_PER_USD", "0.75", "Planning rate to the pound"),
+    # The two service-wide caps dispatch enforces alongside
+    # department.concurrent_jobs_cap (docs/02, step 4): four jobs queued at
+    # once for one consultation, twenty queued at once across all of them.
+    Setting("CONSULT_JOBS_PER_CONSULTATION", "4", "Cap: jobs queued at once for one consultation"),
+    Setting("CONSULT_JOBS_IN_ALL", "20", "Cap: jobs queued at once service-wide"),
+    # The alias dispatch stamps on a job that has none (plans/PR-08, section
+    # 2). ADR-005 pins the alias to the consultation at Confirm; the
+    # proof-of-concept has no Confirm screen and no reopen on a new alias,
+    # so one service-wide setting stands in, and the fake is the only model
+    # it calls.
+    Setting("CONSULT_MODEL_ALIAS", "fake", "The model alias dispatch stamps on a job"),
 )
 
 
@@ -76,6 +87,9 @@ class Settings:
     db_password: str
     caps: Caps = DEFAULT_CAPS
     rates: Rates = DEFAULT_RATES
+    jobs_per_consultation: int = 4
+    jobs_in_all: int = 20
+    model_alias: str = "fake"
 
 
 def read_dotenv(path: Path) -> dict[str, str]:
@@ -145,4 +159,7 @@ def load(env: Mapping[str, str] | None = None, dotenv_path: Path = DOTENV_PATH) 
             usd_per_million_output=_number(values, "CONSULT_USD_PER_MILLION_OUTPUT"),
             gbp_per_usd=_number(values, "CONSULT_GBP_PER_USD"),
         ),
+        jobs_per_consultation=_integer(values, "CONSULT_JOBS_PER_CONSULTATION"),
+        jobs_in_all=_integer(values, "CONSULT_JOBS_IN_ALL"),
+        model_alias=values["CONSULT_MODEL_ALIAS"],
     )

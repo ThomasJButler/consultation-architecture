@@ -82,6 +82,28 @@ def distinct_answers(
     return [(int(row["id"]), str(row["value_text"]), row["related"]) for row in rows]
 
 
+def cut(
+    answers: Sequence[PromptAnswer], *, size: int, token_cap: int
+) -> list[tuple[PromptAnswer, ...]]:
+    """`answers` in their order, cut at `size` answers or `token_cap`
+    tokens, whichever comes first; an answer over the cap on its own still
+    goes, alone. `batches` plans with it, and `mapping`'s resume cuts what
+    is left with it too, so what a job sends is cut the way it was planned."""
+    chunks: list[tuple[PromptAnswer, ...]] = []
+    chunk: list[PromptAnswer] = []
+    tokens = 0
+    for answer in answers:
+        cost = _tokens(answer.text)
+        if chunk and (len(chunk) >= size or tokens + cost > token_cap):
+            chunks.append(tuple(chunk))
+            chunk, tokens = [], 0
+        chunk.append(answer)
+        tokens += cost
+    if chunk:
+        chunks.append(tuple(chunk))
+    return chunks
+
+
 def batches(
     conn: psycopg.Connection[DictRow],
     question_id: UUID,
@@ -91,9 +113,9 @@ def batches(
     token_cap: int = TOKEN_CAP,
 ) -> list[Batch]:
     """The generation plan: partitioned by related answer, shuffled within
-    each partition with the seed, cut at `size` answers or `token_cap`
-    tokens, whichever comes first. Deterministic for a seed, so it is
-    recomputed on takeover rather than stored."""
+    each partition with the seed, then `cut` at `size` answers or
+    `token_cap` tokens, whichever comes first. Deterministic for a seed, so
+    it is recomputed on takeover rather than stored."""
     by_related: dict[str | None, list[PromptAnswer]] = {}
     for answer_id, text, related in distinct_answers(conn, question_id):
         by_related.setdefault(related, []).append(PromptAnswer(answer_id, text))
@@ -104,17 +126,7 @@ def batches(
     for related in sorted(by_related, key=lambda r: (r is None, r or "")):
         answers = by_related[related]
         rng.shuffle(answers)
-        chunk: list[PromptAnswer] = []
-        tokens = 0
-        for answer in answers:
-            cost = _tokens(answer.text)
-            if chunk and (len(chunk) >= size or tokens + cost > token_cap):
-                plan.append(Batch(related, tuple(chunk)))
-                chunk, tokens = [], 0
-            chunk.append(answer)
-            tokens += cost
-        if chunk:
-            plan.append(Batch(related, tuple(chunk)))
+        plan.extend(Batch(related, chunk) for chunk in cut(answers, size=size, token_cap=token_cap))
     return plan
 
 
@@ -489,12 +501,23 @@ def run_find_themes(
     lease: Lease,
     *,
     after_batch: Callable[[int], None] | None = None,
+    before_finish: Callable[[], None] | None = None,
 ) -> transitions.Advance:
     """The whole job for a claimed lease: the question moved on (or found
     already moved by a takeover), v1 ensured, the plan rebuilt from the
     seed, then generation, condensation and preview, each skipping what a
     checkpoint already covers, then the finishing transaction. The caller
-    commits in `after_batch`; nothing here does."""
+    commits in `after_batch` and `before_finish`; nothing here does.
+
+    `before_finish` runs once, after the stages and before the finish, and
+    is where a worker passes `conn.commit`. A takeover that finds no
+    preview batch left still runs `preview`'s heartbeat, which holds the
+    job row until a commit; a finish in that transaction would ask for the
+    consultation while holding the job, the reverse of
+    `transitions.fail_job`'s order, and deadlock against the reconciler
+    failing the same job (`mapping.run_map_themes` has the same shape).
+    Committed first, the finishing transaction starts with
+    `lock_consultation`."""
     job = load_job(conn, lease.job_id)
     transitions.start_find_themes(conn, job.question_id)
     version_id = ensure_version(conn, lease, job.question_id)
@@ -504,4 +527,6 @@ def run_find_themes(
     if after_batch is not None:
         after_batch(len(plan) + 1)
     preview(conn, llm, lease, job, version_id, generated=len(plan), after_batch=after_batch)
+    if before_finish is not None:
+        before_finish()
     return transitions.finish_find_themes(conn, lease, job.question_id, job.consultation_id)

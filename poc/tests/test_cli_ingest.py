@@ -76,7 +76,7 @@ def test_the_ingest_command_runs_the_fixtures_end_to_end(
         """
         SELECT c.status, d.name AS department,
                (SELECT count(*) FROM respondent r WHERE r.consultation_id = c.id) AS respondents,
-               (SELECT count(*) FROM job j WHERE j.consultation_id = c.id AND j.status = 'pending')
+               (SELECT count(*) FROM job j WHERE j.consultation_id = c.id AND j.status = 'queued')
                    AS jobs
           FROM consultation c JOIN department d ON d.id = c.department_id
          WHERE c.id = %s

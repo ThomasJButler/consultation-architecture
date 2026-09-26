@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 from psycopg.rows import DictRow
+from psycopg.types.json import Jsonb
 
 
 def _returning_id(
@@ -123,6 +124,32 @@ def make_queued_job(
     )
 
 
+def make_pending_job(
+    conn: psycopg.Connection[DictRow],
+    consultation_id: UUID,
+    question_id: UUID | None = None,
+    *,
+    kind: str = "find_themes",
+    model_alias: str | None = None,
+    seed: int | None = None,
+) -> UUID:
+    """A job as ingest or sign-off inserts it, waiting for dispatch (docs/02,
+    step 4). An alias and a seed make it a retried job back at pending with
+    what its first dispatch stamped (ADR-002)."""
+    params: dict[str, object] = {} if seed is None else {"seed": seed}
+    return _returning_id(
+        conn,
+        """
+        INSERT INTO job (department_id, consultation_id, question_id, kind, run_id,
+                         model_alias, params)
+        SELECT department_id, id, %s, %s, run_id, %s, %s
+          FROM consultation WHERE id = %s
+        RETURNING id
+        """,
+        (question_id, kind, model_alias, Jsonb(params), consultation_id),
+    )
+
+
 def make_theme_set_version(
     conn: psycopg.Connection[DictRow],
     question_id: UUID,
@@ -184,4 +211,25 @@ def make_answer(
         RETURNING id
         """,
         (respondent_id, question_id, text, consultation_id),
+    )
+
+
+def make_outbox_row(
+    conn: psycopg.Connection[DictRow],
+    consultation_id: UUID,
+    *,
+    kind: str = "attention_needed",
+    subject_id: UUID | None = None,
+) -> int:
+    """An email owed, as a transition writes it: pending, naming its subject
+    (ADR-006; docs/02, correction 3). A fresh subject when none is given,
+    so two rows of one kind don't meet on the key."""
+    return _returning_int(
+        conn,
+        """
+        INSERT INTO notification_outbox (department_id, consultation_id, kind, subject_id)
+        SELECT department_id, id, %s, %s FROM consultation WHERE id = %s
+        RETURNING id
+        """,
+        (kind, subject_id or uuid4(), consultation_id),
     )

@@ -3,17 +3,18 @@
 RecordingLLM is consult.fake_model.OfflineModel under the name the tests
 have always used: it answers every prompt well and keeps each one, so a
 test can assert what the model was shown. FakeLLM answers with what it was
-told to: literal text, or one of the ways a reply can be wrong
+told to: literal text, one of the ways a reply can be wrong
 (THREAT_MODEL.md, row 3: ids missing, ids added, a label outside the enum,
 malformed JSON, and prose where JSON was asked for), each built from the
 good reply for the prompt it's answering so the fault is exact, for all
-three shapes consult/replies.py validates.
+three shapes consult/replies.py validates, or a scripted llm.GatewayError,
+raised rather than answered (docs/02, section 9).
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from collections.abc import Sequence
 from enum import StrEnum
 
 from consult.fake_model import (
@@ -23,7 +24,7 @@ from consult.fake_model import (
     good_condensation,
     good_themes,
 )
-from consult.llm import Completion, Prompt
+from consult.llm import Completion, GatewayError, Prompt
 
 RecordingLLM = OfflineModel
 
@@ -101,19 +102,36 @@ def reply_text(prompt: Prompt, fault: Fault) -> str:
     return text
 
 
-@dataclass
 class FakeLLM:
     """Replies in the order scripted; raises once the script runs out, so a
     test that calls the model more often than it meant to fails instead of
-    passing on a default."""
+    passing on a default. A scripted GatewayError is raised rather than
+    turned into a reply, so a test can drive worker.call_with_backoff
+    exactly as a real gateway saying no would.
 
-    script: list[str | Fault]
-    prompts: list[Prompt] = field(default_factory=list)
+    `__init__` takes `script` as a `Sequence` and copies it into a `list`
+    of its own, rather than being the plain dataclass-generated `__init__`
+    a `list[str | Fault]` field would need: a list is invariant in its
+    element type, so every test that already typed a script that way
+    (test_mapping.py has two) would stop matching a field widened to
+    include GatewayError. A Sequence is read-only and so covariant, and
+    is never mutated here; only the copy is, with `pop(0)`.
+    """
+
+    def __init__(
+        self,
+        script: Sequence[str | Fault | GatewayError],
+        prompts: list[Prompt] | None = None,
+    ) -> None:
+        self.script: list[str | Fault | GatewayError] = list(script)
+        self.prompts: list[Prompt] = prompts if prompts is not None else []
 
     def complete(self, prompt: Prompt) -> Completion:
         self.prompts.append(prompt)
         if not self.script:
             raise ScriptExhaustedError(f"no reply scripted for call {len(self.prompts)}")
         step = self.script.pop(0)
+        if isinstance(step, GatewayError):
+            raise step
         text = reply_text(prompt, step) if isinstance(step, Fault) else step
         return completion(text, prompt, len(self.prompts))

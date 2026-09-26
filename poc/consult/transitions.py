@@ -51,17 +51,29 @@ def lock_consultation(conn: psycopg.Connection[DictRow], consultation_id: UUID) 
     conn.execute("SELECT id FROM consultation WHERE id = %s FOR UPDATE", (consultation_id,))
 
 
-def _outbox(conn: psycopg.Connection[DictRow], consultation_id: UUID, kind: str) -> None:
-    # Read the pass id from the locked row, so a reopen's new run_id is the
-    # one the row carries (docs/04, section 2). ON CONFLICT is the second
-    # half of "exactly one email per milestone per pass" (ADR-006).
+def _outbox(
+    conn: psycopg.Connection[DictRow],
+    consultation_id: UUID,
+    kind: str,
+    *,
+    subject_id: UUID | None = None,
+) -> None:
+    """One outbox row, keyed on its subject (docs/02, correction 3).
+
+    A milestone row names the pass: with no subject given, the run_id is
+    read from the locked row, so a reopen's new run_id is the one the row
+    carries (docs/04, section 2). An attention row names the failed job,
+    which its caller passes in. ON CONFLICT is the second half of "exactly
+    one email per milestone per pass" (ADR-006).
+    """
     conn.execute(
         """
         INSERT INTO notification_outbox (department_id, consultation_id, kind, subject_id)
-        SELECT department_id, id, %(kind)s, run_id FROM consultation WHERE id = %(id)s
+        SELECT department_id, id, %(kind)s, coalesce(%(subject)s::uuid, run_id)
+          FROM consultation WHERE id = %(id)s
         ON CONFLICT DO NOTHING
         """,
-        {"id": consultation_id, "kind": kind},
+        {"id": consultation_id, "kind": kind, "subject": subject_id},
     )
 
 
@@ -115,9 +127,11 @@ def advance_consultation(conn: psycopg.Connection[DictRow], consultation_id: UUI
 
 def start_staging(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> None:
     """Draft to staging. docs/02 section 6 gives the trigger as "headers
-    confirmed; stage job inserted"; the stage and ingest job rows are
-    dispatch's to insert and are deferred with it (PR-08), so for now the
-    step runs inline and the edge is the record of it."""
+    confirmed; stage job inserted", but stage and ingest run inline in
+    `cli._ingest` with no upload store to re-run either from: a row with
+    no runner would take a cap slot and hand the worker a job it can't do
+    (plans/PR-08-poc-mapping-worker.md, section 0), so neither gets a job
+    row and this edge is the whole record of the step."""
     moved = conn.execute(
         """
         UPDATE consultation SET status = 'staging', status_changed_at = now()
@@ -196,6 +210,23 @@ def start_find_themes(conn: psycopg.Connection[DictRow], question_id: UUID) -> b
     raise TransitionError(f"question {question_id} is not configured")
 
 
+def start_map_themes(conn: psycopg.Connection[DictRow], question_id: UUID) -> bool:
+    """The worker's first move on a map_themes job: signed_off to
+    assigning_themes (docs/02, section 6). The twin of start_find_themes:
+    False when a takeover finds the question there already, a refusal from
+    any other state."""
+    moved = conn.execute(
+        "UPDATE question SET status = 'assigning_themes' WHERE id = %s AND status = 'signed_off'",
+        (question_id,),
+    ).rowcount
+    if moved == 1:
+        return True
+    current = conn.execute("SELECT status FROM question WHERE id = %s", (question_id,)).fetchone()
+    if current is not None and current["status"] == "assigning_themes":
+        return False
+    raise TransitionError(f"question {question_id} is not signed_off")
+
+
 def _move_question(
     conn: psycopg.Connection[DictRow], question_id: UUID, from_status: str, to_status: str
 ) -> None:
@@ -234,6 +265,74 @@ def finish_map_themes(
     advance = advance_consultation(conn, consultation_id)
     jobs.succeed(conn, lease)
     return advance
+
+
+# Each kind's failed edge: the states its question may be in when the job
+# fails, and where it goes (docs/02, section 6).
+_FAILED_EDGES = {
+    "find_themes": (("configured", "finding_themes"), "find_failed"),
+    "map_themes": (("signed_off", "assigning_themes"), "map_failed"),
+}
+# The kinds fail_job can fail, for the reconciler's spent scans: a job of
+# any other kind at the retry budget would raise on every pass.
+FAILABLE_KINDS = tuple(_FAILED_EDGES)
+
+
+def fail_job(conn: psycopg.Connection[DictRow], job_id: UUID) -> Advance:
+    """Mark a job failed and move its question to the failed edge, in the
+    caller's transaction (docs/02, section 6, the "any to same state" row).
+
+    Under the row lock: the job goes to failed; its question goes to
+    find_failed or map_failed; the consultation's attention_reason names
+    the edge and the question; one attention_needed row goes in with the
+    job's id as its subject (docs/02, correction 3); then the fan-ins run,
+    so a last unfinished question failing on the find side flips the
+    consultation (section 5, statement 4's case). The question is taken
+    from its working state or the one before it, because a worker that
+    dies before its first commit leaves it where it was. A job already
+    failed returns with nothing written, since the reconciler repeats.
+    Here rather than in the reconciler because this module is the only
+    one that writes the consultation row.
+    """
+    job = conn.execute(
+        "SELECT kind, question_id, consultation_id FROM job WHERE id = %s", (job_id,)
+    ).fetchone()
+    if job is None:
+        raise TransitionError(f"job {job_id} does not exist")
+    edge = _FAILED_EDGES.get(job["kind"])
+    question_id: UUID | None = job["question_id"]
+    if edge is None or question_id is None:
+        raise TransitionError(f"job {job_id} has no question to fail")
+    from_statuses, to_status = edge
+    consultation_id: UUID = job["consultation_id"]
+    lock_consultation(conn, consultation_id)
+    # Not fenced, because the reconciler holds no lease: it acts on one
+    # that has gone stale. The status guard is what stops the old worker,
+    # whose fenced writes all need status = 'running' and now find no row.
+    failed = conn.execute(
+        """
+        UPDATE job SET status = 'failed'
+         WHERE id = %s AND status IN ('queued', 'running', 'failed_retryable')
+        """,
+        (job_id,),
+    ).rowcount
+    if failed != 1:
+        current = conn.execute("SELECT status FROM job WHERE id = %s", (job_id,)).fetchone()
+        if current is not None and current["status"] == "failed":
+            return Advance(False, False)
+        raise TransitionError(f"job {job_id} is not queued, running or failed_retryable")
+    # Zero rows here is the question gone elsewhere already, and not an
+    # error: the job is still failed and the operator still needs the row.
+    conn.execute(
+        "UPDATE question SET status = %s WHERE id = %s AND status = ANY(%s)",
+        (to_status, question_id, list(from_statuses)),
+    )
+    conn.execute(
+        "UPDATE consultation SET attention_reason = %s WHERE id = %s",
+        (f"{to_status}:{question_id}", consultation_id),
+    )
+    _outbox(conn, consultation_id, "attention_needed", subject_id=job_id)
+    return advance_consultation(conn, consultation_id)
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,5 @@
 """What the three review-side commands promise: `consult run-job` takes a
-find_themes job from pending to succeeded with the model a fake, `consult
+find_themes job from queued to succeeded with the model a fake, `consult
 themes` shows a question's candidates as keys, labels, counts and answer
 ids, and `consult sign-off` freezes them (docs/02, steps 6 to 8; ADR-003).
 
@@ -18,11 +18,15 @@ import psycopg
 import pytest
 from psycopg.rows import DictRow
 
-from consult import themes
+from consult import cli, themes
 from consult.cli import main
 from consult.config import Settings
+from consult.dispatch import dispatch as real_dispatch
+from consult.errors import ErrorCode
 from consult.jobs import Lease
+from consult.llm import GatewayError
 from consult.transitions import Advance
+from consult.worker import BackingOff
 
 pytestmark = pytest.mark.db
 
@@ -194,7 +198,7 @@ def test_the_sign_off_command_freezes_v2_and_refuses_a_second(
 
     out = capsys.readouterr().out
     assert code == 0
-    assert f"question {reason} signed off" in out and "map_themes job" in out and "pending" in out
+    assert f"question {reason} signed off" in out and "map_themes job" in out and "queued" in out
     frozen = db.execute(
         """
         SELECT v.version_no, v.status, v.signed_off_by,
@@ -202,7 +206,7 @@ def test_the_sign_off_command_freezes_v2_and_refuses_a_second(
                  WHERE t.theme_set_version_id = v.id AND NOT t.is_longlist) AS shortlist,
                (SELECT status FROM question WHERE id = v.question_id) AS question,
                (SELECT count(*) FROM job WHERE question_id = v.question_id AND kind = 'map_themes'
-                   AND status = 'pending') AS map_jobs
+                   AND status = 'queued') AS map_jobs
           FROM theme_set_version v WHERE v.question_id = %s ORDER BY v.version_no
         """,
         (reason,),
@@ -244,6 +248,59 @@ def test_the_sign_off_command_freezes_v2_and_refuses_a_second(
     assert state == {"status": "themes_ready", "versions": 1}
 
 
+def test_dispatch_runs_under_a_role_from_every_command(
+    db: psycopg.Connection[DictRow],
+    db_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # docs/06, section 2.4: every write goes through one of the four
+    # NOLOGIN roles' grants, dispatch included. A stand-in wraps the real
+    # dispatch so state still moves on, and records current_user first, so
+    # a command that calls it at login-user level shows up as 'consult'
+    # rather than a role (plan section 2: the ingest role holds UPDATE on
+    # job for its own dispatch call).
+    seen: list[str] = []
+
+    def record_role(conn: psycopg.Connection[DictRow], settings: Settings) -> int:
+        row = conn.execute("SELECT current_user AS who").fetchone()
+        seen.append(str(row["who"]) if row else "")
+        return real_dispatch(conn, settings)
+
+    monkeypatch.setattr(cli, "dispatch", record_role)
+
+    jobs = ingested(db, db_settings)
+    assert (
+        main(
+            ["run-job", str(jobs["o_reason"]), "--worker", "w1", "--model", "fake"],
+            settings=db_settings,
+        )
+        == 0
+    )
+    question = db.execute(
+        "SELECT question_id FROM job WHERE id = %s", (jobs["o_reason"],)
+    ).fetchone()
+    assert question is not None
+    reviewer = "11111111-2222-3333-4444-555555555555"
+    assert (
+        main(
+            [
+                "sign-off",
+                str(question["question_id"]),
+                "--reviewer",
+                reviewer,
+                "--expect-version",
+                "0",
+            ],
+            settings=db_settings,
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    assert seen == ["consult_ingest", "consult_pipeline", "consult_pipeline"]
+
+
 def test_run_job_works_as_the_pipeline_role(
     db: psycopg.Connection[DictRow],
     db_settings: Settings,
@@ -273,6 +330,78 @@ def test_run_job_works_as_the_pipeline_role(
     )
     capsys.readouterr()
     assert seen == ["consult_pipeline"]
+
+
+def test_run_job_hands_the_runner_backing_off_with_commit_as_before_call(
+    db: psycopg.Connection[DictRow],
+    db_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # run-job has to back off outside any open transaction the same way
+    # the worker loop does (worker.py's module docstring), so it hands the
+    # runner worker.BackingOff and not the raw model. Calling
+    # llm.before_call() here and reading the transaction status back
+    # wouldn't prove whose commit it is; before_call.__self__ does, since
+    # a bound method's __self__ is the instance it was bound to.
+    jobs = ingested(db, db_settings)
+    kinds: list[type] = []
+    same_conn: list[bool] = []
+
+    def record_model(
+        conn: psycopg.Connection[DictRow], llm: object, lease: Lease, **_: object
+    ) -> Advance:
+        kinds.append(type(llm))
+        same_conn.append(llm.before_call.__self__ is conn)  # type: ignore[attr-defined]
+        return Advance(themes_ready=False, analysis_ready=False)
+
+    monkeypatch.setattr(themes, "run_find_themes", record_model)
+    assert (
+        main(
+            ["run-job", str(jobs["o_reason"]), "--worker", "w1", "--model", "fake"],
+            settings=db_settings,
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert kinds == [BackingOff]
+    assert same_conn == [True]
+
+
+def test_run_job_records_a_gateway_error_as_a_code_and_a_request_id(
+    db: psycopg.Connection[DictRow],
+    db_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A gateway failure that outlasts the backoff is a code and a request
+    # id on the row, never the provider's text (CLAUDE.md, rule 8), the
+    # same as the worker loop's own GatewayError branch (worker.py's
+    # record_gateway_failure).
+    jobs = ingested(db, db_settings)
+    message = "upstream said: The towpath floods"
+
+    def fail(conn: object, llm: object, lease: Lease, **_: object) -> Advance:
+        raise GatewayError(ErrorCode.GATEWAY_UNAVAILABLE, request_id="req_x", message=message)
+
+    monkeypatch.setattr(themes, "run_find_themes", fail)
+    code = main(
+        ["run-job", str(jobs["o_reason"]), "--worker", "w1", "--model", "fake"],
+        settings=db_settings,
+    )
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "gateway_unavailable" in out
+    assert message not in out and "towpath" not in out
+    row = db.execute(
+        "SELECT status, error_code, provider_request_id FROM job WHERE id = %s",
+        (jobs["o_reason"],),
+    ).fetchone()
+    assert row == {
+        "status": "failed_retryable",
+        "error_code": "gateway_unavailable",
+        "provider_request_id": "req_x",
+    }
 
 
 def test_run_job_reports_a_lost_lease_found_while_recording_a_failure(

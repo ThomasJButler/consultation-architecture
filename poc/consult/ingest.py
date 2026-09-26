@@ -309,7 +309,10 @@ def ingest(
 def _queue_find_themes(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> int:
     """One find_themes job per open question, pending, on the pass id the
     consultation row holds (docs/04, section 2). job_one_per_run is the
-    arbiter, so a replay inserts none; pending to queued is dispatch (PR-08)."""
+    arbiter, so a replay inserts none; pending to queued is dispatch
+    (docs/02, step 4). No ingest job row goes in alongside these: ingest
+    runs inline in `cli._ingest`, the same as staging
+    (transitions.start_staging), with no upload store to re-run it from."""
     return conn.execute(
         """
         INSERT INTO job (department_id, consultation_id, question_id, kind, run_id, status)

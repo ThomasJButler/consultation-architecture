@@ -5,13 +5,20 @@ validate` runs the validator over a responses file and its definition
 workbook and prints the report: exit 0 with no errors, 1 when an error
 blocks, 2 when the file was refused before it was read. `consult ingest`
 runs validate, stage, configure and ingest in turn with every warning's
-default resolution and commits once, so the proof-of-concept goes from a
-spreadsheet to a schema full of rows with no model yet (docs/02, steps 2
-to 3a). Its output is counts and ids, never a value from the file.
-`consult run-job` claims one find_themes job and runs it to the end with
-the fake, committing after every batch; `consult themes` lists a
-question's candidates as keys, labels, counts and answer ids; `consult
-sign-off` confirms them as they stand (docs/02, steps 6 to 8).
+default resolution, dispatches the jobs it inserted and commits once, so
+the proof-of-concept goes from a spreadsheet to a schema full of rows with
+no model yet (docs/02, steps 2 to 4). Its output is counts and ids, never
+a value from the file. `consult run-job` claims one find_themes job and
+runs it to the end with the fake, committing after every batch; `consult
+themes` lists a question's candidates as keys, labels, counts and answer
+ids; `consult sign-off` confirms them as they stand and dispatches the
+map_themes job (docs/02, steps 4 and 6 to 8). `consult worker` picks,
+claims and runs one queued or stale job by kind, once with `--once` or,
+without it, in a loop that stops between jobs on SIGINT or SIGTERM: a
+manual convenience, not ADR-002's per-batch stop inside Fargate's
+`stopTimeout`, which is the deployed worker's design (`_stop_flag`'s
+docstring). `consult reconcile` runs the five statements of docs/02
+section 5 and prints their six counts.
 """
 
 from __future__ import annotations
@@ -19,7 +26,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import secrets
+import os
+import signal
+import socket
+import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -28,19 +38,22 @@ from uuid import UUID
 import psycopg
 from psycopg.rows import DictRow
 
-from consult import config, jobs, logs, report, store, themes, transitions
+from consult import config, jobs, logs, reconciler, report, store, themes, transitions, worker
 from consult.config import Settings
 from consult.configure import ConfigureError, configure, defaults
 from consult.definition import Definition, DefinitionError, read_definition
+from consult.dispatch import dispatch
 from consult.fake_model import OfflineModel
 from consult.ingest import IngestError, ingest
 from consult.inputs import InputError
 from consult.jobs import LeaseLostError
+from consult.llm import GatewayError
 from consult.replies import ReplyError
 from consult.responses import Responses
-from consult.stage import stage
+from consult.stage import INGEST_ROLE, stage
 from consult.store import PIPELINE_ROLE, as_role
 from consult.validate import Report, validate
+from consult.worker import Outcome
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +93,25 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="the edit counter the reviewer was looking at (docs/02, screen 3)",
     )
+    run_worker = commands.add_parser(
+        "worker", help="pick, claim and run one queued or stale job by kind"
+    )
+    run_worker.add_argument(
+        "--once", action="store_true", help="run one job and exit; without it, loop until stopped"
+    )
+    run_worker.add_argument(
+        "--worker", help="this worker's name, for the lease (default: hostname and pid)"
+    )
+    run_worker.add_argument(
+        "--model", choices=["fake"], default="fake", help="the model: only the fake"
+    )
+    run_worker.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=5.0,
+        help="how long to sleep between empty picks when looping (default 5)",
+    )
+    commands.add_parser("reconcile", help="run the reconciler's five statements once")
     return parser
 
 
@@ -172,6 +204,12 @@ def _ingest(args: argparse.Namespace, settings: Settings) -> int:
             conn.rollback()
             print(f"refused: {exc}")
             return 1
+        # The request that inserts a job dispatches it in the same breath
+        # (docs/02, step 4): what the caps let through commits queued.
+        # Under the ingest role, which plan section 2 gives UPDATE on job
+        # for this (docs/06, section 2.4).
+        with as_role(conn, INGEST_ROLE):
+            dispatch(conn, settings)
         conn.commit()
     logs.log_event(
         logger,
@@ -197,19 +235,20 @@ def _ingest(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def _run_job(args: argparse.Namespace, settings: Settings) -> int:
-    """One find_themes job, pending to succeeded, committing after every
-    batch so a crash between two leaves checkpoints a takeover can resume
-    from (ADR-002). The queue step stands in for dispatch (PR-08)."""
+    """One find_themes job run to succeeded, committing after every batch
+    so a crash between two leaves checkpoints a takeover can resume from
+    (ADR-002). Dispatch runs first, so a job still pending is queued if
+    the caps let it through (docs/02, step 4)."""
     started = time.monotonic()
     llm = OfflineModel()
     with store.connect(settings) as conn:
-        # Queued by the stand-in, then claimed and run as the pipeline role,
-        # whose grants are the control on the worker's path (docs/06,
-        # section 2.4): SET ROLE outlives the commits between batches, and
-        # RESET ROLE follows the last one.
-        jobs.queue(conn, args.job, model_alias=args.model, seed=secrets.randbelow(2**31))
-        conn.commit()
+        # Dispatched, then claimed and run as the pipeline role, whose
+        # grants are the control on the worker's path (docs/06, section
+        # 2.4): SET ROLE outlives the commits between batches, and RESET
+        # ROLE follows the last one.
         with as_role(conn, PIPELINE_ROLE):
+            dispatch(conn, settings)
+            conn.commit()
             lease = jobs.claim(conn, args.job, args.worker)
             if lease is None:
                 state = conn.execute("SELECT status FROM job WHERE id = %s", (args.job,)).fetchone()
@@ -217,10 +256,32 @@ def _run_job(args: argparse.Namespace, settings: Settings) -> int:
                 conn.rollback()
                 return 1
             conn.commit()
+            # BackingOff with conn.commit as before_call, the same as the
+            # worker loop (worker.py's module docstring): no call and no
+            # backoff sleep is left with a transaction open.
+            model = worker.BackingOff(llm, before_call=conn.commit)
             try:
+                # before_finish commits too, as worker._run's does, so the
+                # finish locks the consultation before the job (reconciler.py).
                 themes.run_find_themes(
-                    conn, llm, lease, after_batch=lambda _batch_no: conn.commit()
+                    conn,
+                    model,
+                    lease,
+                    after_batch=lambda _batch_no: conn.commit(),
+                    before_finish=conn.commit,
                 )
+            except GatewayError as exc:
+                # record_gateway_failure does its own rollback and commit
+                # (its docstring), the code and request id under the
+                # fence, never the provider's text (CLAUDE.md, rule 8).
+                try:
+                    worker.record_gateway_failure(conn, lease, exc)
+                except LeaseLostError as lost:
+                    conn.rollback()
+                    print(f"job {args.job}: {lost.code.value}")
+                    return 1
+                print(f"job {args.job}: failed ({exc.code.value})")
+                return 1
             except ReplyError as exc:
                 # The failure is a code and a request id, never the reply
                 # (THREAT_MODEL.md, section 2); whether it retries is the
@@ -342,7 +403,8 @@ def _themes(args: argparse.Namespace, settings: Settings) -> int:
 def _sign_off(args: argparse.Namespace, settings: Settings) -> int:
     """Confirm as-is (docs/02, step 8; ADR-003). The guarded UPDATE is the
     mutex and the edit counter is checked in the statement that supersedes
-    the candidate, so a reviewer who saw an older list gets a conflict."""
+    the candidate, so a reviewer who saw an older list gets a conflict. The
+    map_themes job it inserts is dispatched before the commit (step 4)."""
     with store.connect(settings) as conn:
         try:
             signed = transitions.sign_off(
@@ -363,10 +425,20 @@ def _sign_off(args: argparse.Namespace, settings: Settings) -> int:
             conn.rollback()
             print(f"question {args.question}: refused, not awaiting sign-off")
             return 1
+        # The proof-of-concept has no web-app role; the pipeline role's
+        # grants (SELECT on job and department, UPDATE on job) are what
+        # dispatch needs here too (docs/06, section 2.4).
+        with as_role(conn, PIPELINE_ROLE):
+            dispatch(conn, settings)
         conn.commit()
+        # Read back rather than assumed: the caps can leave the job pending.
         status = conn.execute(
-            "SELECT c.status FROM consultation c JOIN question q ON q.consultation_id = c.id WHERE q.id = %s",
-            (args.question,),
+            """
+            SELECT j.status AS job, c.status AS consultation
+              FROM job j JOIN consultation c ON c.id = j.consultation_id
+             WHERE j.id = %s
+            """,
+            (signed.job_id,),
         ).fetchone()
     logs.log_event(
         logger,
@@ -378,8 +450,118 @@ def _sign_off(args: argparse.Namespace, settings: Settings) -> int:
     )
     print(
         f"question {args.question} signed off: version {signed.version_id}, "
-        f"map_themes job {signed.job_id} pending; consultation "
-        f"{status['status'] if status else 'unknown'}"
+        f"map_themes job {signed.job_id} {status['job'] if status else 'unknown'}; "
+        f"consultation {status['consultation'] if status else 'unknown'}"
+    )
+    return 0
+
+
+def _worker_name(name: str | None) -> str:
+    """The default lease name: this host and this process, so two workers
+    started on one machine with no name still get distinct ones (docs/02,
+    step 5)."""
+    return name or f"{socket.gethostname()}-{os.getpid()}"
+
+
+def _print_outcome(outcome: Outcome | None) -> None:
+    if outcome is None:
+        print("nothing to run")
+        return
+    line = f"job {outcome.job_id}: {outcome.kind} {outcome.status}, attempt {outcome.attempts}"
+    if outcome.error_code is not None:
+        line += f", {outcome.error_code.value}"
+    print(line)
+
+
+def _log_outcome(outcome: Outcome | None) -> None:
+    if outcome is None:
+        logs.log_event(logger, "worker_idle")
+        return
+    if outcome.error_code is None:
+        logs.log_event(
+            logger,
+            "worker_run",
+            job_id=outcome.job_id,
+            kind=outcome.kind,
+            status=outcome.status,
+            attempts=outcome.attempts,
+        )
+    else:
+        logs.log_event(
+            logger,
+            "worker_run",
+            job_id=outcome.job_id,
+            kind=outcome.kind,
+            status=outcome.status,
+            attempts=outcome.attempts,
+            error_code=outcome.error_code,
+        )
+
+
+def _stop_flag() -> threading.Event:
+    """A flag SIGINT and SIGTERM both set, checked only between
+    `run_once` calls (`_worker`, below), so the loop stops between jobs,
+    not between batches. ADR-002's "on SIGTERM a worker finishes its
+    current batch and stops" is sized to `stopTimeout` for the deployed
+    Fargate worker; this loop is the manual test's own convenience, and
+    `--once` is the path a test drives (`_worker`'s docstring). Installed
+    only here, since `--once` returns before a second signal could
+    matter."""
+    stop = threading.Event()
+
+    def _handle(_signum: int, _frame: object) -> None:
+        stop.set()
+
+    signal.signal(signal.SIGINT, _handle)
+    signal.signal(signal.SIGTERM, _handle)
+    return stop
+
+
+def _worker(args: argparse.Namespace, settings: Settings) -> int:
+    """`--once` runs `worker.run_once` once and prints its outcome or
+    "nothing to run"; `run_once` already picks, claims and runs the job as
+    the pipeline role and leaves no transaction open (its own module
+    docstring), so this command sets no role itself. Without `--once` it
+    loops, sleeping `--poll-seconds` between empty picks, until SIGINT or
+    SIGTERM flips the stop flag; the design has no number for that sleep,
+    so five seconds is picked only to be short enough not to leave real
+    work waiting and long enough not to poll Postgres for nothing. The
+    flag is only read between the calls to `run_once` below, so a job
+    already running is finished whole; that is coarser than ADR-002's
+    per-batch stop inside `stopTimeout`, which belongs to the deployed
+    worker and not to this loop's own manual convenience (`_stop_flag`'s
+    docstring). The loop isn't run by a test: real time isn't something a
+    test should wait on, and `--once` is what `test_cli_worker.py` drives
+    instead."""
+    llm = OfflineModel()
+    name = _worker_name(args.worker)
+    with store.connect(settings) as conn:
+        if args.once:
+            outcome = worker.run_once(conn, llm, worker=name)
+            _print_outcome(outcome)
+            _log_outcome(outcome)
+            return 0
+        stop = _stop_flag()
+        while not stop.is_set():
+            outcome = worker.run_once(conn, llm, worker=name)
+            _print_outcome(outcome)
+            _log_outcome(outcome)
+            if outcome is None:
+                stop.wait(args.poll_seconds)
+    return 0
+
+
+def _reconcile(args: argparse.Namespace, settings: Settings) -> int:
+    """`reconciler.reconcile` already runs every statement as the pipeline
+    role (its own module docstring), so this command sets no role either:
+    dispatch touches `job` and `fail_job` writes `consultation`, both
+    grants the pipeline role already carries (docs/06, section 2.4)."""
+    with store.connect(settings) as conn:
+        reconciled = reconciler.reconcile(conn, settings)
+    print(
+        f"reconciled: {reconciled.dispatched} dispatched, {reconciled.resent} resent, "
+        f"{reconciled.failed} failed, {reconciled.retried} retried, "
+        f"{reconciled.advanced} advanced, {reconciled.relayed} relayed"
     )
     return 0
 
@@ -408,6 +590,10 @@ def main(argv: Sequence[str] | None = None, *, settings: Settings | None = None)
         return _themes(args, resolved)
     if args.command == "sign-off":
         return _sign_off(args, resolved)
+    if args.command == "worker":
+        return _worker(args, resolved)
+    if args.command == "reconcile":
+        return _reconcile(args, resolved)
     return _validate(args, resolved)
 
 
