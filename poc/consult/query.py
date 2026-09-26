@@ -45,6 +45,7 @@ class FilterCode(StrEnum):
     UNKNOWN_KIND = "unknown_kind"
     EMPTY_VALUE = "empty_value"
     MALFORMED_OTHER = "malformed_other"
+    UNREADABLE_VALUE = "unreadable_value"
 
 
 class FilterError(ValueError):
@@ -105,26 +106,40 @@ def parse_filters(items: Sequence[str]) -> Filter:
     )
 
 
+def _readable(slot: str) -> str:
+    """Postgres text can't hold a NUL, and a lone surrogate (what invalid
+    UTF-8 in argv decodes to) has no UTF-8 encoding. Inside jsonb the
+    server refuses either (22P05, 22P02) with a CONTEXT line that reprints
+    the value, so both are refused here first, by code."""
+    if "\x00" in slot:
+        raise FilterError(FilterCode.UNREADABLE_VALUE)
+    try:
+        slot.encode("utf-8")
+    except UnicodeEncodeError:
+        raise FilterError(FilterCode.UNREADABLE_VALUE) from None
+    return slot
+
+
 def _parse_attr(rest: str) -> AttrFilter:
     # partition splits on the first "=" only, so a value that itself
     # contains "=" keeps it (docs/02 step 11).
     column, sep, value = rest.partition("=")
     if not sep or not value:
         raise FilterError(FilterCode.EMPTY_VALUE)
-    return AttrFilter(column=column, value=value)
+    return AttrFilter(column=_readable(column), value=_readable(value))
 
 
 def _parse_theme(rest: str) -> str:
     if not rest:
         raise FilterError(FilterCode.EMPTY_VALUE)
-    return rest
+    return _readable(rest)
 
 
 def _parse_other(rest: str) -> OtherFilter:
     question, sep, key = rest.partition(_OTHER_THEME_MARKER)
     if not sep or not question or not key:
         raise FilterError(FilterCode.MALFORMED_OTHER)
-    return OtherFilter(question=question, key=key)
+    return OtherFilter(question=_readable(question), key=_readable(key))
 
 
 @dataclass(frozen=True)
