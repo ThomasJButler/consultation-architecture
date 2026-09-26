@@ -61,6 +61,11 @@ class Responses:
         if self.is_xlsx:
             with open_workbook(self.path, caps) as workbook:
                 sheet = workbook.worksheets[0]
+                # The sheet's <dimension> is the file's claim about itself,
+                # and read-only iter_rows pads every row to it: 4,851 bytes
+                # declaring A1:XFD1048576 read as rows of 16,384 cells
+                # (test_inputs.py). Reset, a row is as wide as its cells.
+                sheet.reset_dimensions()
                 for sheet_values in guarded(sheet.iter_rows(values_only=True)):
                     yield check_width(
                         tuple(check_cell(_cell(value), caps) for value in sheet_values), caps

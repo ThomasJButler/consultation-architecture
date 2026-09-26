@@ -124,6 +124,9 @@ def _rows(
         problems.append(f"{sheet}: sheet missing")
         return
     worksheet = workbook[sheet]
+    # Rows by what the sheet holds, not by the dimension it declares, as in
+    # consult.responses.
+    worksheet.reset_dimensions()
     rows = (
         check_width(tuple(check_cell(_cell(value), caps) for value in row), caps)
         for row in guarded(worksheet.iter_rows(values_only=True))
