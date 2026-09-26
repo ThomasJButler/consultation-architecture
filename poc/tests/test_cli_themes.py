@@ -11,12 +11,14 @@ is where a reviewer would read them.
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 from pathlib import Path
 from uuid import UUID
 
 import psycopg
 import pytest
 from psycopg.rows import DictRow
+from psycopg.types.json import Jsonb
 
 from consult import cli, themes
 from consult.cli import main
@@ -27,6 +29,7 @@ from consult.jobs import Lease
 from consult.llm import GatewayError
 from consult.transitions import Advance
 from consult.worker import BackingOff
+from tests.pipeline import signed_off_fixture
 
 pytestmark = pytest.mark.db
 
@@ -35,6 +38,10 @@ RESPONSES = str(FIXTURES / "responses.csv")
 DEFINITION = str(FIXTURES / "definition.xlsx")
 ARGS = ["--name", "Riverside cycle route", "--department", "Department of Fictional Affairs"]
 ANSWER_FRAGMENTS = ("towpath", "Mill Lane", "school run", "example.org", "R-0001")
+# ADR-002: "the retry budget is job.attempts < 5".
+RETRY_BUDGET = 5
+# docs/02, step 5: ten minutes of silence and a lease can be taken over.
+STALE = timedelta(minutes=11)
 
 
 def ingested(db: psycopg.Connection[DictRow], settings: Settings) -> dict[str, UUID]:
@@ -435,3 +442,39 @@ def test_run_job_reports_a_lost_lease_found_while_recording_a_failure(
     out = capsys.readouterr().out
     assert code == 1
     assert "lease_lost" in out and "Traceback" not in out
+
+
+def test_run_job_refuses_a_spent_job_and_a_map_job(
+    db: psycopg.Connection[DictRow], db_settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # run-job claims by id, with no pick in front of the claim to apply
+    # what the worker's pick applies (docs/02, step 5): the retry budget,
+    # attempts < 5 (ADR-002), past which a job is the reconciler's to fail
+    # and nobody's to run again (docs/02, section 5), and the command's
+    # own kind, find_themes (its help line). A fifth attempt gone quiet and
+    # a queued map_themes job are each refused at the claim, and each row
+    # is left as it was. The spent job carries the alias and seed its
+    # first dispatch stamped, so nothing but the claim stands in its way.
+    signed = signed_off_fixture(db)
+    spent = db.execute(
+        """
+        UPDATE job SET status = 'running', attempts = %s, claimed_by = 'w-dead',
+               heartbeat_at = now() - %s, model_alias = 'fake', params = %s
+         WHERE consultation_id = %s AND kind = 'find_themes' AND question_id <> %s
+        RETURNING id
+        """,
+        (RETRY_BUDGET, STALE, Jsonb({"seed": 7}), signed.consultation_id, signed.question_id),
+    ).fetchone()
+    assert spent is not None
+    db.commit()
+
+    for job_id in (spent["id"], signed.job_id):
+        before = db.execute("SELECT * FROM job WHERE id = %s", (job_id,)).fetchone()
+        code = main(
+            ["run-job", str(job_id), "--worker", "w-cli", "--model", "fake"],
+            settings=db_settings,
+        )
+        out = capsys.readouterr().out
+        assert code == 1
+        assert f"job {job_id}: not claimable" in out
+        assert db.execute("SELECT * FROM job WHERE id = %s", (job_id,)).fetchone() == before
