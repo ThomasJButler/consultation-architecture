@@ -9,6 +9,7 @@ the code under test.
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from uuid import UUID
 
@@ -16,7 +17,9 @@ import psycopg
 import pytest
 from psycopg.rows import DictRow
 
+from consult.fake_model import completion, good_assignments
 from consult.jobs import LeaseLostError, claim
+from consult.llm import Completion, Prompt
 from consult.mapping import MAP_BATCH_SIZE, assign, load_map_job, plan, run_map_themes
 from consult.themes import TOKEN_CAP
 from consult.transitions import Advance, finish_map_themes, start_map_themes
@@ -347,6 +350,67 @@ def test_a_failed_batch_retries_at_size_one_and_buckets_the_answer(
         "SELECT status, error_code FROM job WHERE id = %s", (signed.job_id,)
     ).fetchone()
     assert row == {"status": "succeeded", "error_code": None}
+
+
+class _Unlabelled:
+    """Answers every prompt well, except that each answer in `spoiled` comes
+    back with an empty `theme_keys` list, however it's batched: the reply an
+    instruction injected into the batch could ask for (THREAT_MODEL.md,
+    row 3)."""
+
+    def __init__(self, spoiled: set[int]) -> None:
+        self.spoiled = spoiled
+        self.prompts: list[Prompt] = []
+
+    def complete(self, prompt: Prompt) -> Completion:
+        self.prompts.append(prompt)
+        assignments = good_assignments(prompt)
+        for assignment in assignments:
+            if assignment["answer_id"] in self.spoiled:
+                assignment["theme_keys"] = []
+        return completion(json.dumps({"assignments": assignments}), prompt, len(self.prompts))
+
+
+def test_a_batch_labelled_with_no_keys_is_refused(db: psycopg.Connection[DictRow]) -> None:
+    # A mapping reply labels every answer with one or more of the enum's
+    # keys (prompts.THEMES_PREAMBLE; docs/02, step 9). A batch of ten
+    # answered with empty lists names every id once and no key outside
+    # the enum, so it passes the two-way check, and taken as it stands it
+    # would write no tag and a done checkpoint: the question completes with
+    # ten answers untagged that neither the retry at size one nor the
+    # unprocessable bucket ever saw. Refused, it goes the way of any
+    # spoiled batch: each answer sent alone, and each, still unlabelled, an
+    # unprocessable checkpoint of its own (docs/02, step 9).
+    signed = signed_off_fixture(db)
+    job = load_map_job(db, signed.job_id)
+    planned = plan(db, job)
+    first_ten = next(i for i, batch in enumerate(planned) if len(batch.answers) == MAP_BATCH_SIZE)
+    spoiled = planned[first_ten].answers
+    llm = _Unlabelled({answer.id for answer in spoiled})
+    lease = claim(db, signed.job_id, "worker-1")
+    assert lease is not None
+    start_map_themes(db, job.question_id)
+
+    assign(db, llm, lease, job, planned)
+
+    checkpoints = db.execute(
+        "SELECT answer_ids, status FROM job_batch WHERE job_id = %s ORDER BY batch_no",
+        (signed.job_id,),
+    ).fetchall()
+    expected = (
+        [(tuple(a.id for a in b.answers), "done") for b in planned[:first_ten]]
+        + [((a.id,), "unprocessable") for a in spoiled]
+        + [(tuple(a.id for a in b.answers), "done") for b in planned[first_ten + 1 :]]
+    )
+    assert [(tuple(c["answer_ids"]), c["status"]) for c in checkpoints] == expected
+    tagged = {
+        r["answer_id"]
+        for r in db.execute(
+            "SELECT answer_id FROM answer_theme WHERE theme_set_version_id = %s",
+            (job.version_id,),
+        ).fetchall()
+    }
+    assert tagged.isdisjoint(a.id for a in spoiled)
 
 
 def _covered(db: psycopg.Connection[DictRow], job_id: UUID) -> Counter[int]:
