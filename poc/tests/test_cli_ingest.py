@@ -18,11 +18,13 @@ import pytest
 from psycopg.errors import UniqueViolation
 from psycopg.rows import DictRow
 
+from consult import cli
 from consult.cli import main
 from consult.config import Settings
+from consult.configure import defaults
 from consult.inputs import Caps
 from tests.test_definition import GOOD, write_workbook
-from tests.test_ingest import staging_tables
+from tests.test_ingest import staging_tables, write_repeated_id_file
 
 pytestmark = pytest.mark.db
 
@@ -114,3 +116,33 @@ def test_a_department_name_names_one_department(
         "SELECT (SELECT count(*) FROM department) AS departments, (SELECT count(*) FROM consultation) AS consultations"
     ).fetchone()
     assert counts == {"departments": 1, "consultations": 2}
+
+
+def test_a_refused_ingest_leaves_nothing_behind(
+    db: psycopg.Connection[DictRow],
+    db_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # psycopg's connection context manager commits on a clean exit, and
+    # `return 1` is a clean exit, so the rollback in the refusal branch is
+    # what keeps a refused file's consultation, questions and staging table
+    # (identity columns in it) out of the database. The default resolution
+    # is patched away because the defaults never refuse the fixture.
+    path = write_repeated_id_file(tmp_path)
+    monkeypatch.setattr(
+        cli, "defaults", lambda report: replace(defaults(report), duplicate_ids=None)
+    )
+
+    code = main(["ingest", str(path), "--definition", DEFINITION, *ARGS], settings=db_settings)
+
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "refused: respondent id repeated at rows 2, 3" in out
+    assert "R-0001" not in out
+    written = db.execute(
+        "SELECT (SELECT count(*) FROM consultation) AS consultations, (SELECT count(*) FROM department) AS departments"
+    ).fetchone()
+    assert written == {"consultations": 0, "departments": 0}
+    assert staging_tables(db) == []
