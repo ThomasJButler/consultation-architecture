@@ -71,14 +71,24 @@ def _each_alone(value: str) -> list[Filter]:
     ]
 
 
+def _department_of(db: psycopg.Connection[DictRow], question_id: UUID) -> UUID:
+    row = db.execute("SELECT department_id FROM question WHERE id = %s", (question_id,)).fetchone()
+    assert row is not None
+    department_id: UUID = row["department_id"]
+    return department_id
+
+
 def _run(db: psycopg.Connection[DictRow], question_id: UUID, wanted: Filter) -> list[DictRow]:
-    compiled = scope(question_id, wanted)
+    # The question's own department: these tests are about the filter.
+    compiled = scope(question_id, wanted, department_id=_department_of(db, question_id))
     query = compiled.sql + sql.SQL("SELECT id FROM scope ORDER BY id")
     return db.execute(query, compiled.params).fetchall()
 
 
-def _text(db: psycopg.Connection[DictRow], question_id: UUID, wanted: Filter) -> str:
-    return scope(question_id, wanted).sql.as_string(db)
+def _text(
+    db: psycopg.Connection[DictRow], question_id: UUID, department_id: UUID, wanted: Filter
+) -> str:
+    return scope(question_id, wanted, department_id=department_id).sql.as_string(db)
 
 
 def _row_counts(db: psycopg.Connection[DictRow]) -> dict[str, int]:
@@ -95,17 +105,19 @@ def _row_counts(db: psycopg.Connection[DictRow]) -> dict[str, int]:
 def test_hostile_filter_values_stay_parameters(db: psycopg.Connection[DictRow]) -> None:
     signed = signed_off_fixture(db)
     question_id = signed.question_id
+    department_id = _department_of(db, question_id)
 
     # The text is fixed by the shape (one attr, one theme, one other) and
-    # by nothing a user typed, the question id included.
-    expected = _text(db, question_id, _one_of_each("benign"))
+    # by nothing a user typed, the question and department ids included.
+    expected = _text(db, question_id, department_id, _one_of_each("benign"))
     for value in (*HOSTILE, NUL):
-        assert _text(db, question_id, _one_of_each(value)) == expected
-        assert _text(db, uuid4(), _one_of_each(value)) == expected
+        assert _text(db, question_id, department_id, _one_of_each(value)) == expected
+        assert _text(db, uuid4(), uuid4(), _one_of_each(value)) == expected
 
     # Every placeholder in the text has a parameter and every parameter a
-    # placeholder, whatever the shape. The question id is the only value
-    # an empty filter carries, and a second attr adds one placeholder.
+    # placeholder, whatever the shape. The question and department ids are
+    # the only values an empty filter carries, and a second attr adds one
+    # placeholder.
     two_attrs = Filter(
         attrs=(AttrFilter("d_area", "Villages"), AttrFilter("c_route", "Oppose")),
         themes=("benign",),
@@ -113,12 +125,13 @@ def test_hostile_filter_values_stay_parameters(db: psycopg.Connection[DictRow]) 
     )
     shapes = [Filter(), _one_of_each("benign"), two_attrs, *_each_alone("benign")]
     for shape in shapes:
-        compiled = scope(question_id, shape)
+        compiled = scope(question_id, shape, department_id=department_id)
         assert set(PLACEHOLDER.findall(compiled.sql.as_string(db))) == set(compiled.params)
-    assert len(scope(question_id, Filter()).params) == 1
-    one_attr_count = len(scope(question_id, _one_of_each("benign")).params)
-    assert len(scope(question_id, two_attrs).params) == one_attr_count + 1
-    assert _text(db, question_id, two_attrs) != expected
+    assert len(scope(question_id, Filter(), department_id=department_id).params) == 2
+    one_attr = scope(question_id, _one_of_each("benign"), department_id=department_id)
+    two = scope(question_id, two_attrs, department_id=department_id)
+    assert len(two.params) == len(one_attr.params) + 1
+    assert _text(db, question_id, department_id, two_attrs) != expected
 
     # The query runs and finds rows when the filter allows them, so "none"
     # below is the hostile value failing to match and not a broken query:
@@ -167,7 +180,8 @@ def test_the_theme_table_counts_match_the_fixture(db: psycopg.Connection[DictRow
 
     # Hand count from responses.csv: distinct, non-blank o_reason answers,
     # duplicates hidden (CLAUDE.md rule 2, docs/04 section 6's denominator).
-    everyone = theme_table(db, signed.question_id, Filter())
+    department_id = _department_of(db, signed.question_id)
+    everyone = theme_table(db, signed.question_id, Filter(), department_id=department_id)
     assert everyone.denominator == 74
     assert {(c.key, c.respondents) for c in everyone.rows} == {
         ("OTHER", 46),
@@ -190,7 +204,10 @@ def test_the_theme_table_counts_match_the_fixture(db: psycopg.Connection[DictRow
     }
 
     villages = theme_table(
-        db, signed.question_id, Filter(attrs=(AttrFilter("d_area", "Villages"),))
+        db,
+        signed.question_id,
+        Filter(attrs=(AttrFilter("d_area", "Villages"),)),
+        department_id=department_id,
     )
     assert villages.denominator == 17
     assert {(c.key, c.respondents) for c in villages.rows} == {
@@ -205,6 +222,7 @@ def test_the_theme_table_counts_match_the_fixture(db: psycopg.Connection[DictRow
         db,
         signed.question_id,
         Filter(attrs=(AttrFilter("d_area", "Villages"), AttrFilter("d_area", "Suburbs"))),
+        department_id=department_id,
     )
     assert either_area.denominator == 42
     assert {(c.key, c.respondents) for c in either_area.rows} == {
@@ -216,7 +234,10 @@ def test_the_theme_table_counts_match_the_fixture(db: psycopg.Connection[DictRow
     # The related closed question, c_route, among the Villages respondents
     # counted above: docs/02 screen 4's own second panel.
     distribution = related_distribution(
-        db, signed.question_id, Filter(attrs=(AttrFilter("d_area", "Villages"),))
+        db,
+        signed.question_id,
+        Filter(attrs=(AttrFilter("d_area", "Villages"),)),
+        department_id=department_id,
     )
     assert distribution == [("Support", 8), ("Oppose", 4), ("Not sure", 4)]
 
@@ -261,25 +282,21 @@ def test_duplicates_are_hidden_unless_asked_for(db: psycopg.Connection[DictRow])
     # the twelfth (docs/02 section 7, decision 9; PROFORMA_ROWS in
     # scripts/make_fixture_data.py), so with the toggle off the denominator
     # counts one of them, and the PROFORMA key with it.
-    hidden = theme_table(db, signed.question_id, Filter())
+    department_id = _department_of(db, signed.question_id)
+    hidden = theme_table(db, signed.question_id, Filter(), department_id=department_id)
     assert hidden.denominator == 74
     proforma_hidden = {c.key: c.respondents for c in hidden.rows}["PROFORMA"]
     assert proforma_hidden == 1
 
     # with=duplicates drops both IS NULL predicates, so every physical row
     # this factory tagged counts, the eleven copies included.
-    shown = theme_table(db, signed.question_id, Filter(with_duplicates=True))
+    shown = theme_table(
+        db, signed.question_id, Filter(with_duplicates=True), department_id=department_id
+    )
     assert shown.denominator == 221
     proforma_shown = {c.key: c.respondents for c in shown.rows}["PROFORMA"]
     assert proforma_shown == 12
     assert proforma_shown - proforma_hidden == 11
-
-
-def _department_of(db: psycopg.Connection[DictRow], question_id: UUID) -> UUID:
-    row = db.execute("SELECT department_id FROM question WHERE id = %s", (question_id,)).fetchone()
-    assert row is not None
-    department_id: UUID = row["department_id"]
-    return department_id
 
 
 def test_the_scope_holds_to_the_callers_department(db: psycopg.Connection[DictRow]) -> None:
