@@ -12,15 +12,17 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import psycopg
 import pytest
 from openpyxl import load_workbook
 from psycopg.rows import DictRow
 
+from consult import query
 from consult.cli import main
 from consult.config import Settings
+from consult.store import PIPELINE_ROLE
 from tests.test_cli_themes import ANSWER_FRAGMENTS, ingested
 
 pytestmark = pytest.mark.db
@@ -127,3 +129,62 @@ def test_the_query_and_export_commands(
             for cell in sheet_row:
                 if cell.value not in (None, ""):
                     assert cell.data_type == "s", (sheet.title, cell.coordinate)
+
+
+def test_the_query_command_reads_as_the_pipeline_role(
+    db: psycopg.Connection[DictRow],
+    db_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A stand-in for the query command's first read, as
+    # test_cli_themes.py's test_run_job_works_as_the_pipeline_role stands
+    # in for the worker's own call, wrapped rather than replaced so the
+    # rest of the command still runs for real.
+    ingested(db, db_settings)
+    for _ in range(2):
+        assert main(["worker", "--once", "--worker", "w1"], settings=db_settings) == 0
+    reviewer = str(uuid4())
+    open_ids = [
+        row["id"]
+        for row in db.execute(
+            "SELECT id FROM question WHERE kind = 'open' ORDER BY ordinal"
+        ).fetchall()
+    ]
+    for open_id in open_ids:
+        assert (
+            main(
+                ["sign-off", str(open_id), "--reviewer", reviewer, "--expect-version", "0"],
+                settings=db_settings,
+            )
+            == 0
+        )
+    for _ in range(2):
+        assert main(["worker", "--once", "--worker", "w1"], settings=db_settings) == 0
+    reason_row = db.execute("SELECT id FROM question WHERE column_ref = 'o_reason'").fetchone()
+    assert reason_row is not None
+    reason_id = reason_row["id"]
+    capsys.readouterr()
+
+    seen: list[str] = []
+    original = query.theme_table
+
+    def recording(
+        conn: psycopg.Connection[DictRow], question_id: UUID, filter: query.Filter
+    ) -> query.ThemeTable:
+        row = conn.execute("SELECT current_user AS who").fetchone()
+        assert row is not None
+        seen.append(str(row["who"]))
+        return original(conn, question_id, filter)
+
+    monkeypatch.setattr(query, "theme_table", recording)
+
+    assert main(["query", str(reason_id)], settings=db_settings) == 0
+    capsys.readouterr()
+
+    # docs/06 section 2.4's backstop is the pipeline role's missing grant
+    # on the vault: the query path names no vault table (query.py's own
+    # module docstring), so it should read as the role that can't reach
+    # the vault even if the code above it gets that wrong, not as the
+    # export role, whose vault grant this path never needs.
+    assert seen == [PIPELINE_ROLE]
