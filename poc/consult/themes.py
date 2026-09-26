@@ -99,7 +99,7 @@ def batches(
         by_related.setdefault(related, []).append(PromptAnswer(answer_id, text))
     # A stored seed and Python's own generator: the shuffle is for spread
     # across batches, not for secrecy (docs/02, step 6).
-    rng = random.Random(seed)  # noqa: S311
+    rng = random.Random(seed)  # spread, not secrecy  # noqa: S311  # nosec B311
     plan: list[Batch] = []
     for related in sorted(by_related, key=lambda r: (r is None, r or "")):
         answers = by_related[related]
@@ -370,7 +370,7 @@ def stratified_sample(
         biggest = max(ordered, key=lambda r: counts[r])
         counts[biggest] -= 1
         leftover += 1
-    rng = random.Random(seed)  # noqa: S311
+    rng = random.Random(seed)  # spread, not secrecy  # noqa: S311  # nosec B311
     sample: dict[str | None, list[PromptAnswer]] = {}
     for related in ordered:
         answers = list(strata[related])
