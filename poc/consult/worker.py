@@ -60,6 +60,13 @@ BACKOFF_ATTEMPTS = 6
 # reconciler's to fail (docs/02, section 5), never a worker's to run.
 MAX_ATTEMPTS = 5
 
+# docs/02, section 9, and ADR-005 back off only on a 429 or a 5xx.
+# GATEWAY_REJECTED is any other 4xx, the request's own fault (errors.py),
+# so it gets one call and no wait.
+RETRYABLE = frozenset(
+    {ErrorCode.GATEWAY_RATE_LIMITED, ErrorCode.GATEWAY_UNAVAILABLE, ErrorCode.GATEWAY_TIMEOUT}
+)
+
 
 def backoff_seconds(attempt: int, rng: random.Random) -> float:
     """AWS's full jitter for the n-th retry: a draw from
@@ -77,11 +84,13 @@ def call_with_backoff(
     sleep: Callable[[float], None] = time.sleep,
     rng: random.Random | None = None,
 ) -> Completion:
-    """One call, retried on a `GatewayError` up to `BACKOFF_ATTEMPTS`
-    times with `backoff_seconds` between attempts and no sleep after the
-    last. The final attempt is unguarded: its error, if any, is left to
-    propagate on its own, so nothing here re-raises it onto a chain that
-    could carry its message."""
+    """One call, retried on a `GatewayError` whose code is in `RETRYABLE`,
+    up to `BACKOFF_ATTEMPTS` times with `backoff_seconds` between attempts
+    and no sleep after the last. A `GatewayError` outside `RETRYABLE`
+    propagates from the attempt that raised it, the same exception and not
+    a new one, so it needs no `from` chain. The final retryable attempt is
+    unguarded: its error, if any, is left to propagate on its own, so
+    nothing here re-raises it onto a chain that could carry its message."""
     if rng is None:
         # Spread across retries, not secrecy (themes.py's shuffle reads the
         # same way; docs/02, step 6).
@@ -89,7 +98,9 @@ def call_with_backoff(
     for attempt in range(BACKOFF_ATTEMPTS - 1):
         try:
             return llm.complete(prompt)
-        except GatewayError:
+        except GatewayError as exc:
+            if exc.code not in RETRYABLE:
+                raise
             sleep(backoff_seconds(attempt, rng))
     return llm.complete(prompt)
 
