@@ -446,9 +446,16 @@ def _themes(args: argparse.Namespace, settings: Settings) -> int:
             """,
             (version["id"],),
         ).fetchall()
+    # --expect-version wants the edit counter, not the version number, so
+    # a candidate's own line names the value to pass sign-off next.
+    hint = (
+        f"; sign off with --expect-version {version['edit_version']}"
+        if version["status"] == "candidate"
+        else ""
+    )
     print(
         f"question {args.question}: version {version['version_no']} "
-        f"({version['status']}, edit {version['edit_version']})"
+        f"({version['status']}, edit {version['edit_version']}{hint})"
     )
     print("shortlist:")
     for row in rows:
@@ -483,9 +490,21 @@ def _sign_off(args: argparse.Namespace, settings: Settings) -> int:
             )
         except transitions.SignOffConflictError:
             conn.rollback()
+            # The candidate itself, not the caller's stale guess: read
+            # after the refusal, so the message names where the list
+            # actually is rather than assuming it moved past what was asked.
+            current = conn.execute(
+                """
+                SELECT edit_version FROM theme_set_version
+                 WHERE question_id = %s AND status = 'candidate'
+                 ORDER BY version_no DESC LIMIT 1
+                """,
+                (args.question,),
+            ).fetchone()
+            at = current["edit_version"] if current is not None else "unknown"
             print(
-                f"question {args.question}: conflict, the list has moved on from edit "
-                f"{args.expect_version}"
+                f"question {args.question}: conflict, expected edit "
+                f"{args.expect_version}, the list is at edit {at}"
             )
             return 1
         except transitions.TransitionError:
