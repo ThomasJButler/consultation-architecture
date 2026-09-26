@@ -9,6 +9,8 @@ list, so the configure step can show them all rather than one per upload.
 
 from __future__ import annotations
 
+import re
+import zipfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -168,3 +170,26 @@ def test_a_duplicated_column_reference_is_an_error(tmp_path: Path) -> None:
     with pytest.raises(DefinitionError) as raised:
         read_definition(write_workbook(tmp_path / "definition.xlsx", rows))
     assert any("c_route" in problem and "twice" in problem for problem in raised.value.problems)
+
+
+def test_a_short_definition_row_is_a_definition_error(tmp_path: Path) -> None:
+    # A row ends at its last filled cell when nothing pads it: a workbook
+    # can be saved without a <dimension> element, and the readers set a
+    # declared one aside anyway (test_inputs.py). A closed question with
+    # only its reference and text is then two cells long, and the missing
+    # response_type is a problem reported with the rest, not a KeyError.
+    rows: Rows = {**GOOD, "Closed questions": [("c_route", "Support the route?")]}
+    written = write_workbook(tmp_path / "written.xlsx", rows)
+    path = tmp_path / "definition.xlsx"
+    with zipfile.ZipFile(written) as archive, zipfile.ZipFile(path, "w") as copy:
+        for name in archive.namelist():
+            data = archive.read(name)
+            if name.startswith("xl/worksheets/"):
+                data = re.sub(rb"<dimension [^>]*/>", b"", data)
+            copy.writestr(name, data)
+
+    with pytest.raises(DefinitionError) as raised:
+        read_definition(path)
+
+    (problem,) = raised.value.problems
+    assert "Closed questions" in problem and "c_route" in problem and "response_type" in problem
