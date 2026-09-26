@@ -23,8 +23,11 @@ from consult.transitions import (
     advance_consultation,
     finish_find_themes,
     finish_map_themes,
+    mark_processing,
+    mark_staged,
     reopen_for_correction,
     sign_off,
+    start_staging,
 )
 from tests.rows import (
     make_consultation,
@@ -312,3 +315,28 @@ def test_the_guards_refuse_a_row_in_the_wrong_state_and_change_nothing(
         finish_find_themes(db, lease, question_id, consultation_id)
     assert outbox_rows(db, consultation_id) == []
     assert consultation_row(db, consultation_id)["status"] == "awaiting_review"
+
+
+def test_the_early_edges_refuse_a_consultation_in_the_wrong_state(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    # docs/02 section 6: each edge is a guarded UPDATE on the state before
+    # it. start_staging and mark_staged refuse; mark_processing answers
+    # False instead, because a redelivered ingest must finish quietly.
+    department_id = make_department(db)
+    staged = make_consultation(db, department_id, status="staged")
+    draft = make_consultation(db, department_id)
+
+    with pytest.raises(TransitionError):
+        start_staging(db, staged)
+    with pytest.raises(TransitionError):
+        mark_staged(db, draft, upload_sha256=b"\x00" * 32, row_count=1)
+    assert mark_processing(db, draft) is False
+
+    statuses = {
+        r["id"]: r["status"]
+        for r in db.execute(
+            "SELECT id, status FROM consultation WHERE department_id = %s", (department_id,)
+        ).fetchall()
+    }
+    assert statuses == {staged: "staged", draft: "draft"}

@@ -86,3 +86,29 @@ def test_stage_refuses_a_header_over_sixty_three_bytes(
         "SELECT count(*) AS n FROM pg_tables WHERE schemaname = 'staging'"
     ).fetchone()
     assert tables == {"n": 0}
+
+
+def test_stage_refuses_a_repeated_or_blank_header(
+    db: psycopg.Connection[DictRow], tmp_path: Path
+) -> None:
+    # The validator blocks these first (test_validate.py); this is the
+    # backstop, refused before the edge and before any table, with a count
+    # and never a cell.
+    consultation_id = make_consultation(db, make_department(db))
+    path = tmp_path / "responses.csv"
+    path.write_text(
+        "respondent_ref,d_area,d_area,,o_reason\nR-1,Town,Suburbs,x,why\n", encoding="utf-8"
+    )
+
+    with pytest.raises(StageError) as refused:
+        stage(db, consultation_id, path)
+
+    assert "5 headers" in str(refused.value) and "Town" not in str(refused.value)
+    status = db.execute(
+        "SELECT status FROM consultation WHERE id = %s", (consultation_id,)
+    ).fetchone()
+    assert status == {"status": "draft"}
+    tables = db.execute(
+        "SELECT count(*) AS n FROM pg_tables WHERE schemaname = 'staging'"
+    ).fetchone()
+    assert tables == {"n": 0}
