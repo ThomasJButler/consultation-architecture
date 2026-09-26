@@ -558,8 +558,11 @@ def _write_summary(ws: WriteOnlyWorksheet, table: query.ThemeTable, hidden: int)
 
 
 def _write_manifest(ws: WriteOnlyWorksheet, manifest: _Manifest, cut: int) -> None:
-    """docs/02 step 12's manifest, cut to what this schema holds: no
-    prompt hash and no agreement rate, since neither has a column here.
+    """docs/02 step 12's manifest, cut to what this export computes. No
+    prompt hash: `job.prompt_sha256` is a real column (docs/04 section 1)
+    that nothing here, or anywhere else in this codebase, writes yet. No
+    agreement rate either, and that one has no column to write at all:
+    it would have to be derived from the tags, and nothing computes it.
 
     `cut` is the other sheets' count of cells cut at the cap, and
     `truncated_cells` adds the rows above it on this one. The rows below
