@@ -18,12 +18,13 @@ small team. That is what this repository is about.
    sources, the architecture, the decision records, the data model, the cost
    model, the security and governance notes.
 3. `poc/` is a small proof-of-concept of the parts of the design that are
-   easy to claim and hard to get right: the job pipeline's claim, lease and
-   fan-in mechanics, idempotent tag inserts and the indexed filter query, on
-   a real Postgres, each of the four proved by a named test rather than
-   asserted (`poc/TESTING.md`). It runs offline with a fake model, a
-   fixture consultation taken end to end from `consult ingest` through
-   `consult worker`, `consult query` and `consult export`.
+   easy to claim and hard to get right: the fan-in transaction, lease
+   takeover with a fence, idempotent tag inserts and the indexed filter
+   query, on a real Postgres, each of the four proved by a named test
+   rather than asserted (`poc/TESTING.md`). It runs offline with a fake
+   model, a fixture consultation taken end to end from `consult ingest`
+   through `consult worker`, `consult sign-off`, `consult query` and
+   `consult export`.
 4. `plans/` holds the plan for each pull request, written before the work.
 
 ## What it deliberately does not do
