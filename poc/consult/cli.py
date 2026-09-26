@@ -44,6 +44,7 @@ from consult.fake_model import OfflineModel
 from consult.ingest import IngestError, ingest
 from consult.inputs import InputError
 from consult.jobs import LeaseLostError
+from consult.llm import GatewayError
 from consult.replies import ReplyError
 from consult.responses import Responses
 from consult.stage import stage
@@ -249,10 +250,26 @@ def _run_job(args: argparse.Namespace, settings: Settings) -> int:
                 conn.rollback()
                 return 1
             conn.commit()
+            # BackingOff with conn.commit as before_call, the same as the
+            # worker loop (worker.py's module docstring): no call and no
+            # backoff sleep is left with a transaction open.
+            model = worker.BackingOff(llm, before_call=conn.commit)
             try:
                 themes.run_find_themes(
-                    conn, llm, lease, after_batch=lambda _batch_no: conn.commit()
+                    conn, model, lease, after_batch=lambda _batch_no: conn.commit()
                 )
+            except GatewayError as exc:
+                # record_gateway_failure does its own rollback and commit
+                # (its docstring), the code and request id under the
+                # fence, never the provider's text (CLAUDE.md, rule 8).
+                try:
+                    worker.record_gateway_failure(conn, lease, exc)
+                except LeaseLostError as lost:
+                    conn.rollback()
+                    print(f"job {args.job}: {lost.code.value}")
+                    return 1
+                print(f"job {args.job}: failed ({exc.code.value})")
+                return 1
             except ReplyError as exc:
                 # The failure is a code and a request id, never the reply
                 # (THREAT_MODEL.md, section 2); whether it retries is the
