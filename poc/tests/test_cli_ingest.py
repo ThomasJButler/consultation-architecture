@@ -15,6 +15,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg.errors import UniqueViolation
 from psycopg.rows import DictRow
 
 from consult.cli import main
@@ -93,3 +94,23 @@ def test_the_ingest_command_writes_nothing_when_the_file_is_not_fit(
         "SELECT (SELECT count(*) FROM consultation) AS consultations, (SELECT count(*) FROM department) AS departments"
     ).fetchone()
     assert written == {"consultations": 0, "departments": 0}
+
+
+def test_a_department_name_names_one_department(
+    db: psycopg.Connection[DictRow], db_settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The command finds or creates the department by name, so the name has
+    # to be unique or two runs racing on a new name would each make one and
+    # every later consultation would land on whichever row came back first.
+    with pytest.raises(UniqueViolation), db.transaction():
+        db.execute("INSERT INTO department (name) VALUES (%s), (%s)", ("Twice", "Twice"))
+    assert main(["ingest", RESPONSES, "--definition", DEFINITION, *ARGS], settings=db_settings) == 0
+    second = ["--name", "A second consultation", *ARGS[2:]]
+    assert (
+        main(["ingest", RESPONSES, "--definition", DEFINITION, *second], settings=db_settings) == 0
+    )
+    capsys.readouterr()
+    counts = db.execute(
+        "SELECT (SELECT count(*) FROM department) AS departments, (SELECT count(*) FROM consultation) AS consultations"
+    ).fetchone()
+    assert counts == {"departments": 1, "consultations": 2}
