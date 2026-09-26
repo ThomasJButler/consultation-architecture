@@ -94,11 +94,17 @@ def _validate(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def _department(conn: psycopg.Connection[DictRow], name: str) -> UUID:
-    found = conn.execute("SELECT id FROM department WHERE name = %s", (name,)).fetchone()
-    if found is None:
-        found = conn.execute(
-            "INSERT INTO department (name) VALUES (%s) RETURNING id", (name,)
-        ).fetchone()
+    # Find or create in one statement on the unique name, so two runs
+    # racing on a new department can't each make one. The no-op SET is what
+    # gets RETURNING to yield the existing row.
+    found = conn.execute(
+        """
+        INSERT INTO department (name) VALUES (%s)
+        ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+        RETURNING id
+        """,
+        (name,),
+    ).fetchone()
     if found is None:
         raise LookupError("department insert returned no row")
     return UUID(str(found["id"]))

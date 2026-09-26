@@ -23,7 +23,10 @@ CREATE SCHEMA IF NOT EXISTS staging;
 -- dispatch cap is a mechanic; the budget needs an invoice to reconcile against.
 CREATE TABLE IF NOT EXISTS department (
   id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  name                text NOT NULL,
+  -- One department per name: the command line finds or creates by it, and
+  -- two runs racing on a new name have to land on one row (docs/04,
+  -- section 3 as corrected).
+  name                text NOT NULL UNIQUE,
   concurrent_jobs_cap integer NOT NULL DEFAULT 6 CHECK (concurrent_jobs_cap > 0)
 );
 
