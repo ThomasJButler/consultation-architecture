@@ -289,7 +289,8 @@ def _themes(args: argparse.Namespace, settings: Settings) -> int:
             return 1
         rows = conn.execute(
             """
-            SELECT t.key, t.label, t.is_longlist, t.preview_count, l.key AS folded_into,
+            SELECT t.key, t.label, t.description, t.is_longlist, t.preview_count,
+                   l.key AS folded_into,
                    (SELECT string_agg(e.answer_id::text, ', ' ORDER BY e.rank)
                       FROM theme_example e WHERE e.theme_id = t.id) AS examples
               FROM theme t LEFT JOIN theme l ON l.id = t.lineage_theme_id
@@ -310,6 +311,10 @@ def _themes(args: argparse.Namespace, settings: Settings) -> int:
         if row["examples"]:
             line += f"  examples {row['examples']}"
         print(line)
+        if row["description"]:
+            # What sign-off freezes and every mapping prompt will carry; the
+            # reviewer has to have read it here (the security review, docs/07).
+            print(f"      {report.shown(row['description'])}")
     longlist = [row for row in rows if row["is_longlist"]]
     folded = ", ".join(
         f"{row['key']} > {row['folded_into']}" if row["folded_into"] else row["key"]
