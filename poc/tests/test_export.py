@@ -350,3 +350,39 @@ def test_export_reads_one_snapshot_despite_a_mid_export_retraction(
     manifest_rows = list(workbook["Manifest"].iter_rows(min_row=9, values_only=True))
     o_reason_row = {row[0]: row for row in manifest_rows}["o_reason"]
     assert o_reason_row[5] == str(responses_total_marks)  # tag_count
+
+
+def test_a_summary_sheet_title_is_always_valid(
+    db: psycopg.Connection[DictRow], tmp_path: Path
+) -> None:
+    """`question.column_ref` is a free-text header from the definition
+    workbook (docs/00), not a sheet-safe string. openpyxl's own title
+    setter raises ValueError on any of `? / \\ * [ ] :`
+    (`openpyxl.workbook.child.INVALID_TITLE_REGEX`), and Excel's own
+    sheet-title limit is 31 characters, which " summary" alone leaves
+    room for 23 of."""
+    signed = signed_off_questions(db, ("o_reason",))
+    tag_answers_by_rule(
+        db, signed["o_reason"].version_id, signed["o_reason"].question_id, _o_reason_key
+    )
+
+    dirty_ref = ("Why/expand? " * 4)[:40]
+    assert len(dirty_ref) == 40
+    assert "?" in dirty_ref
+    assert "/" in dirty_ref
+    db.execute(
+        "UPDATE question SET column_ref = %s WHERE id = %s",
+        (dirty_ref, signed["o_reason"].question_id),
+    )
+
+    path = tmp_path / "export.xlsx"
+    export.write_workbook(db, signed["o_reason"].consultation_id, path)
+
+    workbook = load_workbook(path)
+    summary_titles = [name for name in workbook.sheetnames if name not in ("Responses", "Manifest")]
+    assert len(summary_titles) == 1
+    title = summary_titles[0]
+    assert len(title) <= 31
+    assert "?" not in title
+    assert "/" not in title
+    assert workbook[title]["A1"].value == "key"
