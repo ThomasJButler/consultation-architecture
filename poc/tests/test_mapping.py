@@ -17,7 +17,8 @@ from psycopg.rows import DictRow
 
 from consult.jobs import LeaseLostError, claim
 from consult.mapping import MAP_BATCH_SIZE, assign, load_map_job, plan
-from tests.fakes import RecordingLLM
+from consult.transitions import finish_map_themes, start_map_themes
+from tests.fakes import FakeLLM, Fault, RecordingLLM
 from tests.pipeline import NOT_ANSWERED, fixture_rows, signed_off_fixture
 from tests.test_ingest import normalised
 from tests.test_themes import distinct_reasons
@@ -200,3 +201,86 @@ def test_duplicates_are_themed_once_and_their_tags_copied(db: psycopg.Connection
     ).fetchone()
     assert total_tags is not None
     assert total_tags["n"] == len(expected) + total_duplicates["n"]
+
+
+def test_a_failed_batch_retries_at_size_one_and_buckets_the_answer(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    signed = signed_off_fixture(db)
+    job = load_map_job(db, signed.job_id)
+    planned = plan(db, job)
+    # The fixture's partitions hold 9, 31, 30 and 4 distinct answers, so the
+    # plan opens with a short batch; the first full batch of ten is the one
+    # the fake spoils (docs/02, step 9: "retries at size 1").
+    first_ten = next(i for i, batch in enumerate(planned) if len(batch.answers) == MAP_BATCH_SIZE)
+    spoiled = planned[first_ten].answers
+    bad = 3  # the fourth answer of that batch fails again on its own
+    llm = FakeLLM(
+        [Fault.NONE] * first_ten
+        + [Fault.DROPPED_ID]
+        + [Fault.DROPPED_ID if i == bad else Fault.NONE for i in range(MAP_BATCH_SIZE)]
+        + [Fault.NONE] * (len(planned) - first_ten - 1)
+    )
+    lease = claim(db, signed.job_id, "worker-1")
+    assert lease is not None
+    start_map_themes(db, job.question_id)
+
+    ran = assign(db, llm, lease, job, planned)
+    finish_map_themes(db, lease, job.question_id, job.consultation_id)
+
+    # Every planned batch once, then the spoiled batch's ten answers one at a
+    # time in the batch's own order, against the same enum.
+    assert not llm.script
+    assert len(llm.prompts) == len(planned) + MAP_BATCH_SIZE
+    retries = llm.prompts[first_ten + 1 : first_ten + 1 + MAP_BATCH_SIZE]
+    assert [p.answer_ids for p in retries] == [(a.id,) for a in spoiled]
+    assert {p.theme_keys for p in retries} == {llm.prompts[first_ten].theme_keys}
+
+    # The refused batch of ten writes no checkpoint. Each retry is its own:
+    # nine done, and one unprocessable naming the answer that failed twice.
+    checkpoints = db.execute(
+        "SELECT batch_no, answer_ids, status FROM job_batch WHERE job_id = %s ORDER BY batch_no",
+        (signed.job_id,),
+    ).fetchall()
+    expected = (
+        [(tuple(a.id for a in b.answers), "done") for b in planned[:first_ten]]
+        + [((a.id,), "unprocessable" if i == bad else "done") for i, a in enumerate(spoiled)]
+        + [(tuple(a.id for a in b.answers), "done") for b in planned[first_ten + 1 :]]
+    )
+    assert [(tuple(c["answer_ids"]), c["status"]) for c in checkpoints] == expected
+    assert [c["batch_no"] for c in checkpoints] == list(range(1, len(expected) + 1))
+    assert ran == len(expected)
+
+    # Nine neighbours tagged, the tenth not, and none of its duplicates
+    # either: every distinct answer but one, plus every other duplicate.
+    failed = spoiled[bad].id
+    tagged = {
+        r["answer_id"]
+        for r in db.execute(
+            "SELECT answer_id FROM answer_theme WHERE theme_set_version_id = %s",
+            (job.version_id,),
+        ).fetchall()
+    }
+    assert {a.id for a in spoiled} - tagged == {failed}
+    others = db.execute(
+        """
+        SELECT count(*) AS n FROM answer
+         WHERE question_id = %s AND duplicate_of_answer_id IS NOT NULL
+           AND duplicate_of_answer_id <> %s
+        """,
+        (job.question_id, failed),
+    ).fetchone()
+    assert others is not None
+    total = db.execute(
+        "SELECT count(*) AS n FROM answer_theme WHERE theme_set_version_id = %s",
+        (job.version_id,),
+    ).fetchone()
+    assert total is not None
+    assert total["n"] == len(distinct_reasons()) - 1 + others["n"]
+
+    # The job still succeeds, and the check's code is on no row (CLAUDE.md,
+    # rule 8: job.error_code is for the job's own failure).
+    row = db.execute(
+        "SELECT status, error_code FROM job WHERE id = %s", (signed.job_id,)
+    ).fetchone()
+    assert row == {"status": "succeeded", "error_code": None}
