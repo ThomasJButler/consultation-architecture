@@ -9,6 +9,8 @@ the code under test.
 
 from __future__ import annotations
 
+from collections import Counter
+
 import psycopg
 import pytest
 from psycopg.rows import DictRow
@@ -16,7 +18,8 @@ from psycopg.rows import DictRow
 from consult.jobs import LeaseLostError, claim
 from consult.mapping import MAP_BATCH_SIZE, assign, load_map_job, plan
 from tests.fakes import RecordingLLM
-from tests.pipeline import signed_off_fixture
+from tests.pipeline import NOT_ANSWERED, fixture_rows, signed_off_fixture
+from tests.test_ingest import normalised
 from tests.test_themes import distinct_reasons
 
 pytestmark = pytest.mark.db
@@ -112,3 +115,88 @@ def test_mapping_batches_ten_shuffled_answers_and_tags_under_the_fence(
         ).fetchone()
         == batches_before
     )
+
+
+def _proforma() -> tuple[str, int]:
+    """The most-repeated o_reason text and its copy count: the campaign
+    proforma ingest's duplicate flag pins (test_ingest.py's own count)."""
+    counts: Counter[str] = Counter()
+    texts: dict[str, str] = {}
+    for row in fixture_rows():
+        text = row["o_reason"]
+        if text in NOT_ANSWERED | {"N/A"}:
+            continue
+        key = normalised(text)
+        counts[key] += 1
+        texts.setdefault(key, text)
+    key, count = counts.most_common(1)[0]
+    return texts[key], count
+
+
+def test_duplicates_are_themed_once_and_their_tags_copied(db: psycopg.Connection[DictRow]) -> None:
+    signed = signed_off_fixture(db)
+    job = load_map_job(db, signed.job_id)
+    planned = plan(db, job)
+    proforma_text, copies = _proforma()
+    assert copies >= 10, "the fixture repeats the proforma word for word"
+
+    canonical = db.execute(
+        """
+        SELECT id FROM answer
+         WHERE question_id = %s AND value_text = %s AND duplicate_of_answer_id IS NULL
+        """,
+        (job.question_id, proforma_text),
+    ).fetchone()
+    assert canonical is not None
+    canonical_id = canonical["id"]
+    duplicate_ids = [
+        r["id"]
+        for r in db.execute(
+            "SELECT id FROM answer WHERE duplicate_of_answer_id = %s", (canonical_id,)
+        ).fetchall()
+    ]
+    assert len(duplicate_ids) == copies - 1
+
+    lease = claim(db, signed.job_id, "worker-1")
+    assert lease is not None
+    llm = RecordingLLM()
+
+    assign(db, llm, lease, job, planned)
+
+    # One model call carries the canonical id; no duplicate's id is ever sent.
+    carrying = [p for p in llm.prompts if canonical_id in p.answer_ids]
+    assert len(carrying) == 1
+    assert not any(dup in p.answer_ids for p in llm.prompts for dup in duplicate_ids)
+
+    canonical_tags = sorted(
+        (r["theme_id"], r["job_id"], r["batch_no"])
+        for r in db.execute(
+            "SELECT theme_id, job_id, batch_no FROM answer_theme WHERE answer_id = %s",
+            (canonical_id,),
+        ).fetchall()
+    )
+    assert canonical_tags
+    for dup_id in duplicate_ids:
+        dup_tags = sorted(
+            (r["theme_id"], r["job_id"], r["batch_no"])
+            for r in db.execute(
+                "SELECT theme_id, job_id, batch_no FROM answer_theme WHERE answer_id = %s",
+                (dup_id,),
+            ).fetchall()
+        )
+        assert dup_tags == canonical_tags
+
+    # The total is every distinct answer plus every duplicate the whole
+    # question carries, times the one key a batch the fake ever returns.
+    expected = distinct_reasons()
+    total_duplicates = db.execute(
+        "SELECT count(*) AS n FROM answer WHERE question_id = %s AND duplicate_of_answer_id IS NOT NULL",
+        (job.question_id,),
+    ).fetchone()
+    assert total_duplicates is not None
+    total_tags = db.execute(
+        "SELECT count(*) AS n FROM answer_theme WHERE theme_set_version_id = %s",
+        (job.version_id,),
+    ).fetchone()
+    assert total_tags is not None
+    assert total_tags["n"] == len(expected) + total_duplicates["n"]
