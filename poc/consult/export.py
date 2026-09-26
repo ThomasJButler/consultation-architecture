@@ -320,8 +320,7 @@ def _write_responses(
     """docs/02 step 12's first sheet: the respondent id, the vault's
     identity column, every demographic and closed answer from
     `respondent.attrs`, every open question's text, then one column per
-    theme per open question (docs/04, section 6, and this run's own
-    plan)."""
+    theme per open question (docs/04, section 6)."""
     other_questions = [question for question in questions if question.kind != "open"]
 
     header: list[object] = []

@@ -226,8 +226,8 @@ def tag_answers_by_rule(
     """Tag every non-blank answer to `question_id` in `answer_theme` against
     `version_id`, the key chosen by `key_for(value_text)`. A test's stand-in
     for `tags.insert_tags`, which needs a claimed lease this factory has no
-    job to hold (the run's test loop: expected values come from outside the
-    code under test, not the worker). Every physical row is tagged, its
+    job to hold; the tags a test then counts come from the test and not
+    from the worker. Every physical row is tagged, its
     duplicates included, so revealing them with `with=duplicates` changes a
     theme's count and not just the denominator (docs/04 section 6). A key
     `key_for` returns that the version doesn't already carry is created;
