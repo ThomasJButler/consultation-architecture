@@ -18,9 +18,10 @@ import psycopg
 import pytest
 from psycopg.rows import DictRow
 
-from consult import themes
+from consult import cli, themes
 from consult.cli import main
 from consult.config import Settings
+from consult.dispatch import dispatch as real_dispatch
 from consult.errors import ErrorCode
 from consult.jobs import Lease
 from consult.llm import GatewayError
@@ -245,6 +246,59 @@ def test_the_sign_off_command_freezes_v2_and_refuses_a_second(
         {"q": safety},
     ).fetchone()
     assert state == {"status": "themes_ready", "versions": 1}
+
+
+def test_dispatch_runs_under_a_role_from_every_command(
+    db: psycopg.Connection[DictRow],
+    db_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # docs/06, section 2.4: every write goes through one of the four
+    # NOLOGIN roles' grants, dispatch included. A stand-in wraps the real
+    # dispatch so state still moves on, and records current_user first, so
+    # a command that calls it at login-user level shows up as 'consult'
+    # rather than a role (plan section 2: the ingest role holds UPDATE on
+    # job for its own dispatch call).
+    seen: list[str] = []
+
+    def record_role(conn: psycopg.Connection[DictRow], settings: Settings) -> int:
+        row = conn.execute("SELECT current_user AS who").fetchone()
+        seen.append(str(row["who"]) if row else "")
+        return real_dispatch(conn, settings)
+
+    monkeypatch.setattr(cli, "dispatch", record_role)
+
+    jobs = ingested(db, db_settings)
+    assert (
+        main(
+            ["run-job", str(jobs["o_reason"]), "--worker", "w1", "--model", "fake"],
+            settings=db_settings,
+        )
+        == 0
+    )
+    question = db.execute(
+        "SELECT question_id FROM job WHERE id = %s", (jobs["o_reason"],)
+    ).fetchone()
+    assert question is not None
+    reviewer = "11111111-2222-3333-4444-555555555555"
+    assert (
+        main(
+            [
+                "sign-off",
+                str(question["question_id"]),
+                "--reviewer",
+                reviewer,
+                "--expect-version",
+                "0",
+            ],
+            settings=db_settings,
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    assert seen == ["consult_ingest", "consult_pipeline", "consult_pipeline"]
 
 
 def test_run_job_works_as_the_pipeline_role(
