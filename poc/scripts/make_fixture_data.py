@@ -10,7 +10,10 @@ route that the wireframes in docs/02 section 12 use.
 
 Deterministic: the seed is fixed, so `make fixtures` rewrites the same files
 and a test holds the committed copies to this script. Rerun it after any
-change here and commit the result.
+change here and commit the result. `--scale N --out DIR` writes N
+respondents from the same seed somewhere else, for the plan benchmark's
+20,000-row consultation (docs/05 section 9); the committed files are the
+default 240.
 
 The data carries the cases later pull requests need on purpose: an option
 containing a comma (the argument for configuring in the app), a follow-up
@@ -22,9 +25,11 @@ the export writer must neutralise (THREAT_MODEL.md, section 4).
 
 from __future__ import annotations
 
+import argparse
 import csv
 import random
 import zipfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -293,7 +298,7 @@ def _fix_zip_timestamps(path: Path) -> None:
             target.writestr(info, data)
 
 
-def write_fixtures(out_dir: Path) -> Written:
+def write_fixtures(out_dir: Path, *, respondents: int = RESPONDENTS, seed: int = SEED) -> Written:
     out_dir.mkdir(parents=True, exist_ok=True)
     definition = out_dir / "definition.xlsx"
     responses = out_dir / "responses.csv"
@@ -303,18 +308,22 @@ def write_fixtures(out_dir: Path) -> Written:
     with zipfile.ZipFile(definition, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
         ExcelWriter(_definition_workbook(), archive).save()
     _fix_zip_timestamps(definition)
-    rng = random.Random(SEED)
+    rng = random.Random(seed)
     columns = response_columns()
     with responses.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
-        for row_no in range(1, RESPONDENTS + 1):
+        for row_no in range(1, respondents + 1):
             writer.writerow(_respondent(rng, row_no))
     return Written(definition=definition, responses=responses)
 
 
-def main() -> int:
-    written = write_fixtures(FIXTURES_DIR)
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Write the fictional consultation's fixtures.")
+    parser.add_argument("--scale", type=int, default=RESPONDENTS, help="respondents to write")
+    parser.add_argument("--out", type=Path, default=FIXTURES_DIR, help="directory to write into")
+    args = parser.parse_args(argv)
+    written = write_fixtures(args.out, respondents=args.scale)
     print(f"wrote {written.definition} and {written.responses}")
     return 0
 
