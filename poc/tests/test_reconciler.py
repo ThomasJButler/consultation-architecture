@@ -17,8 +17,15 @@ import pytest
 from psycopg.rows import DictRow
 
 from consult import reconciler
-from consult.jobs import claim
-from tests.rows import make_consultation, make_department, make_open_question, make_queued_job
+from consult.errors import ErrorCode
+from consult.jobs import claim, record_failure
+from tests.rows import (
+    make_consultation,
+    make_department,
+    make_open_question,
+    make_pending_job,
+    make_queued_job,
+)
 
 pytestmark = pytest.mark.db
 
@@ -29,6 +36,9 @@ STALE = timedelta(minutes=11)
 SENT_BEFORE_THE_CLAIM = timedelta(minutes=12)
 # ADR-002: the retry budget is attempts < 5.
 RETRY_BUDGET = 5
+# Either side of now for next_attempt_at.
+DUE = timedelta(minutes=-1)
+NOT_YET_DUE = timedelta(minutes=1)
 
 
 def _jobs(db: psycopg.Connection[DictRow], consultation_id: UUID) -> dict[UUID, DictRow]:
@@ -86,6 +96,38 @@ def _age(
         """,
         (attempts, sent_ago, heartbeat_ago, job_id),
     )
+
+
+def _failed(
+    db: psycopg.Connection[DictRow],
+    consultation_id: UUID,
+    question_id: UUID,
+    *,
+    kind: str = "find_themes",
+    attempts: int,
+    retry_in: timedelta,
+) -> UUID:
+    """A job as a worker's failure leaves it: its attempt spent, the code
+    and request id on the row, a time to retry (jobs.record_failure), and
+    the alias and seed its first dispatch stamped (ADR-002)."""
+    job_id = make_pending_job(
+        db, consultation_id, question_id, kind=kind, model_alias="fake-earlier", seed=424242
+    )
+    db.execute(
+        "UPDATE job SET status = 'queued', sent_at = now(), attempts = %s WHERE id = %s",
+        (attempts - 1, job_id),
+    )
+    lease = claim(db, job_id, "w-failed")
+    assert lease is not None
+    assert lease.fence == attempts
+    record_failure(
+        db,
+        lease,
+        ErrorCode.GATEWAY_UNAVAILABLE,
+        provider_request_id=f"req-{attempts}",
+        retry_in=retry_in,
+    )
+    return job_id
 
 
 def test_recover_resends_a_stale_job_and_fails_it_at_five_attempts(
@@ -156,5 +198,59 @@ def test_recover_resends_a_stale_job_and_fails_it_at_five_attempts(
     # the ten-minute re-send"); re-sending it on every pass would make the
     # statement anything but idempotent (docs/02, section 5).
     assert reconciler.recover(db) == (0, 0)
+    assert _jobs(db, consultation_id) == after
+    assert _outbox(db, consultation_id) == outbox
+
+
+def test_retry_returns_a_due_failure_to_pending_and_fails_the_fifth(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    # Statement 3 (docs/02, section 5), and the hole the plan closes
+    # (section 2): the section retried a due failure only below five
+    # attempts and statement 2 scans only queued and running, so a job
+    # failing on its fifth attempt sat in failed_retryable for good. Two
+    # questions are still finding, so fan-in 1 stays shut.
+    consultation_id = make_consultation(db, make_department(db), status="processing")
+    q_undue = make_open_question(db, consultation_id, "o_1", ordinal=1)
+    q_due = make_open_question(db, consultation_id, "o_2", ordinal=2)
+    q_fifth = make_open_question(db, consultation_id, "o_3", ordinal=3, status="assigning_themes")
+    undue = _failed(db, consultation_id, q_undue, attempts=1, retry_in=NOT_YET_DUE)
+    due = _failed(db, consultation_id, q_due, attempts=3, retry_in=DUE)
+    fifth = _failed(
+        db, consultation_id, q_fifth, kind="map_themes", attempts=RETRY_BUDGET, retry_in=DUE
+    )
+    db.commit()
+
+    before = _jobs(db, consultation_id)
+    questions_before = _questions(db, consultation_id)
+
+    assert reconciler.retry(db) == (1, 1)
+
+    after = _jobs(db, consultation_id)
+    # Not due yet: left for a later pass.
+    assert after[undue] == before[undue]
+    # Due below five: back to pending, and only the status moves. attempts,
+    # params and model_alias stay, so the next dispatch keeps the seed and
+    # the alias and the plan the job's checkpoints were cut from can be
+    # rebuilt (ADR-002; dispatch stamps both only where absent). error_code
+    # stays too. The plan doesn't say; keeping the last code until the next
+    # failure overwrites it is the simpler reading, and the row still says
+    # why the job went back.
+    assert after[due] == {**before[due], "status": "pending"}
+    # Due at five: failed through fail_job, with its question on the failed
+    # edge, attention_reason and one attention_needed row (docs/02, section
+    # 6 and correction 3).
+    assert after[fifth] == {**before[fifth], "status": "failed"}
+    assert _questions(db, consultation_id) == {**questions_before, q_fifth: "map_failed"}
+    assert _consultation(db, consultation_id) == {
+        "status": "processing",
+        "attention_reason": f"map_failed:{q_fifth}",
+    }
+    outbox = _outbox(db, consultation_id)
+    assert outbox == [{"kind": "attention_needed", "subject_id": fifth, "status": "pending"}]
+
+    # A second pass finds nothing: the retried job is pending and the fifth
+    # failed, and neither is failed_retryable any more.
+    assert reconciler.retry(db) == (0, 0)
     assert _jobs(db, consultation_id) == after
     assert _outbox(db, consultation_id) == outbox
