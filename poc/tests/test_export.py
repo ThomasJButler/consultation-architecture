@@ -16,6 +16,7 @@ test commits outlives it.
 
 from __future__ import annotations
 
+import warnings
 import zipfile
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -713,3 +714,40 @@ def test_the_export_leaves_the_callers_connection_as_it_found_it(
     assert idle_path.exists()
     assert db.isolation_level == psycopg.IsolationLevel.SERIALIZABLE
     assert db.read_only is False
+
+
+def test_sheet_titles_differing_only_in_case_stay_within_excels_limit(
+    db: psycopg.Connection[DictRow], tmp_path: Path
+) -> None:
+    """Excel compares sheet titles without regard to case, and so does
+    openpyxl's avoid_duplicate_name (openpyxl.workbook.child), which
+    appends a digit to a title matching an earlier one that way. 23
+    characters of column ref and " summary" make Excel's 31, and the
+    digit makes 32, which openpyxl warns about and Excel won't open.
+    Excel also refuses a title that starts or ends with an apostrophe.
+    The two open questions' refs here start with one and differ only in
+    case."""
+    signed = signed_off_questions(db, ("o_reason",))
+    ref = "'why this route and not"
+    assert len(ref) == 23
+    for column_ref, renamed in (("o_reason", ref), ("o_safety", ref.upper())):
+        db.execute(
+            "UPDATE question SET column_ref = %s WHERE consultation_id = %s AND column_ref = %s",
+            (renamed, signed["o_reason"].consultation_id, column_ref),
+        )
+    db.commit()
+
+    path = tmp_path / "export.xlsx"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        export.write_workbook(db, signed["o_reason"].consultation_id, path)
+    assert [str(warning.message) for warning in caught] == []
+
+    workbook = load_workbook(path)
+    titles = [name for name in workbook.sheetnames if name not in ("Responses", "Manifest")]
+    assert len(titles) == 2
+    assert len({title.casefold() for title in titles}) == 2
+    for title in titles:
+        assert len(title) <= 31
+        assert not title.startswith("'")
+        assert not title.endswith("'")
