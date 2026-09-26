@@ -75,6 +75,48 @@ class SignedOff:
     job_id: UUID
 
 
+def signed_off_questions(
+    db: psycopg.Connection[DictRow],
+    column_refs: tuple[str, ...],
+    *,
+    model_alias: str = "fake-model",
+    seed: int = 7,
+) -> dict[str, SignedOff]:
+    """The fixtures ingested, then each named question's find_themes job
+    run to themes_ready and signed off, and its map_themes job moved to
+    queued with the alias and seed dispatch would otherwise stamp (dispatch
+    is PR-08's own test; setting the two columns by hand keeps a mapping
+    test about mapping). Name every open question and fan-in 1 has run:
+    the consultation is awaiting_review before any map job starts."""
+    staged = staged_fixture(db)
+    ingest(db, staged.consultation_id)
+    signed_off: dict[str, SignedOff] = {}
+    for column_ref in column_refs:
+        question_id = staged.configured.questions[column_ref]
+        find_job = db.execute(
+            """
+            UPDATE job SET status = 'queued', model_alias = %s, params = %s
+             WHERE question_id = %s AND kind = 'find_themes'
+            RETURNING id
+            """,
+            (model_alias, Jsonb({"seed": seed}), question_id),
+        ).fetchone()
+        assert find_job is not None
+        lease = claim(db, find_job["id"], "worker-1")
+        assert lease is not None
+        run_find_themes(db, RecordingLLM(), lease)
+        signed = sign_off(db, question_id, uuid4())
+        assert signed is not None
+        db.execute(
+            "UPDATE job SET status = 'queued', model_alias = %s, params = %s WHERE id = %s",
+            (model_alias, Jsonb({"seed": seed}), signed.job_id),
+        )
+        signed_off[column_ref] = SignedOff(
+            staged.consultation_id, question_id, signed.version_id, signed.job_id
+        )
+    return signed_off
+
+
 def signed_off_fixture(
     db: psycopg.Connection[DictRow],
     column_ref: str = "o_reason",
@@ -82,30 +124,5 @@ def signed_off_fixture(
     model_alias: str = "fake-model",
     seed: int = 7,
 ) -> SignedOff:
-    """The fixtures ingested, one question's find_themes job run to
-    themes_ready and signed off, and its map_themes job moved to queued
-    with the alias and seed dispatch would otherwise stamp (dispatch is
-    PR-08's own test; setting the two columns by hand keeps a mapping test
-    about mapping)."""
-    staged = staged_fixture(db)
-    ingest(db, staged.consultation_id)
-    question_id = staged.configured.questions[column_ref]
-    find_job = db.execute(
-        """
-        UPDATE job SET status = 'queued', model_alias = %s, params = %s
-         WHERE question_id = %s AND kind = 'find_themes'
-        RETURNING id
-        """,
-        (model_alias, Jsonb({"seed": seed}), question_id),
-    ).fetchone()
-    assert find_job is not None
-    lease = claim(db, find_job["id"], "worker-1")
-    assert lease is not None
-    run_find_themes(db, RecordingLLM(), lease)
-    signed = sign_off(db, question_id, uuid4())
-    assert signed is not None
-    db.execute(
-        "UPDATE job SET status = 'queued', model_alias = %s, params = %s WHERE id = %s",
-        (model_alias, Jsonb({"seed": seed}), signed.job_id),
-    )
-    return SignedOff(staged.consultation_id, question_id, signed.version_id, signed.job_id)
+    """One question signed off, for the tests that map one."""
+    return signed_off_questions(db, (column_ref,), model_alias=model_alias, seed=seed)[column_ref]

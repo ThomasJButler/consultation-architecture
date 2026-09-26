@@ -17,10 +17,10 @@ import pytest
 from psycopg.rows import DictRow
 
 from consult.jobs import LeaseLostError, claim
-from consult.mapping import MAP_BATCH_SIZE, assign, load_map_job, plan
-from consult.transitions import finish_map_themes, start_map_themes
+from consult.mapping import MAP_BATCH_SIZE, assign, load_map_job, plan, run_map_themes
+from consult.transitions import Advance, finish_map_themes, start_map_themes
 from tests.fakes import FakeLLM, Fault, RecordingLLM
-from tests.pipeline import NOT_ANSWERED, fixture_rows, signed_off_fixture
+from tests.pipeline import NOT_ANSWERED, fixture_rows, signed_off_fixture, signed_off_questions
 from tests.test_ingest import normalised
 from tests.test_themes import WorkerCrashError, crash_after, distinct_reasons
 
@@ -358,3 +358,87 @@ def test_mapping_resumes_by_coverage_after_a_takeover(db: psycopg.Connection[Dic
         (job.version_id,),
     ).fetchone()
     assert tags == {"n": len(distinct_reasons()) - 1, "pairs": len(distinct_reasons()) - 1}
+
+
+def _statuses(db: psycopg.Connection[DictRow], consultation_id: UUID) -> dict[str, str]:
+    """The consultation's status and each open question's, by column."""
+    rows = db.execute(
+        """
+        SELECT 'consultation' AS name, status FROM consultation WHERE id = %(id)s
+        UNION ALL
+        SELECT column_ref, status FROM question WHERE consultation_id = %(id)s AND kind = 'open'
+        """,
+        {"id": consultation_id},
+    ).fetchall()
+    return {str(r["name"]): str(r["status"]) for r in rows}
+
+
+def _analysis_ready(db: psycopg.Connection[DictRow], consultation_id: UUID) -> list[UUID]:
+    return [
+        r["subject_id"]
+        for r in db.execute(
+            """
+            SELECT subject_id FROM notification_outbox
+             WHERE consultation_id = %s AND kind = 'analysis_ready'
+            """,
+            (consultation_id,),
+        ).fetchall()
+    ]
+
+
+def test_mapping_finishes_the_question_and_fan_in_two(db: psycopg.Connection[DictRow]) -> None:
+    signed = signed_off_questions(db, ("o_reason", "o_safety"))
+    consultation_id = signed["o_reason"].consultation_id
+    assert _statuses(db, consultation_id) == {
+        "consultation": "awaiting_review",
+        "o_reason": "signed_off",
+        "o_safety": "signed_off",
+    }
+
+    # The first question to finish is complete and its job succeeded, but
+    # the other is still to map, so fan-in 2 holds (docs/02, step 10).
+    lease = claim(db, signed["o_reason"].job_id, "worker-1")
+    assert lease is not None
+    advance = run_map_themes(db, RecordingLLM(), lease)
+
+    assert advance == Advance(themes_ready=False, analysis_ready=False)
+    assert _statuses(db, consultation_id) == {
+        "consultation": "awaiting_review",
+        "o_reason": "complete",
+        "o_safety": "signed_off",
+    }
+    job = db.execute("SELECT status FROM job WHERE id = %s", (signed["o_reason"].job_id,))
+    assert job.fetchone() == {"status": "succeeded"}
+    assert _analysis_ready(db, consultation_id) == []
+
+    # The last one flips the consultation to ready, with one analysis_ready
+    # row keyed on the pass's run_id (docs/02, step 10; ADR-006).
+    lease = claim(db, signed["o_safety"].job_id, "worker-1")
+    assert lease is not None
+    advance = run_map_themes(db, RecordingLLM(), lease)
+
+    assert advance == Advance(themes_ready=False, analysis_ready=True)
+    assert _statuses(db, consultation_id)["consultation"] == "ready"
+    run = db.execute("SELECT run_id FROM consultation WHERE id = %s", (consultation_id,)).fetchone()
+    assert run is not None
+    assert _analysis_ready(db, consultation_id) == [run["run_id"]]
+
+    # A sibling in map_failed blocks ready: a failed mapping needs an
+    # operator, and the email waits for them (docs/02, step 10).
+    blocked = signed_off_questions(db, ("o_reason", "o_safety"))
+    blocked_id = blocked["o_reason"].consultation_id
+    db.execute(
+        "UPDATE question SET status = 'map_failed' WHERE id = %s",
+        (blocked["o_safety"].question_id,),
+    )
+    lease = claim(db, blocked["o_reason"].job_id, "worker-1")
+    assert lease is not None
+    advance = run_map_themes(db, RecordingLLM(), lease)
+
+    assert advance == Advance(themes_ready=False, analysis_ready=False)
+    assert _statuses(db, blocked_id) == {
+        "consultation": "awaiting_review",
+        "o_reason": "complete",
+        "o_safety": "map_failed",
+    }
+    assert _analysis_ready(db, blocked_id) == []
