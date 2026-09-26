@@ -366,7 +366,7 @@ def _write_summary(ws: WriteOnlyWorksheet, table: query.ThemeTable) -> None:
     """docs/02 step 12's per-question summary: key, label, respondents and
     the denominator, straight from `query.theme_table` under the default
     filter, so this number and the per-question dashboard's can't drift
-    apart (this run's own plan, chunk 4 of PR-09)."""
+    apart."""
     _row(ws, ["key", "label", "respondents", "denominator"])
     for row in table.rows:
         _row(ws, [row.key, row.label, row.respondents, table.denominator])
