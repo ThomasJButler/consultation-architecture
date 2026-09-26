@@ -72,3 +72,23 @@ def test_the_filter_grammar_parses_three_kinds_and_refuses_the_rest() -> None:
     # could be anything a user typed (CLAUDE.md rule 8).
     leaked = _refusal(["other:o_safety=a-secret-value"])
     assert "a-secret-value" not in str(leaked)
+
+
+def test_a_nul_or_a_lone_surrogate_in_a_filter_is_refused_by_code() -> None:
+    # Postgres text can't hold a NUL, and a lone surrogate, which is what
+    # invalid UTF-8 in argv decodes to, has no UTF-8 encoding. The server
+    # refuses either inside jsonb (22P05, 22P02) with a CONTEXT line that
+    # reprints the value, so the grammar refuses both first, by code, in
+    # every slot it parses (CLAUDE.md rule 8).
+    for bad in ("\x00", "\udcff"):
+        for item in (
+            f"attr:d_{bad}area=Villages",
+            f"attr:d_area=Vill{bad}ages",
+            f"theme:PARK{bad}ING",
+            f"other:o_{bad}safety.theme=LIGHTING",
+            f"other:o_safety.theme=LIGHT{bad}ING",
+        ):
+            refused = _refusal([item])
+            assert refused.code is FilterCode.UNREADABLE_VALUE
+            assert str(refused) == FilterCode.UNREADABLE_VALUE.value
+            assert bad not in str(refused)
