@@ -8,6 +8,7 @@ skip in CI would hide a broken service behind a green tick.
 
 from __future__ import annotations
 
+import logging
 import secrets
 from collections.abc import Iterator
 from dataclasses import replace
@@ -17,7 +18,7 @@ import pytest
 from psycopg import sql
 from psycopg.rows import DictRow
 
-from consult import config, store
+from consult import config, logs, store
 from consult.config import Settings
 
 
@@ -81,3 +82,15 @@ def blank_database() -> Iterator[Settings]:
     name = f"consult_blank_{secrets.token_hex(4)}"
     yield _create_database(base, name)
     _drop_database(base, name)
+
+
+@pytest.fixture(autouse=True)
+def _drop_log_handlers() -> Iterator[None]:
+    """The command line installs the log formatter on the root logger, bound
+    to whatever stderr was at the time. Left in place after a test it would
+    write to a capture pytest has closed, so every test ends without it."""
+    yield
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if isinstance(handler.formatter, logs.Formatter):
+            root.removeHandler(handler)

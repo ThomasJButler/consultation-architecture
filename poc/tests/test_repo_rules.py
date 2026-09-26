@@ -68,3 +68,17 @@ def test_nothing_outside_transitions_writes_consultation_status() -> None:
             continue
         source = path.read_text(encoding="utf-8").lower()
         assert "update consultation" not in source, f"{path.name} writes consultation"
+
+
+def test_nothing_on_the_pipeline_path_names_the_vault() -> None:
+    # docs/06 section 2.4 and docs/04 section 8: the pipeline role has no
+    # grant on the vault, and nothing on the pipeline path names the schema.
+    # ingest.py writes it as the ingest role, stage.py says where identity
+    # columns wait before ingest, store.py lists the table for init and reset.
+    consult_dir = TESTS_DIR.parent / "consult"
+    allowed = {"ingest.py", "stage.py", "store.py"}
+    for path in sorted(consult_dir.glob("*.py")):
+        if path.name in allowed:
+            continue
+        source = path.read_text(encoding="utf-8").lower()
+        assert "vault." not in source, f"{path.name} names the vault"

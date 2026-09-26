@@ -6,7 +6,7 @@ design doesn't need for the row to exist.
 
 from __future__ import annotations
 
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 from psycopg.rows import DictRow
@@ -22,9 +22,10 @@ def _returning_id(
     return value
 
 
-def make_department(
-    conn: psycopg.Connection[DictRow], name: str = "Department of Fictional Affairs"
-) -> UUID:
+def make_department(conn: psycopg.Connection[DictRow], name: str | None = None) -> UUID:
+    # A fresh name each call: the name is unique, and a test that stages
+    # two consultations wants two departments, not a conflict.
+    name = name or f"Department of Fictional Affairs {uuid4().hex[:6]}"
     return _returning_id(conn, "INSERT INTO department (name) VALUES (%s) RETURNING id", (name,))
 
 

@@ -19,11 +19,13 @@ second finisher's NOT EXISTS runs after the first has committed.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
 import psycopg
 from psycopg.rows import DictRow
+from psycopg.types.json import Jsonb
 
 from consult import jobs
 from consult.jobs import Lease
@@ -104,6 +106,72 @@ def advance_consultation(conn: psycopg.Connection[DictRow], consultation_id: UUI
     if analysis_ready:
         _outbox(conn, consultation_id, "analysis_ready")
     return Advance(themes_ready, analysis_ready)
+
+
+def start_staging(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> None:
+    """Draft to staging. docs/02 section 6 gives the trigger as "headers
+    confirmed; stage job inserted"; the stage and ingest job rows are
+    dispatch's to insert and are deferred with it (PR-08), so for now the
+    step runs inline and the edge is the record of it."""
+    moved = conn.execute(
+        """
+        UPDATE consultation SET status = 'staging', status_changed_at = now()
+         WHERE id = %s AND status = 'draft'
+        """,
+        (consultation_id,),
+    ).rowcount
+    if moved != 1:
+        raise TransitionError(f"consultation {consultation_id} is not draft")
+
+
+def mark_staged(
+    conn: psycopg.Connection[DictRow],
+    consultation_id: UUID,
+    *,
+    upload_sha256: bytes,
+    row_count: int,
+) -> None:
+    """The stage job's final transaction: staging to staged, with what it
+    learned about the file (docs/04, section 1)."""
+    moved = conn.execute(
+        """
+        UPDATE consultation
+           SET status = 'staged', status_changed_at = now(),
+               upload_sha256 = %s, row_count = %s
+         WHERE id = %s AND status = 'staging'
+        """,
+        (upload_sha256, row_count, consultation_id),
+    ).rowcount
+    if moved != 1:
+        raise TransitionError(f"consultation {consultation_id} is not staging")
+
+
+def mark_processing(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> bool:
+    """The ingest step's last move: staged to processing. False rather than
+    an error when it's already there, because a second delivery of the
+    ingest message must finish quietly (docs/04, section 3)."""
+    moved = conn.execute(
+        """
+        UPDATE consultation SET status = 'processing', status_changed_at = now()
+         WHERE id = %s AND status = 'staged'
+        """,
+        (consultation_id,),
+    ).rowcount
+    return moved == 1
+
+
+def record_column_roles(
+    conn: psycopg.Connection[DictRow], consultation_id: UUID, roles: Mapping[str, object]
+) -> None:
+    """The columns that aren't questions: the respondent id and the ignored
+    ones (docs/04, section 1), plus the repeated-id resolution, because the
+    id column has no question row to hold a value_policy (docs/04's
+    correction of 26 September 2026). Here rather than in configure.py
+    because this module is the only one that writes the consultation row."""
+    conn.execute(
+        "UPDATE consultation SET column_roles = %s WHERE id = %s",
+        (Jsonb(dict(roles)), consultation_id),
+    )
 
 
 def _move_question(

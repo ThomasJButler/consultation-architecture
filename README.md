@@ -42,20 +42,26 @@ Built: the plan, the scaffold, the design documents (brief, research,
 architecture, seven decision records, data model, cost model, security notes
 and threat model), both diagrams and a first draft of the submission with a
 rendered PDF, reconciled in PR-02b before the schema was typed from `docs/04`.
-Merged: the proof-of-concept scaffold (PR-03) and parsing and validation
-(PR-04): the Python project under `poc/`, the schema typed from `docs/04`
-with its four roles, the test harness on a real Postgres, a fictional
-fixture consultation, the model fakes, the logging policy pinned by tests,
-the definition and responses readers, the validator from `docs/02` section
-3.2, the input guards from the threat model, the cost estimate from
-`docs/05` and `consult validate`. In review: the store mechanics (PR-05):
-the claim with its fence, checkpoints, both fan-ins through one routine,
-the sign-off guard, the idempotent tag insert and the reopen, with three
-of the four mechanics `docs/02` section 13 names proved by named tests,
-including twenty threaded finishers flipping a consultation once and the
-lost update reproduced without the lock. Planned: ingest (PR-06), themes
-and sign-off (PR-07), the worker and reconciler (PR-08), queries and
-export (PR-09), final polish (PR-10). Deliberately not built: see above.
+Merged: the proof-of-concept scaffold (PR-03), parsing and validation
+(PR-04) and the store mechanics (PR-05): the Python project under `poc/`,
+the schema typed from `docs/04` with its four roles, the test harness on a
+real Postgres, a fictional fixture consultation, the model fakes, the
+logging policy pinned by tests, the definition and responses readers, the
+validator from `docs/02` section 3.2, the input guards from the threat
+model, the cost estimate from `docs/05`, `consult validate`, the claim with
+its fence, checkpoints, both fan-ins through one routine, the sign-off
+guard, the idempotent tag insert and the reopen, with three of the four
+mechanics `docs/02` section 13 names proved by named tests. In review:
+ingest (PR-06): the stage, configure and ingest steps as three functions
+over one connection, `respondent.attrs` equal to what SQL rebuilds from
+the answer rows, identity columns in the vault with the pipeline role
+refused at the schema, both duplicate flags with nothing deleted, one
+`find_themes` job per open question, a replay that writes nothing, and
+`consult ingest` taking the fixtures to a processing consultation; the
+minimum proof-of-concept now runs from a spreadsheet to a schema full of
+rows with no model yet. Planned: themes and sign-off (PR-07), the worker
+and reconciler (PR-08), queries and export (PR-09), final polish (PR-10).
+Deliberately not built: see above.
 
 ## How it was built
 
