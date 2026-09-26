@@ -254,3 +254,72 @@ def test_retry_returns_a_due_failure_to_pending_and_fails_the_fifth(
     assert reconciler.retry(db) == (0, 0)
     assert _jobs(db, consultation_id) == after
     assert _outbox(db, consultation_id) == outbox
+
+
+def _consultations(db: psycopg.Connection[DictRow]) -> dict[UUID, DictRow]:
+    return {row["id"]: row for row in db.execute("SELECT * FROM consultation").fetchall()}
+
+
+def _all_outbox(db: psycopg.Connection[DictRow]) -> list[DictRow]:
+    return db.execute(
+        "SELECT consultation_id, kind, subject_id, status FROM notification_outbox ORDER BY id"
+    ).fetchall()
+
+
+def test_the_reconciler_reruns_the_fan_ins(db: psycopg.Connection[DictRow]) -> None:
+    department_id = make_department(db)
+    # Statement 4's case (docs/02, section 5): the last unfinished question
+    # has just gone to find_failed, no worker transaction runs to flip the
+    # consultation, and fan-in 1 doesn't wait on a failed question. Set by
+    # hand, the way the lost update in test_fan_in_race.py leaves a
+    # consultation processing with every question past finding.
+    stalled = make_consultation(db, department_id, "Stalled", status="processing")
+    make_open_question(db, stalled, "o_1", ordinal=1, status="themes_ready")
+    make_open_question(db, stalled, "o_2", ordinal=2, status="find_failed")
+    # Every question complete and the consultation still awaiting review:
+    # fan-in 2's half of the same miss.
+    finished = make_consultation(db, department_id, "Finished", status="awaiting_review")
+    make_open_question(db, finished, "o_1", ordinal=1, status="complete")
+    make_open_question(db, finished, "o_2", ordinal=2, status="complete")
+    # A failed mapping blocks ready by design (docs/02, step 10).
+    blocked = make_consultation(db, department_id, "Blocked", status="awaiting_review")
+    make_open_question(db, blocked, "o_1", ordinal=1, status="complete")
+    make_open_question(db, blocked, "o_2", ordinal=2, status="map_failed")
+    # Neither fan-in has anything to say to a consultation that's ready or
+    # still a draft.
+    ready = make_consultation(db, department_id, "Ready", status="ready")
+    make_open_question(db, ready, "o_1", ordinal=1, status="complete")
+    draft = make_consultation(db, department_id, "Draft", status="draft")
+    make_open_question(db, draft, "o_1", ordinal=1, status="configured")
+    db.commit()
+    before = _consultations(db)
+
+    assert reconciler.rerun_fan_ins(db) == 2
+
+    after = _consultations(db)
+    assert after[stalled]["status"] == "awaiting_review"
+    assert after[finished]["status"] == "ready"
+    for untouched in (blocked, ready, draft):
+        assert after[untouched] == before[untouched]
+    # Each flip's email is a row in the flip's own commit, naming the pass
+    # (ADR-006; docs/02, correction 2).
+    outbox = _all_outbox(db)
+    assert outbox == [
+        {
+            "consultation_id": stalled,
+            "kind": "themes_ready",
+            "subject_id": before[stalled]["run_id"],
+            "status": "pending",
+        },
+        {
+            "consultation_id": finished,
+            "kind": "analysis_ready",
+            "subject_id": before[finished]["run_id"],
+            "status": "pending",
+        },
+    ]
+
+    # A second pass moves nothing and adds no row.
+    assert reconciler.rerun_fan_ins(db) == 0
+    assert _consultations(db) == after
+    assert _all_outbox(db) == outbox
