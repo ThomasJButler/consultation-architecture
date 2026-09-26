@@ -25,7 +25,8 @@ from uuid import UUID
 import psycopg
 from openpyxl import Workbook
 from openpyxl.cell import WriteOnlyCell
-from openpyxl.cell.cell import Cell
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE, Cell
+from openpyxl.utils.exceptions import IllegalCharacterError
 from openpyxl.worksheet._write_only import WriteOnlyWorksheet
 from psycopg.pq import TransactionStatus
 from psycopg.rows import DictRow
@@ -52,6 +53,23 @@ _KEYSET_PAGE = 1000
 # 2026.
 _INVALID_SHEET_CHARS = re.compile(r"[\\*?:/\[\]]")
 _MAX_SHEET_TITLE = 31
+
+
+class ExportError(Exception):
+    """`_cell`'s backstop. Escaping every `ILLEGAL_CHARACTERS_RE` match
+    before the cell is built should leave openpyxl's own `check_string`
+    nothing left to refuse; if some character it still refuses reaches
+    this anyway, `IllegalCharacterError` puts the whole value in its
+    message (openpyxl 3.1.5, cell.py lines 164-165), and THREAT_MODEL.md
+    section 2, line 2 forbids an open answer or a vault value at any
+    level, an exception message included. This carries a code and
+    nothing the value it failed on.
+    """
+
+    code = "cell_value_illegal"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
 
 
 def _sheet_title(column_ref: str, used: set[str]) -> str:
@@ -105,9 +123,24 @@ def _cell(ws: WriteOnlyWorksheet, value: object) -> Cell:
     above, and `data_type` forced to "s" on top of it, since openpyxl
     infers "f" from a leading "=" on a plain string otherwise (measured
     against openpyxl 3.1.5, 26 September 2026).
+
+    A C0 control character other than tab, newline or carriage return
+    (`ILLEGAL_CHARACTERS_RE`, openpyxl 3.1.5, cell.py line 45) fails
+    openpyxl's own `check_string` with the raw value in the exception
+    message it raises (cell.py lines 164-165). An open answer or a vault
+    identity value can carry one, and THREAT_MODEL.md section 2, line 2
+    forbids either riding an exception at any level, so every match is
+    escaped to the visible form `report.shown` already uses for a
+    control character before openpyxl ever sees the string. The `except`
+    is a backstop for a character neither list anticipated: it still
+    can't let the value through.
     """
     text = "" if value is None else str(value)
-    cell = WriteOnlyCell(ws, value=neutralise(text))
+    text = ILLEGAL_CHARACTERS_RE.sub(lambda match: repr(match.group())[1:-1], text)
+    try:
+        cell = WriteOnlyCell(ws, value=neutralise(text))
+    except IllegalCharacterError:
+        raise ExportError() from None
     cell.data_type = "s"
     return cell
 
