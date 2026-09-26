@@ -133,9 +133,10 @@ class _Respondent:
 def _respondents(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> list[_Respondent]:
     """The workbook's rows: every respondent, canonical and duplicate
     alike, since the file the department gets back is this consultation's
-    whole answer set. The first read `write_workbook` makes, which is why
-    test_export.py's test_export_reads_as_the_export_role wraps this call
-    rather than another one."""
+    whole answer set. One of the reads `write_workbook` makes inside its
+    role block, and the one test_export.py's
+    test_export_reads_as_the_export_role wraps to read `current_user` from
+    inside that block."""
     rows = conn.execute(
         "SELECT id, external_id, attrs FROM respondent WHERE consultation_id = %s ORDER BY id",
         (consultation_id,),
