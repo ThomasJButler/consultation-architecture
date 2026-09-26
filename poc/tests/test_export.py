@@ -438,3 +438,77 @@ def test_unprocessable_counts_the_versions_own_map_job(
     manifest_rows = list(workbook["Manifest"].iter_rows(min_row=9, values_only=True))
     o_reason_row = {row[0]: row for row in manifest_rows}["o_reason"]
     assert o_reason_row[6] == "1"  # unprocessable_count
+
+
+def test_a_control_character_never_rides_the_exports_error(
+    db: psycopg.Connection[DictRow], tmp_path: Path
+) -> None:
+    """openpyxl 3.1.5 (cell.py lines 164-165) raises IllegalCharacterError
+    with the whole value in its own message for any C0 control character
+    other than tab, newline or carriage return, and nothing here used to
+    catch it: THREAT_MODEL.md section 2, line 2 forbids an open answer or
+    a vault value at any level, an exception message included. Two
+    carriers, dirtied by hand: an open answer's value_text, and a vault
+    identity value (store.identity_columns names the table and column).
+    """
+    signed = signed_off_questions(db, ("o_reason",))
+    tag_answers_by_rule(
+        db, signed["o_reason"].version_id, signed["o_reason"].question_id, _o_reason_key
+    )
+
+    target = db.execute(
+        "SELECT id, respondent_id, value_text FROM answer"
+        " WHERE question_id = %s AND NOT is_blank ORDER BY id LIMIT 1",
+        (signed["o_reason"].question_id,),
+    ).fetchone()
+    assert target is not None
+    original_answer_text = target["value_text"]
+    assert isinstance(original_answer_text, str)
+    assert len(original_answer_text) >= 10
+    mid = len(original_answer_text) // 2
+    dirty_answer = original_answer_text[:mid] + "\x0b" + original_answer_text[mid:]
+    db.execute("UPDATE answer SET value_text = %s WHERE id = %s", (dirty_answer, target["id"]))
+
+    identity = db.execute(
+        "SELECT column_ref, value_text FROM vault.respondent_identity WHERE respondent_id = %s",
+        (target["respondent_id"],),
+    ).fetchone()
+    assert identity is not None
+    original_identity_text = identity["value_text"]
+    assert isinstance(original_identity_text, str)
+    assert len(original_identity_text) >= 4
+    imid = len(original_identity_text) // 2
+    dirty_identity = original_identity_text[:imid] + "\x1b" + original_identity_text[imid:]
+    db.execute(
+        "UPDATE vault.respondent_identity SET value_text = %s"
+        " WHERE respondent_id = %s AND column_ref = %s",
+        (dirty_identity, target["respondent_id"], identity["column_ref"]),
+    )
+
+    respondent = db.execute(
+        "SELECT external_id FROM respondent WHERE id = %s", (target["respondent_id"],)
+    ).fetchone()
+    assert respondent is not None
+
+    path = tmp_path / "export.xlsx"
+    export.write_workbook(db, signed["o_reason"].consultation_id, path)
+
+    workbook = load_workbook(path)
+    responses = workbook["Responses"]
+    header = [cell.value for cell in next(responses.iter_rows(max_row=1))]
+    index = {name: i for i, name in enumerate(header)}
+    row = next(
+        r
+        for r in responses.iter_rows(min_row=2)
+        if r[index["respondent_ref"]].value == respondent["external_id"]
+    )
+
+    answer_cell = row[index["o_reason"]].value
+    assert isinstance(answer_cell, str)
+    assert "\x0b" not in answer_cell
+    assert "\\x0b" in answer_cell
+
+    identity_cell = row[index[identity["column_ref"]]].value
+    assert isinstance(identity_cell, str)
+    assert "\x1b" not in identity_cell
+    assert "\\x1b" in identity_cell
