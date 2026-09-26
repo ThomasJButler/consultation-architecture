@@ -14,6 +14,7 @@ import csv
 from collections import Counter
 from pathlib import Path
 
+from consult.configure import defaults, merged_options
 from consult.definition import (
     ClosedQuestion,
     Definition,
@@ -23,6 +24,7 @@ from consult.definition import (
     read_definition,
 )
 from consult.responses import Responses
+from consult.tokenise import Tokenised, tokenise
 from consult.validate import (
     ColumnKind,
     Report,
@@ -263,6 +265,31 @@ def test_two_options_chosen_together_once_are_not_flagged_to_merge(tmp_path: Pat
     )
     (flagged,) = warnings_of(validate(definition, Responses(path)), WarningKind.OPTIONS_NEVER_APART)
     assert (flagged.value, flagged.count) == ("Run, Push a pram", 2)
+
+
+def test_an_option_with_two_commas_is_one_option(tmp_path: Path) -> None:
+    # A label can hold more than one comma (docs/00), and the workbook's
+    # comma-joined cell then splits it into three adjacent pieces. Five
+    # respondents chose it and three chose "No", so the three pieces never
+    # appear apart and have to come back as the one option they were, or
+    # attr:c_when=<the label> matches nobody after ingest.
+    label = "Yes, but only at weekends, and not in winter"
+    path = tmp_path / "responses.csv"
+    path.write_text("c_when\n" + f'"{label}"\n' * 5 + "No\n" * 3, encoding="utf-8")
+    # What split_options makes of the cell "Yes, but only at weekends, and
+    # not in winter, No".
+    split = ("Yes", "but only at weekends", "and not in winter", "No")
+    question = ClosedQuestion("c_when", "When?", ResponseType.MULTI_SELECT, split)
+    definition = Definition(demographic=(), closed=(question,), open=())
+
+    report = validate(definition, Responses(path))
+    options = merged_options(question, defaults(report))
+
+    assert options == [label, "No"]
+    assert tokenise(label, options) == Tokenised((label,), ())
+    # One warning for the one option, naming the label the workbook split.
+    never_apart = warnings_of(report, WarningKind.OPTIONS_NEVER_APART)
+    assert [(w.value, w.count) for w in never_apart] == [(label, 5)]
 
 
 def test_a_repeated_or_blank_header_is_an_error_and_a_column_is_listed_once(tmp_path: Path) -> None:
