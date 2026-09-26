@@ -351,15 +351,20 @@ def theme_table(
     )
 
 
-# docs/04 section 6's related closed question distribution.
+# docs/04 section 6's related closed question distribution, as its
+# correction of 26 September 2026 (item 5) has it. A kept N/A is a real
+# value (docs/02 section 3.2) that ingest stores with no option, so the
+# option is a LEFT JOIN, a blank is left out by its own flag, and N/A is
+# labelled by its value and sorts after every option.
 _RELATED_DISTRIBUTION = sql.SQL(
     """
-    SELECT o.label, count(*) AS respondents
+    SELECT coalesce(o.label, c.value_text) AS label, count(*) AS respondents
       FROM scope s
       JOIN answer c ON c.respondent_id = s.respondent_id AND c.question_id = {related}
-      JOIN question_option o ON o.id = c.option_id
-     GROUP BY o.ordinal, o.label
-     ORDER BY o.ordinal
+       AND NOT c.is_blank
+      LEFT JOIN question_option o ON o.id = c.option_id
+     GROUP BY o.ordinal, coalesce(o.label, c.value_text)
+     ORDER BY o.ordinal NULLS LAST, coalesce(o.label, c.value_text)
     """
 )
 

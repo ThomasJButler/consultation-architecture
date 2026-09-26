@@ -392,3 +392,16 @@ its review and recorded here rather than rewritten into the merged text.
    chooses. The shares the planner needed, the GIN pending list after an
    ingest and what the fixture's duplicates do to the numbers are in docs/05's
    correction of the same date.
+5. **Section 6, the related closed question's distribution.** The sketch
+   inner-joins `question_option`, but a closed answer kept as `N/A`, which
+   docs/02 section 3.2 makes a real value, is stored with `option_id` null,
+   so everyone who gave it dropped out of the distribution while
+   `attr:c_route=N/A` still found them. With `c_route` set to `N/A` on the
+   fixture's first forty rows, 71 respondents in scope had answered it and
+   the distribution summed to 45 (the review of 26 September 2026, finding 6,
+   measured on PostgreSQL 16.13). `poc/consult/query.py` now left-joins the
+   option, leaves blanks out with `NOT c.is_blank`, groups on
+   `coalesce(o.label, c.value_text)` and orders by the option's ordinal with
+   `N/A` last; `test_a_kept_na_counts_in_the_related_distribution` in
+   `poc/tests/test_query_db.py` pins it against a hand count (17 Support,
+   22 Oppose, 6 Not sure, 26 `N/A`).
