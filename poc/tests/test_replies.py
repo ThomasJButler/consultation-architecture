@@ -243,3 +243,21 @@ def test_a_label_or_description_is_held_to_a_line_of_plain_text() -> None:
         Completion(text=themes_text(label="l" * MAX_LABEL, description="d" * MAX_DESCRIPTION))
     )
     assert (len(ok[0].label), len(ok[0].description)) == (MAX_LABEL, MAX_DESCRIPTION)
+
+
+def test_the_fallback_keys_are_reserved() -> None:
+    # OTHER and NO_REASON are what sign-off adds (transitions.FALLBACK_THEMES),
+    # and ON CONFLICT DO NOTHING there means a model that proposed either
+    # would have its theme stand in for the fallback with is_fallback false,
+    # and the preview's Other rate would be whatever the model called
+    # OTHER. Refused on the way in instead. Found by the security review.
+    for key in ("OTHER", "NO_REASON"):
+        with pytest.raises(ReplyError) as refused:
+            parse_themes(Completion(text=themes_text(key=key)))
+        assert refused.value.reason is Reason.KEY_RESERVED
+        condensed = json.dumps(
+            {"themes": [{"key": key, "label": "L", "description": "d", "merges": ["SAFETY_1"]}]}
+        )
+        with pytest.raises(ReplyError) as refused:
+            parse_condensation(Completion(text=condensed), ["SAFETY_1"])
+        assert refused.value.reason is Reason.KEY_RESERVED

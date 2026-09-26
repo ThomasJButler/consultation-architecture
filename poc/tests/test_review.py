@@ -129,3 +129,22 @@ def test_edits_are_guarded_by_the_version(db: psycopg.Connection[DictRow]) -> No
     db.execute("UPDATE theme_set_version SET status = 'signed_off' WHERE id = %s", (version_id,))
     with pytest.raises(EditConflictError):
         rename(db, version_id, "SAFETY", label="x", expected_version=5)
+
+
+def test_a_reviewer_cannot_take_a_fallback_key(db: psycopg.Connection[DictRow]) -> None:
+    consultation_id = make_consultation(db, make_department(db), status="awaiting_review")
+    question_id = make_open_question(db, consultation_id, status="themes_ready")
+    version_id = make_theme_set_version(db, question_id)
+    make_theme(db, version_id, "PARKING")
+    for key in ("OTHER", "NO_REASON"):
+        with pytest.raises(ReviewError):
+            add(db, version_id, key=key, label="Mine", description="", expected_version=0)
+        with pytest.raises(ReviewError):
+            split(
+                db,
+                version_id,
+                "PARKING",
+                into=[(key, "A", ""), ("PARKING_2", "B", "")],
+                expected_version=0,
+            )
+    assert edit_version_of(db, version_id) == 0
