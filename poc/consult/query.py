@@ -122,9 +122,10 @@ def _readable(slot: str) -> str:
 
 def _parse_attr(rest: str) -> AttrFilter:
     # partition splits on the first "=" only, so a value that itself
-    # contains "=" keeps it (docs/02 step 11).
+    # contains "=" keeps it (docs/02 step 11). An empty column would probe
+    # {"": [value]} and match nobody without a word, so it's refused.
     column, sep, value = rest.partition("=")
-    if not sep or not value:
+    if not sep or not column or not value:
         raise FilterError(FilterCode.EMPTY_VALUE)
     return AttrFilter(column=_readable(column), value=_readable(value))
 
