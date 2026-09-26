@@ -34,7 +34,8 @@ cd poc
 cp .env.example .env            # then change the password
 docker compose up -d db         # Postgres 17 on 127.0.0.1
 make venv                       # Python 3.12 venv with every tool pinned
-make check                      # ruff, mypy, pytest with coverage, pip-audit, bandit
+make check                      # ruff, mypy, pytest with coverage, the slow tests, pip-audit, bandit
+make test-slow                  # pytest -m slow: the race and the plan benchmark, no coverage
 make test-pure                  # pytest -m 'not db': no Docker needed
 ```
 
