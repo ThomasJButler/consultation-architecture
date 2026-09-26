@@ -31,6 +31,15 @@ from consult.llm import Completion, Prompt
 # 9). consult/prompts.py puts the same pattern in the schemas it sends.
 KEY_PATTERN = r"^[A-Z][A-Z0-9_]{1,39}$"
 _KEY = re.compile(KEY_PATTERN)
+# A label or a description is one line of bounded plain text, because it
+# goes on to sit in every later prompt and on the sign-off screen: a
+# newline could open an instruction, a bidirectional override could make
+# the screen read backwards (THREAT_MODEL.md, row 2, "rewrite the theme
+# list"). C0 and C1 controls, zero-width and bidirectional format
+# characters are refused; everything else is the model's to say.
+MAX_LABEL = 80
+MAX_DESCRIPTION = 400
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
 
 
 class Reason(StrEnum):
@@ -45,6 +54,8 @@ class Reason(StrEnum):
     KEY_REPEATED = "key_repeated"
     KEY_UNKNOWN = "key_unknown"
     NO_THEMES = "no_themes"
+    TEXT_MALFORMED = "text_malformed"
+    TEXT_TOO_LONG = "text_too_long"
 
 
 class ReplyError(Exception):
@@ -78,6 +89,15 @@ class CondensedTheme:
     label: str
     description: str
     merges: tuple[str, ...]
+
+
+def _plain(text: str, limit: int, count: int) -> str:
+    """One line of plain text within the limit, or a ReplyError."""
+    if _CONTROL.search(text):
+        raise ReplyError(Reason.TEXT_MALFORMED, count)
+    if len(text) > limit:
+        raise ReplyError(Reason.TEXT_TOO_LONG, count)
+    return text
 
 
 def _object(text: str) -> dict[str, object]:
@@ -152,7 +172,13 @@ def parse_themes(completion: Completion) -> tuple[ProposedTheme, ...]:
             raise ReplyError(Reason.WRONG_SHAPE, len(items))
         if not _KEY.fullmatch(key):
             raise ReplyError(Reason.KEY_MALFORMED, len(items))
-        themes.append(ProposedTheme(key, label, description))
+        themes.append(
+            ProposedTheme(
+                key,
+                _plain(label, MAX_LABEL, len(items)),
+                _plain(description, MAX_DESCRIPTION, len(items)),
+            )
+        )
     repeated = sum(count - 1 for count in Counter(t.key for t in themes).values() if count > 1)
     if repeated:
         raise ReplyError(Reason.KEY_REPEATED, repeated)
@@ -183,7 +209,14 @@ def parse_condensation(
             raise ReplyError(Reason.WRONG_SHAPE, len(items))
         if not _KEY.fullmatch(key):
             raise ReplyError(Reason.KEY_MALFORMED, len(items))
-        themes.append(CondensedTheme(key, label, description, tuple(dict.fromkeys(merges))))
+        themes.append(
+            CondensedTheme(
+                key,
+                _plain(label, MAX_LABEL, len(items)),
+                _plain(description, MAX_DESCRIPTION, len(items)),
+                tuple(dict.fromkeys(merges)),
+            )
+        )
     repeated = sum(count - 1 for count in Counter(t.key for t in themes).values() if count > 1)
     if repeated:
         raise ReplyError(Reason.KEY_REPEATED, repeated)
