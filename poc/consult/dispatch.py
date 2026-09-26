@@ -15,10 +15,25 @@ claimed.
 
 from __future__ import annotations
 
+import secrets
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
+
+import psycopg
+from psycopg.rows import DictRow
+
+from consult.config import Settings
+
+# One key for every dispatch, so dispatches take turns. The inserting
+# transaction and the reconciler can dispatch at once, and each reads the
+# live counts before the other commits, so both would see the same free
+# slots and fill them twice over (docs/02, step 4). A transaction-level
+# advisory lock is let go at commit or rollback (PostgreSQL 17 manual,
+# 13.3.5), so the next dispatcher reads the counts this one's UPDATE left.
+# The number is "consult" in ASCII, picked only to be a fixed bigint.
+DISPATCH_LOCK = 0x636F6E73756C74
 
 
 @dataclass(frozen=True)
@@ -111,3 +126,65 @@ def select(pending: Sequence[Pending], live: LiveCounts, caps: JobCaps) -> list[
             break
 
     return picked
+
+
+def dispatch(conn: psycopg.Connection[DictRow], settings: Settings) -> int:
+    """Queue what `select` picks from the pending find_themes and map_themes
+    jobs, in the caller's transaction, and return how many went.
+
+    A job with no alias or seed gets the settings' alias and a fresh seed; a
+    retried job keeps both, so the plan its checkpoints were cut from can be
+    rebuilt (ADR-002). The caller commits, then sends (docs/02, step 4).
+    """
+    conn.execute("SELECT pg_advisory_xact_lock(%s)", (DISPATCH_LOCK,))
+    pending = [
+        Pending(
+            job_id=row["id"],
+            department_id=row["department_id"],
+            consultation_id=row["consultation_id"],
+            created_at=row["created_at"],
+        )
+        for row in conn.execute(
+            """
+            SELECT id, department_id, consultation_id, created_at FROM job
+             WHERE status = 'pending' AND kind IN ('find_themes', 'map_themes')
+             ORDER BY created_at, id
+            """
+        ).fetchall()
+    ]
+    per_department: dict[UUID, int] = {}
+    per_consultation: dict[UUID, int] = {}
+    for row in conn.execute(
+        """
+        SELECT department_id, consultation_id, count(*) AS live FROM job
+         WHERE status IN ('queued', 'running')
+         GROUP BY department_id, consultation_id
+        """
+    ).fetchall():
+        department_id = row["department_id"]
+        per_department[department_id] = per_department.get(department_id, 0) + row["live"]
+        per_consultation[row["consultation_id"]] = row["live"]
+    department_caps = {
+        row["id"]: row["concurrent_jobs_cap"]
+        for row in conn.execute("SELECT id, concurrent_jobs_cap FROM department").fetchall()
+    }
+
+    picked = select(
+        pending,
+        LiveCounts(per_department, per_consultation, sum(per_consultation.values())),
+        JobCaps(department_caps, settings.jobs_per_consultation, settings.jobs_in_all),
+    )
+    # One seed per job, below 2**31 to fit the int[] the UPDATE casts to.
+    seeds = [secrets.randbelow(2**31) for _ in picked]
+    return conn.execute(
+        """
+        UPDATE job
+           SET status = 'queued', sent_at = now(),
+               model_alias = coalesce(job.model_alias, %(alias)s),
+               params = CASE WHEN job.params ? 'seed' THEN job.params
+                             ELSE job.params || jsonb_build_object('seed', picked.seed) END
+          FROM unnest(%(ids)s::uuid[], %(seeds)s::int[]) AS picked (id, seed)
+         WHERE job.id = picked.id AND job.status = 'pending'
+        """,
+        {"alias": settings.model_alias, "ids": picked, "seeds": seeds},
+    ).rowcount

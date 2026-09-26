@@ -5,13 +5,14 @@ validate` runs the validator over a responses file and its definition
 workbook and prints the report: exit 0 with no errors, 1 when an error
 blocks, 2 when the file was refused before it was read. `consult ingest`
 runs validate, stage, configure and ingest in turn with every warning's
-default resolution and commits once, so the proof-of-concept goes from a
-spreadsheet to a schema full of rows with no model yet (docs/02, steps 2
-to 3a). Its output is counts and ids, never a value from the file.
-`consult run-job` claims one find_themes job and runs it to the end with
-the fake, committing after every batch; `consult themes` lists a
-question's candidates as keys, labels, counts and answer ids; `consult
-sign-off` confirms them as they stand (docs/02, steps 6 to 8).
+default resolution, dispatches the jobs it inserted and commits once, so
+the proof-of-concept goes from a spreadsheet to a schema full of rows with
+no model yet (docs/02, steps 2 to 4). Its output is counts and ids, never
+a value from the file. `consult run-job` claims one find_themes job and
+runs it to the end with the fake, committing after every batch; `consult
+themes` lists a question's candidates as keys, labels, counts and answer
+ids; `consult sign-off` confirms them as they stand and dispatches the
+map_themes job (docs/02, steps 4 and 6 to 8).
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import secrets
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -32,6 +32,7 @@ from consult import config, jobs, logs, report, store, themes, transitions
 from consult.config import Settings
 from consult.configure import ConfigureError, configure, defaults
 from consult.definition import Definition, DefinitionError, read_definition
+from consult.dispatch import dispatch
 from consult.fake_model import OfflineModel
 from consult.ingest import IngestError, ingest
 from consult.inputs import InputError
@@ -172,6 +173,9 @@ def _ingest(args: argparse.Namespace, settings: Settings) -> int:
             conn.rollback()
             print(f"refused: {exc}")
             return 1
+        # The request that inserts a job dispatches it in the same breath
+        # (docs/02, step 4): what the caps let through commits queued.
+        dispatch(conn, settings)
         conn.commit()
     logs.log_event(
         logger,
@@ -197,17 +201,18 @@ def _ingest(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def _run_job(args: argparse.Namespace, settings: Settings) -> int:
-    """One find_themes job, pending to succeeded, committing after every
-    batch so a crash between two leaves checkpoints a takeover can resume
-    from (ADR-002). The queue step stands in for dispatch (PR-08)."""
+    """One find_themes job run to succeeded, committing after every batch
+    so a crash between two leaves checkpoints a takeover can resume from
+    (ADR-002). Dispatch runs first, so a job still pending is queued if
+    the caps let it through (docs/02, step 4)."""
     started = time.monotonic()
     llm = OfflineModel()
     with store.connect(settings) as conn:
-        # Queued by the stand-in, then claimed and run as the pipeline role,
-        # whose grants are the control on the worker's path (docs/06,
-        # section 2.4): SET ROLE outlives the commits between batches, and
-        # RESET ROLE follows the last one.
-        jobs.queue(conn, args.job, model_alias=args.model, seed=secrets.randbelow(2**31))
+        # Dispatched, then claimed and run as the pipeline role, whose
+        # grants are the control on the worker's path (docs/06, section
+        # 2.4): SET ROLE outlives the commits between batches, and RESET
+        # ROLE follows the last one.
+        dispatch(conn, settings)
         conn.commit()
         with as_role(conn, PIPELINE_ROLE):
             lease = jobs.claim(conn, args.job, args.worker)
@@ -342,7 +347,8 @@ def _themes(args: argparse.Namespace, settings: Settings) -> int:
 def _sign_off(args: argparse.Namespace, settings: Settings) -> int:
     """Confirm as-is (docs/02, step 8; ADR-003). The guarded UPDATE is the
     mutex and the edit counter is checked in the statement that supersedes
-    the candidate, so a reviewer who saw an older list gets a conflict."""
+    the candidate, so a reviewer who saw an older list gets a conflict. The
+    map_themes job it inserts is dispatched before the commit (step 4)."""
     with store.connect(settings) as conn:
         try:
             signed = transitions.sign_off(
@@ -363,10 +369,16 @@ def _sign_off(args: argparse.Namespace, settings: Settings) -> int:
             conn.rollback()
             print(f"question {args.question}: refused, not awaiting sign-off")
             return 1
+        dispatch(conn, settings)
         conn.commit()
+        # Read back rather than assumed: the caps can leave the job pending.
         status = conn.execute(
-            "SELECT c.status FROM consultation c JOIN question q ON q.consultation_id = c.id WHERE q.id = %s",
-            (args.question,),
+            """
+            SELECT j.status AS job, c.status AS consultation
+              FROM job j JOIN consultation c ON c.id = j.consultation_id
+             WHERE j.id = %s
+            """,
+            (signed.job_id,),
         ).fetchone()
     logs.log_event(
         logger,
@@ -378,8 +390,8 @@ def _sign_off(args: argparse.Namespace, settings: Settings) -> int:
     )
     print(
         f"question {args.question} signed off: version {signed.version_id}, "
-        f"map_themes job {signed.job_id} pending; consultation "
-        f"{status['status'] if status else 'unknown'}"
+        f"map_themes job {signed.job_id} {status['job'] if status else 'unknown'}; "
+        f"consultation {status['consultation'] if status else 'unknown'}"
     )
     return 0
 

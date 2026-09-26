@@ -65,6 +65,9 @@ SETTINGS: tuple[Setting, ...] = (
     # once for one consultation, twenty queued at once across all of them.
     Setting("CONSULT_JOBS_PER_CONSULTATION", "4", "Cap: jobs queued at once for one consultation"),
     Setting("CONSULT_JOBS_IN_ALL", "20", "Cap: jobs queued at once service-wide"),
+    # The alias dispatch stamps on a job that has none (docs/02, step 4).
+    # The fake is the only model the proof-of-concept calls.
+    Setting("CONSULT_MODEL_ALIAS", "fake", "The model alias dispatch stamps on a job"),
 )
 
 
@@ -83,6 +86,7 @@ class Settings:
     rates: Rates = DEFAULT_RATES
     jobs_per_consultation: int = 4
     jobs_in_all: int = 20
+    model_alias: str = "fake"
 
 
 def read_dotenv(path: Path) -> dict[str, str]:
@@ -154,4 +158,5 @@ def load(env: Mapping[str, str] | None = None, dotenv_path: Path = DOTENV_PATH) 
         ),
         jobs_per_consultation=_integer(values, "CONSULT_JOBS_PER_CONSULTATION"),
         jobs_in_all=_integer(values, "CONSULT_JOBS_IN_ALL"),
+        model_alias=values["CONSULT_MODEL_ALIAS"],
     )
