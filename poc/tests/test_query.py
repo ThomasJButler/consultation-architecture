@@ -92,3 +92,12 @@ def test_a_nul_or_a_lone_surrogate_in_a_filter_is_refused_by_code() -> None:
             assert refused.code is FilterCode.UNREADABLE_VALUE
             assert str(refused) == FilterCode.UNREADABLE_VALUE.value
             assert bad not in str(refused)
+
+
+def test_an_empty_attr_column_is_refused() -> None:
+    # attr:=Villages names no column: its probe would be {"": ["Villages"]},
+    # which matches nobody and says so nowhere. It's refused like an empty
+    # value.
+    refused = _refusal(["attr:=Villages"])
+    assert refused.code is FilterCode.EMPTY_VALUE
+    assert str(refused) == FilterCode.EMPTY_VALUE.value
