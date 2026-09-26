@@ -99,3 +99,55 @@ def test_the_run_job_command_runs_a_find_themes_job_with_the_fake(
         == 0
     )
     assert "consultation awaiting_review" in capsys.readouterr().out
+
+
+def test_the_themes_command_prints_keys_labels_counts_and_ids(
+    db: psycopg.Connection[DictRow], db_settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    jobs = ingested(db, db_settings)
+    assert (
+        main(
+            ["run-job", str(jobs["o_reason"]), "--worker", "w1", "--model", "fake"],
+            settings=db_settings,
+        )
+        == 0
+    )
+    question = db.execute(
+        "SELECT question_id FROM job WHERE id = %s", (jobs["o_reason"],)
+    ).fetchone()
+    assert question is not None
+    question_id = question["question_id"]
+    counted = db.execute(
+        """
+        SELECT t.key, t.preview_count FROM theme t JOIN theme_set_version v ON v.id = t.theme_set_version_id
+         WHERE v.question_id = %s AND NOT t.is_longlist ORDER BY t.key
+        """,
+        (question_id,),
+    ).fetchall()
+    capsys.readouterr()
+
+    code = main(["themes", str(question_id)], settings=db_settings)
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert f"question {question_id}: version 1 (candidate, edit 0)" in out
+    # The shortlist: key, label, count and the example answer ids the
+    # reviewer would open (docs/02, step 8's screen), then the longlist with
+    # what each folded into.
+    for row in counted:
+        assert re.search(rf"^\s+{row['key']}\s+\S.*\bcount {row['preview_count']}\b", out, re.M)
+    access = re.search(r"^\s+ACCESS\b.*\bexamples (\d+), (\d+), (\d+)", out, re.M)
+    assert access is not None
+    example_ids = {int(n) for n in access.groups()}
+    known = db.execute("SELECT id FROM answer WHERE question_id = %s", (question_id,)).fetchall()
+    assert example_ids <= {int(r["id"]) for r in known}
+    assert "longlist (12)" in out and re.search(r"ACCESS_\d+ > ACCESS", out)
+    for fragment in ANSWER_FRAGMENTS:
+        assert fragment not in out
+
+    # A question with no theme set yet, and one that doesn't exist.
+    other = db.execute("SELECT question_id FROM job WHERE id = %s", (jobs["o_safety"],)).fetchone()
+    assert other is not None
+    assert main(["themes", str(other["question_id"])], settings=db_settings) == 1
+    assert "no theme set" in capsys.readouterr().out
+    assert main(["themes", "00000000-0000-0000-0000-000000000000"], settings=db_settings) == 1
