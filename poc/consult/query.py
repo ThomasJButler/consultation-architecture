@@ -48,6 +48,7 @@ class FilterCode(StrEnum):
     UNREADABLE_VALUE = "unreadable_value"
     UNKNOWN_COLUMN = "unknown_column"
     UNKNOWN_QUESTION = "unknown_question"
+    UNKNOWN_THEME = "unknown_theme"
 
 
 class FilterError(ValueError):
@@ -247,19 +248,44 @@ def _by_column(attrs: Iterable[AttrFilter]) -> list[list[AttrFilter]]:
     return list(groups.values())
 
 
+# Every open question of the consultation, in the caller's department,
+# with the keys of its latest signed-off shortlist: the version the theme
+# predicates read (_latest_signed_off), less the longlist a sign-off copies
+# in for lineage, which mapping never tags (mapping._shortlist). A question
+# with no signed-off version has no keys.
+_SHORTLIST_KEYS = sql.SQL(
+    """
+    SELECT q.id = {question} AS is_this, q.column_ref,
+           coalesce(array_agg(t.key) FILTER (WHERE t.key IS NOT NULL), '{{}}') AS keys
+      FROM question q
+      LEFT JOIN theme t ON t.theme_set_version_id = {version} AND NOT t.is_longlist
+     WHERE q.department_id = {department} AND q.kind = 'open'
+       AND q.consultation_id = (SELECT consultation_id FROM question WHERE id = {question})
+     GROUP BY q.id, q.column_ref
+    """
+).format(
+    question=sql.Placeholder("question_id"),
+    version=_latest_signed_off(sql.SQL("q.id")),
+    department=sql.Placeholder("department_id"),
+)
+
+
 def check_filter_names(
     conn: psycopg.Connection[DictRow], question_id: UUID, filter: Filter, *, department_id: UUID
 ) -> None:
     """Refuse an `attr:` column or `other:` question this consultation
-    doesn't have, before `scope` ever runs: unmatched, either one narrows
-    the CTE's WHERE clause to nothing and the caller reads "of 0
-    respondents who answered" at exit 0, which says "no data" where the
-    truth is "no such name". Scoped the two ways `scope` itself is
-    (docs/06 section 2): the caller's department, and the question's own
+    doesn't have, or a `theme:` or `other:` key its question's latest
+    signed-off shortlist lacks, before `scope` ever runs: unmatched, any
+    one narrows the CTE's WHERE clause to nothing and the caller reads
+    "of 0 respondents who answered" at exit 0, which says "no data" where
+    the truth is "no such name". Keys are enum values (docs/02 step 9),
+    so they're compared exactly and a wrong case is unknown; an `attr:`
+    value stays free text. Scoped the two ways `scope` itself is (docs/06
+    section 2): the caller's department, and the question's own
     consultation, read here with one subselect so a name from a
     different consultation of the same department is refused the same
     as one from nowhere."""
-    if not filter.attrs and not filter.others:
+    if not filter.attrs and not filter.themes and not filter.others:
         return
     row = conn.execute(
         """
@@ -284,6 +310,17 @@ def check_filter_names(
         raise FilterError(FilterCode.UNKNOWN_COLUMN)
     if any(other.question not in known_questions for other in filter.others):
         raise FilterError(FilterCode.UNKNOWN_QUESTION)
+    if not filter.themes and not filter.others:
+        return
+    shortlists = conn.execute(
+        _SHORTLIST_KEYS, {"question_id": question_id, "department_id": department_id}
+    ).fetchall()
+    own = {key for r in shortlists if r["is_this"] for key in r["keys"]}
+    if any(key not in own for key in filter.themes):
+        raise FilterError(FilterCode.UNKNOWN_THEME)
+    by_question = {r["column_ref"]: set(r["keys"]) for r in shortlists}
+    if any(other.key not in by_question.get(other.question, set()) for other in filter.others):
+        raise FilterError(FilterCode.UNKNOWN_THEME)
 
 
 def scope(question_id: UUID, filter: Filter, *, department_id: UUID) -> Scope:
