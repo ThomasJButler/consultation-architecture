@@ -194,7 +194,7 @@ def test_the_sign_off_command_freezes_v2_and_refuses_a_second(
 
     out = capsys.readouterr().out
     assert code == 0
-    assert f"question {reason} signed off" in out and "map_themes job" in out and "pending" in out
+    assert f"question {reason} signed off" in out and "map_themes job" in out and "queued" in out
     frozen = db.execute(
         """
         SELECT v.version_no, v.status, v.signed_off_by,
@@ -202,7 +202,7 @@ def test_the_sign_off_command_freezes_v2_and_refuses_a_second(
                  WHERE t.theme_set_version_id = v.id AND NOT t.is_longlist) AS shortlist,
                (SELECT status FROM question WHERE id = v.question_id) AS question,
                (SELECT count(*) FROM job WHERE question_id = v.question_id AND kind = 'map_themes'
-                   AND status = 'pending') AS map_jobs
+                   AND status = 'queued') AS map_jobs
           FROM theme_set_version v WHERE v.question_id = %s ORDER BY v.version_no
         """,
         (reason,),
