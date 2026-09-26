@@ -34,12 +34,21 @@ def _mechanics_paragraph(text: str) -> str:
 
 def test_testing_md_names_a_test_for_each_mechanic() -> None:
     paragraph = _mechanics_paragraph(TESTING_MD.read_text(encoding="utf-8"))
-    starts = [paragraph.index(name) for name in MECHANICS]
+    starts = [paragraph.find(name) for name in MECHANICS]
+    for name, start in zip(MECHANICS, starts, strict=True):
+        assert start >= 0, f"{name}: not named in the paragraph on the four mechanics"
 
     for position, name in enumerate(MECHANICS):
         start = starts[position]
-        end = starts[position + 1] if position + 1 < len(starts) else len(paragraph)
-        span = paragraph[start:end]
+        # A mechanic's reference has to sit in its own sentence: the span
+        # ends at the next mechanic or at the sentence's full stop,
+        # whichever comes first, so a reference later in the paragraph
+        # (the vault test's, say) can't stand in for the last mechanic's.
+        sentence_end = paragraph.find(". ", start)
+        if sentence_end < 0:
+            sentence_end = len(paragraph)
+        next_start = starts[position + 1] if position + 1 < len(starts) else len(paragraph)
+        span = paragraph[start : min(sentence_end, next_start)]
         match = REF_RE.search(span)
         assert match is not None, f"{name}: no test reference in its sentence"
         ref = match.group(1)
