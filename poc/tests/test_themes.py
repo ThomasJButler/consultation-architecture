@@ -34,8 +34,10 @@ from consult.themes import (
     generate,
     load_job,
     preview,
+    run_find_themes,
     stratified_sample,
 )
+from consult.transitions import Advance, finish_find_themes, start_find_themes
 from tests.fakes import RecordingLLM
 from tests.pipeline import NOT_ANSWERED, Staged, fixture_rows, staged_fixture
 
@@ -402,3 +404,96 @@ def test_preview_gives_every_candidate_a_count_and_quotes(db: psycopg.Connection
     )
     # And nothing counted twice across the takeover: the count is the sample.
     assert sum(c["preview_count"] for c in counts) == distinct
+
+
+def test_find_themes_writes_v1_and_flips_the_question_in_one_transaction(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    staged = staged_fixture(db)
+    ingest(db, staged.consultation_id)
+    consultation_id = staged.consultation_id
+
+    # The first question by its stages. Claiming moves the question on
+    # (docs/02, section 6); a takeover finds it already moved and carries on.
+    job_id = queued_find_themes_job(db, staged, "o_reason")
+    job = load_job(db, job_id)
+    lease = claim(db, job_id, "worker-1")
+    assert lease is not None
+    assert start_find_themes(db, job.question_id) is True
+    assert start_find_themes(db, job.question_id) is False
+    version_id = ensure_version(db, lease, job.question_id)
+    llm = RecordingLLM()
+    plan = batches(db, job.question_id, seed=job.seed)
+    generated = generate(db, llm, lease, job, version_id, plan)
+    condense(db, llm, lease, job, version_id, generated=generated)
+    preview(db, llm, lease, job, version_id, generated=generated)
+
+    advance = finish_find_themes(db, lease, job.question_id, consultation_id)
+
+    # The question is themes_ready and the job succeeded together; the
+    # consultation waits for its sibling, so no email yet (docs/02, step 7).
+    assert advance == Advance(themes_ready=False, analysis_ready=False)
+    state = db.execute(
+        """
+        SELECT q.status AS question, j.status AS job, c.status AS consultation,
+               (SELECT count(*) FROM notification_outbox WHERE consultation_id = c.id) AS emails
+          FROM question q JOIN job j ON j.id = %s JOIN consultation c ON c.id = q.consultation_id
+         WHERE q.id = %s
+        """,
+        (job_id, job.question_id),
+    ).fetchone()
+    assert state == {
+        "question": "themes_ready",
+        "job": "succeeded",
+        "consultation": "processing",
+        "emails": 0,
+    }
+    versions = db.execute(
+        "SELECT version_no, status FROM theme_set_version WHERE question_id = %s",
+        (job.question_id,),
+    ).fetchall()
+    assert versions == [{"version_no": 1, "status": "candidate"}]
+    shape = db.execute(
+        """
+        SELECT count(*) FILTER (WHERE NOT is_longlist) AS shortlist,
+               count(*) FILTER (WHERE is_longlist) AS longlist,
+               count(*) FILTER (WHERE NOT is_longlist AND preview_count IS NULL) AS uncounted
+          FROM theme WHERE theme_set_version_id = %s
+        """,
+        (version_id,),
+    ).fetchone()
+    assert shape == {"shortlist": 3, "longlist": 12, "uncounted": 0}
+
+    # The other question through the runner, end to end: the last open
+    # question flips the consultation and writes one themes_ready row
+    # naming the pass (ADR-006).
+    other_id = queued_find_themes_job(db, staged, "o_safety")
+    other_lease = claim(db, other_id, "worker-1")
+    assert other_lease is not None
+    committed: list[int] = []
+
+    advance = run_find_themes(db, RecordingLLM(), other_lease, after_batch=committed.append)
+
+    assert advance == Advance(themes_ready=True, analysis_ready=False)
+    assert committed and committed == sorted(committed)
+    after = db.execute(
+        """
+        SELECT c.status, o.kind, o.subject_id = c.run_id AS this_pass,
+               (SELECT status FROM question WHERE id = %(q)s) AS question,
+               (SELECT status FROM job WHERE id = %(j)s) AS job,
+               (SELECT count(*) FROM theme_set_version WHERE question_id = %(q)s) AS versions
+          FROM consultation c JOIN notification_outbox o ON o.consultation_id = c.id
+         WHERE c.id = %(c)s
+        """,
+        {"q": load_job(db, other_id).question_id, "j": other_id, "c": consultation_id},
+    ).fetchall()
+    assert after == [
+        {
+            "status": "awaiting_review",
+            "kind": "themes_ready",
+            "this_pass": True,
+            "question": "themes_ready",
+            "job": "succeeded",
+            "versions": 1,
+        }
+    ]
