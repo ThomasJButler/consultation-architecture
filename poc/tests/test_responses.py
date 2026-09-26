@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from openpyxl import Workbook
 
-from consult.inputs import Caps, InputError
+from consult.inputs import Caps, InputError, Refusal
 from consult.responses import Responses, Row
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "responses.csv"
@@ -98,6 +98,50 @@ def test_a_short_row_is_padded_and_a_long_one_is_cut_to_the_header(tmp_path: Pat
     assert list(Responses(path).rows()) == [
         Row(2, {"a": "1", "b": ""}),
         Row(3, {"a": "1", "b": "2"}),
+    ]
+
+
+def test_a_data_column_with_no_header_is_refused(tmp_path: Path) -> None:
+    # Cells are keyed by header, so a data cell past the header's last
+    # column has no name to go under and cutting it loses it without a
+    # trace. openpyxl writes no cell for a header it wasn't given, and a
+    # row is as wide as its cells once the sheet's dimension is reset, so
+    # the XLSX header is two wide here and the validator's "column 3 has
+    # no name" never sees the third. Refused by the reader instead, for
+    # CSV and XLSX alike, with the column's position and never the cell.
+    workbook = Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    sheet.append(["respondent_ref", "o_reason"])
+    sheet.append(["R-1", "why", "stray-cell"])
+    sheet.append(["R-2", "because", "stray-cell"])
+    xlsx = tmp_path / "unnamed.xlsx"
+    workbook.save(xlsx)
+    csv_path = tmp_path / "unnamed.csv"
+    csv_path.write_text(
+        "respondent_ref,o_reason\nR-1,why,stray-cell\nR-2,because,stray-cell\n", encoding="utf-8"
+    )
+    for path in (xlsx, csv_path):
+        responses = Responses(path)
+        assert responses.header == ("respondent_ref", "o_reason")
+        with pytest.raises(InputError) as refused:
+            list(responses.rows())
+        assert (refused.value.reason, refused.value.count) == (Refusal.UNNAMED_COLUMN, 3)
+        assert "stray-cell" not in str(refused.value)
+
+    # A trailing column with a header and no data in any row is kept, each
+    # row padded to it.
+    workbook = Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    sheet.append(["respondent_ref", "o_reason", "notes_internal"])
+    sheet.append(["R-1", "why"])
+    sheet.append(["R-2", "because"])
+    empty = tmp_path / "empty-column.xlsx"
+    workbook.save(empty)
+    assert list(Responses(empty).rows()) == [
+        Row(2, {"respondent_ref": "R-1", "o_reason": "why", "notes_internal": ""}),
+        Row(3, {"respondent_ref": "R-2", "o_reason": "because", "notes_internal": ""}),
     ]
 
 
