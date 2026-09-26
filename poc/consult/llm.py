@@ -13,6 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from consult.errors import ErrorCode
+
 
 @dataclass(frozen=True)
 class Prompt:
@@ -53,3 +55,20 @@ class Completion:
 
 class LLM(Protocol):
     def complete(self, prompt: Prompt) -> Completion: ...
+
+
+class GatewayError(Exception):
+    """A 429 or a 5xx from the gateway (ADR-005; docs/02, section 9).
+
+    `code` and `request_id` are what `job.error` and a log line take.
+    `message` is the provider's text, kept off `args` and off `str(exc)`
+    so nothing but the code and the request id can ride an exception
+    chain, a traceback or a log line (CLAUDE.md, rule 8: `job.error`
+    stores a code and a request id, never a message body).
+    """
+
+    def __init__(self, code: ErrorCode, request_id: str | None = None, message: str = "") -> None:
+        self.code = code
+        self.request_id = request_id
+        self._message = message
+        super().__init__(f"{code.value} request_id={request_id}")
