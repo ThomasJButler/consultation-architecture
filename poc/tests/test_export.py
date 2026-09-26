@@ -541,7 +541,7 @@ def test_a_noncharacter_never_breaks_the_workbook(
     assert isinstance(answer_text, str)
     db.execute(
         "UPDATE answer SET value_text = %s WHERE id = %s",
-        (answer_text + "￿", target["id"]),
+        (answer_text + "\uffff", target["id"]),
     )
 
     identity = db.execute(
@@ -554,7 +554,7 @@ def test_a_noncharacter_never_breaks_the_workbook(
     db.execute(
         "UPDATE vault.respondent_identity SET value_text = %s"
         " WHERE respondent_id = %s AND column_ref = %s",
-        ("￾" + identity_text, target["respondent_id"], identity["column_ref"]),
+        ("\ufffe" + identity_text, target["respondent_id"], identity["column_ref"]),
     )
     respondent = db.execute(
         "SELECT external_id FROM respondent WHERE id = %s", (target["respondent_id"],)
