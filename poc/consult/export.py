@@ -139,10 +139,16 @@ def _sheet_title(column_ref: str, used: set[str]) -> str:
 
 def neutralise(value: str) -> str:
     """A value starting with a formula trigger gets a leading apostrophe,
-    the convention every spreadsheet reads as "force this cell to text"
-    (docs/06, section 2.7). The file's own no-answer marker, a lone "-",
-    is left alone: it isn't a formula wherever it's read back, and
-    prefixing it would change what "not answered" looks like (docs/00).
+    the convention CSV and a cell typed by hand both read as "force this
+    cell to text" (docs/06, section 2.7). In the XLSX `write_workbook`
+    saves, the apostrophe is written as part of the string and stays
+    visible when the file is opened: openpyxl sets no `quotePrefix` on
+    the cell (measured against openpyxl 3.1.5, 26 September 2026), so
+    what actually stops the value evaluating there is `_cell`'s own
+    `data_type` forced to "s", not the apostrophe. The file's own
+    no-answer marker, a lone "-", is left alone: it isn't a formula
+    wherever it's read back, and prefixing it would change what "not
+    answered" looks like (docs/00).
     """
     if value == NO_ANSWER:
         return value
