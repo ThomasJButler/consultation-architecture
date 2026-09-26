@@ -145,8 +145,13 @@ proforma repeated word for word, and one answer starting with `=`.
   (`docs/06`, section 2; `plans/PR-09-poc-query-export-cli.md`, section 7).
 - The plan benchmark's node placement. The GIN scan feeding a Bitmap
   Heap Scan on `respondent`, with the answer key probed on a Nested
-  Loop's inner side, is recorded in `docs/05`'s correction of
-  26 September 2026 and not yet asserted by the test.
+  Loop's inner side, was observed in PR-09's review round
+  (`docs/07-reviews.md`, row 09) and isn't yet asserted by the test.
+- The manifest's prompt hash and agreement rate (`docs/02`, step 12).
+  `job.prompt_sha256` has its column and nothing here writes it; the
+  agreement rate is derived from human edits and nothing here computes
+  it; the manifest carries neither (`docs/02`'s correction of
+  26 September 2026, item 3).
 - The scaled fixture's duplicate text. At 20,000 rows 99.5% of the
   non-blank `o_reason` answers are exact duplicates, so the measured
   page is empty; the generator needs distinct open-answer text before
