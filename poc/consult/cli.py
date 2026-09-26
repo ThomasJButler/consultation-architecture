@@ -25,7 +25,7 @@ from psycopg.rows import DictRow
 
 from consult import config, logs, report, store
 from consult.config import Settings
-from consult.configure import configure, defaults
+from consult.configure import ConfigureError, configure, defaults
 from consult.definition import Definition, DefinitionError, read_definition
 from consult.ingest import IngestError, ingest
 from consult.inputs import InputError
@@ -133,10 +133,10 @@ def _ingest(args: argparse.Namespace, settings: Settings) -> int:
         department_id = _department(conn, args.department)
         consultation_id = _consultation(conn, department_id, args.name)
         staged = stage(conn, consultation_id, args.responses, settings.caps)
-        configure(conn, consultation_id, definition, result, defaults(result))
         try:
+            configure(conn, consultation_id, definition, result, defaults(result))
             ingested = ingest(conn, consultation_id)
-        except IngestError as exc:
+        except (ConfigureError, IngestError) as exc:
             # Leaving the block would commit, so roll back first: nothing of
             # a refused file stays behind, not even the consultation row.
             conn.rollback()

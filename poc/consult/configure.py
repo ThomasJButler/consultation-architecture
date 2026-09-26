@@ -31,6 +31,11 @@ RESPONSE_TYPES = {
 }
 
 
+class ConfigureError(Exception):
+    """The resolutions can't be written as given. The message names
+    headers, never a value from the file."""
+
+
 @dataclass(frozen=True)
 class Resolutions:
     """What the reviewer decided at configure time, one entry per warning.
@@ -165,13 +170,23 @@ def configure(
     resolutions: Resolutions,
 ) -> Configured:
     ordinals = {column.column_ref: index for index, column in enumerate(report.columns, start=1)}
+    # One key per file. Two headers with the id role would mean recording
+    # one of them as something the reviewer didn't choose, so it refuses
+    # before any write (docs/02, section 3.2).
+    id_headers = sorted(
+        h for h, role in resolutions.roles.items() if role is Resolution.ROLE_RESPONDENT_ID
+    )
+    if len(id_headers) > 1:
+        raise ConfigureError(
+            f"{len(id_headers)} columns given the respondent id role: {', '.join(id_headers)}"
+        )
     questions: dict[str, UUID] = {}
     ignored: list[str] = []
     respondent_id: str | None = None
     for header, role in resolutions.roles.items():
-        if role is Resolution.ROLE_RESPONDENT_ID and respondent_id is None:
+        if role is Resolution.ROLE_RESPONDENT_ID:
             respondent_id = header
-        elif role is Resolution.ROLE_IGNORE or role is Resolution.ROLE_RESPONDENT_ID:
+        elif role is Resolution.ROLE_IGNORE:
             ignored.append(header)
         elif role is Resolution.ROLE_IDENTITY:
             questions[header] = _upsert_question(
