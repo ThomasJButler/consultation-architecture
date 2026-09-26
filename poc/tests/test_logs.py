@@ -9,10 +9,13 @@ and an exception contributes its class and never its message.
 
 from __future__ import annotations
 
+import importlib.util
 import io
 import logging
 import sys
 import time
+from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -192,3 +195,24 @@ def test_configure_installs_one_handler_with_the_formatter() -> None:
         assert root.level == logging.WARNING
     finally:
         root.handlers[:] = before
+
+
+def test_the_cli_logs_under_its_own_name_when_run_as_main(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`make ingest` runs `python -m consult.cli`, where the module's
+    __name__ is "__main__"; `.venv/bin/consult` imports it as consult.cli.
+    A log search keyed on the logger name has to find both, so the module
+    names its logger rather than taking __name__ (the review of
+    26 September 2026, finding 34). The module's source is executed here
+    under __name__ "__main__", as -m runs it, with --help so main exits
+    before it needs a database, and the logger is read from the namespace
+    the run left behind."""
+    spec = importlib.util.find_spec("consult.cli")
+    assert spec is not None and spec.origin is not None
+    source = Path(spec.origin).read_text(encoding="utf-8")
+    namespace: dict[str, Any] = {"__name__": "__main__", "__file__": spec.origin}
+    monkeypatch.setattr(sys, "argv", ["consult", "--help"])
+    with pytest.raises(SystemExit):
+        exec(compile(source, spec.origin, "exec"), namespace)  # noqa: S102  # nosec B102
+    assert namespace["logger"].name == "consult.cli"
