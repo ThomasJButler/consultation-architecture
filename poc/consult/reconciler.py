@@ -46,9 +46,8 @@ from psycopg.rows import DictRow
 
 from consult import dispatch, logs, transitions
 from consult.config import Settings
-from consult.jobs import STALE_AFTER
+from consult.jobs import MAX_ATTEMPTS, STALE_AFTER
 from consult.store import PIPELINE_ROLE, as_role, bound_idle_transactions
-from consult.worker import MAX_ATTEMPTS
 
 logger = logging.getLogger(__name__)
 

@@ -294,7 +294,10 @@ def _run_job(args: argparse.Namespace, settings: Settings) -> int:
         with as_role(conn, PIPELINE_ROLE):
             dispatch(conn, settings)
             conn.commit()
-            lease = jobs.claim(conn, args.job, args.worker)
+            # The command runs find_themes and nothing else (its help
+            # line), and a job at the retry budget is the reconciler's to
+            # fail (ADR-002; docs/02, section 5): the claim refuses both.
+            lease = jobs.claim(conn, args.job, args.worker, kind="find_themes")
             if lease is None:
                 state = conn.execute("SELECT status FROM job WHERE id = %s", (args.job,)).fetchone()
                 print(f"job {args.job}: not claimable ({state['status'] if state else 'unknown'})")

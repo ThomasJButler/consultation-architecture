@@ -45,7 +45,7 @@ from psycopg.rows import DictRow
 
 from consult import jobs, logs, mapping, themes, transitions
 from consult.errors import ErrorCode
-from consult.jobs import STALE_AFTER, Lease, LeaseLostError
+from consult.jobs import MAX_ATTEMPTS, STALE_AFTER, Lease, LeaseLostError
 from consult.llm import LLM, Completion, GatewayError, Prompt
 from consult.replies import ReplyError
 from consult.store import PIPELINE_ROLE, as_role, bound_idle_transactions
@@ -56,9 +56,6 @@ logger = logging.getLogger(__name__)
 BACKOFF_BASE_SECONDS = 1
 BACKOFF_CAP_SECONDS = 60
 BACKOFF_ATTEMPTS = 6
-# ADR-002: "the retry budget is job.attempts < 5". A job at five is the
-# reconciler's to fail (docs/02, section 5), never a worker's to run.
-MAX_ATTEMPTS = 5
 
 # docs/02, section 9, and ADR-005 back off only on a 429 or a 5xx.
 # GATEWAY_REJECTED is any other 4xx, the request's own fault (errors.py),
