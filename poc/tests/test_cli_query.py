@@ -109,7 +109,7 @@ def test_the_query_and_export_commands(
     out = capsys.readouterr().out
     assert code == 0
     assert str(out_path) in out
-    assert "240 respondents" in out and "480 answers" in out and "4 sheets" in out
+    assert "240 respondents" in out and "480 open answers" in out and "4 sheets" in out
     assert re.search(r"\d+ tags", out)
     for fragment in ANSWER_FRAGMENTS:
         assert fragment not in out

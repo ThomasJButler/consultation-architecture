@@ -801,7 +801,7 @@ def _export(args: argparse.Namespace, settings: Settings) -> int:
         duration_ms=round((time.monotonic() - started) * 1000),
     )
     print(
-        f"wrote {args.out}: {result.respondents} respondents, {result.answers} answers, "
+        f"wrote {args.out}: {result.respondents} respondents, {result.answers} open answers, "
         f"{result.tags} tags, {result.sheets} sheets"
     )
     return 0
