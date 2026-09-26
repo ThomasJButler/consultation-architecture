@@ -10,11 +10,13 @@ own test, test_export_prefix.py, outside this mark (test_repo_rules.py).
 
 from __future__ import annotations
 
+import zipfile
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from defusedxml import ElementTree
 from openpyxl import load_workbook
 from psycopg.errors import InsufficientPrivilege
 from psycopg.rows import DictRow
@@ -512,3 +514,72 @@ def test_a_control_character_never_rides_the_exports_error(
     assert isinstance(identity_cell, str)
     assert "\x1b" not in identity_cell
     assert "\\x1b" in identity_cell
+
+
+def test_a_noncharacter_never_breaks_the_workbook(
+    db: psycopg.Connection[DictRow], tmp_path: Path
+) -> None:
+    """XML 1.0's Char production (section 2.2) admits tab, LF, CR,
+    U+0020 to U+D7FF, U+E000 to U+FFFD and U+10000 up, so U+FFFE and
+    U+FFFF are no more legal in a sheet part than a C0 control is.
+    openpyxl 3.1.5 without lxml (openpyxl.xml.LXML is False here) hands
+    them to ElementTree, which writes them raw, and the save succeeds
+    with a sheet no XML parser will read. Postgres stores both in UTF-8
+    text, so an open answer or a vault identity value can carry one. The
+    same two carriers as the control-character test above, dirtied by
+    hand; every worksheet part is parsed straight out of the zip, since
+    Excel refuses the file where openpyxl's own reader might not.
+    """
+    signed = signed_off_questions(db, ("o_reason",))
+    target = db.execute(
+        "SELECT id, respondent_id, value_text FROM answer"
+        " WHERE question_id = %s AND NOT is_blank ORDER BY id LIMIT 1",
+        (signed["o_reason"].question_id,),
+    ).fetchone()
+    assert target is not None
+    answer_text = target["value_text"]
+    assert isinstance(answer_text, str)
+    db.execute(
+        "UPDATE answer SET value_text = %s WHERE id = %s",
+        (answer_text + "￿", target["id"]),
+    )
+
+    identity = db.execute(
+        "SELECT column_ref, value_text FROM vault.respondent_identity WHERE respondent_id = %s",
+        (target["respondent_id"],),
+    ).fetchone()
+    assert identity is not None
+    identity_text = identity["value_text"]
+    assert isinstance(identity_text, str)
+    db.execute(
+        "UPDATE vault.respondent_identity SET value_text = %s"
+        " WHERE respondent_id = %s AND column_ref = %s",
+        ("￾" + identity_text, target["respondent_id"], identity["column_ref"]),
+    )
+    respondent = db.execute(
+        "SELECT external_id FROM respondent WHERE id = %s", (target["respondent_id"],)
+    ).fetchone()
+    assert respondent is not None
+    db.commit()
+
+    path = tmp_path / "export.xlsx"
+    export.write_workbook(db, signed["o_reason"].consultation_id, path)
+
+    with zipfile.ZipFile(path) as archive:
+        parts = [name for name in archive.namelist() if name.startswith("xl/worksheets/")]
+        assert len(parts) == 4
+        for name in parts:
+            ElementTree.fromstring(archive.read(name))
+
+    workbook = load_workbook(path)
+    responses = workbook["Responses"]
+    header = [cell.value for cell in next(responses.iter_rows(max_row=1))]
+    index = {name: i for i, name in enumerate(header)}
+    row = next(
+        r
+        for r in responses.iter_rows(min_row=2)
+        if r[index["respondent_ref"]].value == respondent["external_id"]
+    )
+    # The visible form the control-character escape already uses.
+    assert row[index["o_reason"]].value == answer_text + "\\uffff"
+    assert row[index[identity["column_ref"]]].value == "\\ufffe" + identity_text
