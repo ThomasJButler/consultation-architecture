@@ -146,3 +146,16 @@ def test_a_refused_ingest_leaves_nothing_behind(
     ).fetchone()
     assert written == {"consultations": 0, "departments": 0}
     assert staging_tables(db) == []
+
+
+def test_the_command_installs_the_log_formatter(
+    db: psycopg.Connection[DictRow], db_settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # pyproject.toml maps the console script `consult` to cli.main, so main
+    # itself has to install the formatter: otherwise the ingested event is
+    # dropped and a library's warning would reach stderr with none of the
+    # filtering in logs.py (THREAT_MODEL.md, section 2).
+    assert main(["ingest", RESPONSES, "--definition", DEFINITION, *ARGS], settings=db_settings) == 0
+    err = capsys.readouterr().err
+    assert " ingested " in err and "respondent_count=240" in err and "job_count=2" in err
+    assert "@" not in err and "towpath" not in err
