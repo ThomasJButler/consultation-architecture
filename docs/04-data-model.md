@@ -392,3 +392,13 @@ its review and recorded here rather than rewritten into the merged text.
    chooses. The shares the planner needed, the GIN pending list after an
    ingest and what the fixture's duplicates do to the numbers are in docs/05's
    correction of the same date.
+
+5. **Section 1, the job table and the inference region.** docs/06 section
+   2.1 and docs/02 section 10 both require the inference region recorded on
+   every job, for the DPIA. The `job` row above has no column for it, and
+   neither does `poc/consult/schema.sql`, so nothing in the proof-of-concept
+   records where a call was served. Found on 26 September 2026 by PR-10's
+   evidence pass over the submission's bullet on the gateway. The column
+   belongs beside `model_alias` on `job`, written by the worker from the
+   gateway's response; it is unbuilt here and the manifest can't carry it
+   until it is.
