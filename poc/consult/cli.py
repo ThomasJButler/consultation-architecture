@@ -436,13 +436,29 @@ def _themes(args: argparse.Namespace, settings: Settings) -> int:
         if version is None:
             print(f"question {args.question}: no theme set yet")
             return 1
+        # lineage_theme_id carries two different meanings depending on when
+        # it was set: themes.condense sets it, within one version, to the
+        # shortlist theme a longlist entry folded into; transitions.sign_off
+        # then reuses the same column, across versions, to point a copied
+        # row at the candidate row it was copied from. `source` resolves
+        # the second meaning; when a row is native to its own version (a
+        # candidate, not yet signed off), source already IS the fold
+        # target, so the CASE reads its key directly there rather than
+        # hopping again through `folded`, which would be the shortlist
+        # row's own (always null) lineage. Examples ride the same source
+        # pointer: sign_off doesn't copy theme_example, so a signed-off
+        # row's examples are the row it was copied from carries.
         rows = conn.execute(
             """
             SELECT t.key, t.label, t.description, t.is_longlist, t.preview_count,
-                   l.key AS folded_into,
+                   CASE WHEN source.theme_set_version_id = t.theme_set_version_id
+                        THEN source.key ELSE folded.key END AS folded_into,
                    (SELECT string_agg(e.answer_id::text, ', ' ORDER BY e.rank)
-                      FROM theme_example e WHERE e.theme_id = t.id) AS examples
-              FROM theme t LEFT JOIN theme l ON l.id = t.lineage_theme_id
+                      FROM theme_example e
+                     WHERE e.theme_id = coalesce(t.lineage_theme_id, t.id)) AS examples
+              FROM theme t
+              LEFT JOIN theme source ON source.id = t.lineage_theme_id
+              LEFT JOIN theme folded ON folded.id = source.lineage_theme_id
              WHERE t.theme_set_version_id = %s
              ORDER BY t.is_longlist, t.preview_count DESC NULLS LAST, t.key
             """,
@@ -463,7 +479,10 @@ def _themes(args: argparse.Namespace, settings: Settings) -> int:
     for row in rows:
         if row["is_longlist"]:
             continue
-        line = f"  {row['key']}  {report.shown(row['label'])}  count {row['preview_count']}"
+        # A fallback theme (OTHER, NO_REASON) carries no preview_count of
+        # its own: never previewed, so never counted (transitions.sign_off).
+        count = row["preview_count"] if row["preview_count"] is not None else "-"
+        line = f"  {row['key']}  {report.shown(row['label'])}  count {count}"
         if row["examples"]:
             line += f"  examples {row['examples']}"
         print(line)
