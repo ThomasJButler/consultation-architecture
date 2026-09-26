@@ -12,6 +12,15 @@ job row, which is the order a worker's finishing transaction takes them
 in too. So a statement never holds a job row lock when it calls
 `fail_job`: its bulk UPDATE commits first, and each job at the retry
 budget is then failed in a transaction of its own.
+
+Two things the design has that this module doesn't. A row the relay
+left in `sending` by crashing between its two commits needs ADR-006's
+reference lookup, asking Notify for a notification with that reference
+before sending again; with no Notify here there's nothing to ask, so
+such a row stays where it is. And statement 5 as corrected (docs/02,
+correction 7) also inserts `review_reminder` rows, keyed on five working
+days in `themes_ready`, which nothing records the start of; plan
+section 0 leaves them out, so the relay relays and does nothing more.
 """
 
 from __future__ import annotations
@@ -29,6 +38,8 @@ from consult.worker import MAX_ATTEMPTS
 # The states fail_job fails a job from; anything else has moved on since
 # the scan that found it (see _fail_each).
 _FAILABLE = frozenset({"queued", "running", "failed_retryable"})
+# ADR-006's relay query takes twenty rows at a time.
+RELAY_LIMIT = 20
 
 
 def recover(
@@ -135,6 +146,53 @@ def rerun_fan_ins(conn: psycopg.Connection[DictRow]) -> int:
         if advance.themes_ready or advance.analysis_ready:
             advanced += 1
     return advanced
+
+
+def relay(conn: psycopg.Connection[DictRow], *, limit: int = RELAY_LIMIT) -> int:
+    """Statement 5: send up to `limit` of the emails the outbox owes;
+    returns how many went.
+
+    ADR-006's query takes pending rows in id order FOR UPDATE SKIP LOCKED,
+    the manual's own suggestion for many consumers of a queue-like table,
+    so two relays neither wait on each other nor take the same row. The
+    rows go to sending and commit before the send, so no lock is held
+    across it, then to sent with the reference and the time.
+
+    The send is a stand-in (`_fake_notify`): Notify stays a hint in the
+    proof-of-concept (plan section 0).
+    """
+    taken = conn.execute(
+        """
+        SELECT id FROM notification_outbox
+         WHERE status = 'pending'
+         ORDER BY id
+           FOR UPDATE SKIP LOCKED
+         LIMIT %s
+        """,
+        (limit,),
+    ).fetchall()
+    ids = [row["id"] for row in taken]
+    if not ids:
+        return 0
+    conn.execute("UPDATE notification_outbox SET status = 'sending' WHERE id = ANY(%s)", (ids,))
+    conn.commit()
+    sent = 0
+    for outbox_id in ids:
+        sent += conn.execute(
+            """
+            UPDATE notification_outbox SET status = 'sent', notify_id = %s, sent_at = now()
+             WHERE id = %s AND status = 'sending'
+            """,
+            (_fake_notify(outbox_id), outbox_id),
+        ).rowcount
+    conn.commit()
+    return sent
+
+
+def _fake_notify(outbox_id: int) -> str:
+    """Notify's reply to a send whose reference is the outbox id (ADR-006):
+    a notification id, made up from the reference."""
+    return f"fake-notify-{outbox_id}"
 
 
 def _fail_each(conn: psycopg.Connection[DictRow], jobs: Sequence[DictRow]) -> int:
