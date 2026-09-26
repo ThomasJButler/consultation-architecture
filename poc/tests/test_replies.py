@@ -17,12 +17,15 @@ import pytest
 
 from consult.errors import ErrorCode
 from consult.llm import Completion, Prompt
+from consult.prompts import DATA_PREAMBLE, condense_prompt
 from consult.replies import (
     Assignment,
+    CondensedTheme,
     ProposedTheme,
     Reason,
     ReplyError,
     parse_assignments,
+    parse_condensation,
     parse_themes,
 )
 from tests.fakes import FakeLLM, Fault, RecordingLLM
@@ -145,3 +148,52 @@ def test_a_generation_reply_is_validated_in_code() -> None:
             )
         )
     assert refused.value.reason is Reason.WRONG_SHAPE
+
+
+def test_a_condensation_reply_is_validated_in_code() -> None:
+    candidates = (
+        ProposedTheme("SAFETY_1", "Safety (1)", "Safety raised"),
+        ProposedTheme("SAFETY_51", "Safety (51)", "Safety raised"),
+        ProposedTheme("PARKING_1", "Parking (1)", "Parking raised"),
+    )
+    prompt = condense_prompt(model_alias="fake-model", question_text="Why?", candidates=candidates)
+    # The candidates go to the model as data after the data line, like answers do.
+    assert DATA_PREAMBLE in prompt.system
+    assert json.loads(prompt.user) == [
+        {"key": c.key, "label": c.label, "description": c.description} for c in candidates
+    ]
+    assert prompt.answer_ids == () and prompt.theme_keys == ()
+    keys = tuple(c.key for c in candidates)
+
+    good = RecordingLLM().complete(prompt)
+    condensed = parse_condensation(good, keys)
+    assert sorted(condensed, key=lambda t: t.key) == [
+        CondensedTheme("PARKING", "Parking", "Parking raised", ("PARKING_1",)),
+        CondensedTheme("SAFETY", "Safety", "Safety raised", ("SAFETY_1", "SAFETY_51")),
+    ]
+
+    # A merge of a key nobody proposed, and one candidate folded twice.
+    unknown = json.dumps(
+        {
+            "themes": [
+                {"key": "SAFETY", "label": "S", "description": "d", "merges": ["SAFETY_1", "X"]}
+            ]
+        }
+    )
+    with pytest.raises(ReplyError) as refused:
+        parse_condensation(Completion(text=unknown), keys)
+    assert refused.value.reason is Reason.KEY_UNKNOWN
+    twice = json.dumps(
+        {
+            "themes": [
+                {"key": "SAFETY", "label": "S", "description": "d", "merges": ["SAFETY_1"]},
+                {"key": "SAFER", "label": "S", "description": "d", "merges": ["SAFETY_1"]},
+            ]
+        }
+    )
+    with pytest.raises(ReplyError) as refused:
+        parse_condensation(Completion(text=twice), keys)
+    assert refused.value.reason is Reason.KEY_REPEATED
+    for fault in FAULTS:
+        with pytest.raises(ReplyError):
+            parse_condensation(FakeLLM([fault]).complete(prompt), keys)

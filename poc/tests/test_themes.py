@@ -10,6 +10,7 @@ script, not from the code under test.
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from collections.abc import Callable
 from uuid import UUID
@@ -20,7 +21,16 @@ from psycopg.rows import DictRow
 
 from consult.ingest import ingest
 from consult.jobs import claim
-from consult.themes import BATCH_SIZE, batches, ensure_version, generate, load_job
+from consult.prompts import DATA_PREAMBLE
+from consult.themes import (
+    BATCH_SIZE,
+    SHORTLIST_CAP,
+    batches,
+    condense,
+    ensure_version,
+    generate,
+    load_job,
+)
 from tests.fakes import RecordingLLM
 from tests.pipeline import NOT_ANSWERED, Staged, fixture_rows, staged_fixture
 
@@ -202,3 +212,77 @@ def test_find_themes_checkpoints_every_batch_and_resumes(db: psycopg.Connection[
         "SELECT version_no, status FROM theme_set_version WHERE id = %s", (version_id,)
     ).fetchone()
     assert version == {"version_no": 1, "status": "candidate"}
+
+
+def test_condense_caps_the_shortlist_and_keeps_lineage(db: psycopg.Connection[DictRow]) -> None:
+    staged = staged_fixture(db)
+    ingest(db, staged.consultation_id)
+    job_id = queued_find_themes_job(db, staged, "o_reason")
+    job = load_job(db, job_id)
+    lease = claim(db, job_id, "worker-1")
+    assert lease is not None
+    version_id = ensure_version(db, lease, job.question_id)
+    llm = RecordingLLM()
+    generated = generate(
+        db, llm, lease, job, version_id, batches(db, job.question_id, seed=job.seed)
+    )
+    assert generated == 4
+
+    shortlist = condense(db, llm, lease, job, version_id, generated=generated)
+
+    # Twelve candidates in three stems, so three shortlist themes (docs/02,
+    # step 6: about thirty, cap seventy; the fake folds by key stem).
+    assert shortlist == 3 and SHORTLIST_CAP == 70
+    prompt = llm.prompts[-1]
+    assert DATA_PREAMBLE in prompt.system and prompt.answer_ids == () and prompt.theme_keys == ()
+    themes = db.execute(
+        "SELECT id, key, is_longlist, lineage_theme_id FROM theme WHERE theme_set_version_id = %s ORDER BY key",
+        (version_id,),
+    ).fetchall()
+    sent = json.loads(prompt.user)
+    assert sorted(c["key"] for c in sent) == sorted(t["key"] for t in themes if t["is_longlist"])
+    short = {t["key"]: t for t in themes if not t["is_longlist"]}
+    assert set(short) == {"ACCESS", "PARKING", "SAFETY"}
+    longlist = [t for t in themes if t["is_longlist"]]
+    assert len(longlist) == 12
+    # The longlist is kept, each candidate pointing at the theme it folded into.
+    for candidate in longlist:
+        stem = candidate["key"].rsplit("_", 1)[0]
+        assert candidate["lineage_theme_id"] == short[stem]["id"]
+    assert {t["lineage_theme_id"] for t in short.values()} == {None}
+    checkpoints = db.execute(
+        "SELECT batch_no, stage, answer_ids FROM job_batch WHERE job_id = %s ORDER BY batch_no",
+        (job_id,),
+    ).fetchall()
+    assert [(c["batch_no"], c["stage"]) for c in checkpoints][-1] == (5, "condense")
+    assert checkpoints[-1]["answer_ids"] == []
+    # Called again after its checkpoint: no model call, nothing changed.
+    calls = len(llm.prompts)
+    assert condense(db, llm, lease, job, version_id, generated=generated) == 3
+    assert len(llm.prompts) == calls
+    assert db.execute(
+        "SELECT count(*) AS n FROM job_batch WHERE job_id = %s", (job_id,)
+    ).fetchone() == {"n": 5}
+
+    # The cap, on the other question: most merges first, ties by key, and the
+    # candidates of a theme past the cap stay longlist with no lineage.
+    other_id = queued_find_themes_job(db, staged, "o_safety")
+    other = load_job(db, other_id)
+    other_lease = claim(db, other_id, "worker-1")
+    assert other_lease is not None
+    other_version = ensure_version(db, other_lease, other.question_id)
+    other_generated = generate(
+        db, llm, other_lease, other, other_version, batches(db, other.question_id, seed=other.seed)
+    )
+    assert (
+        condense(db, llm, other_lease, other, other_version, generated=other_generated, cap=2) == 2
+    )
+    rows = db.execute(
+        "SELECT key, is_longlist, lineage_theme_id FROM theme WHERE theme_set_version_id = %s ORDER BY key",
+        (other_version,),
+    ).fetchall()
+    assert [r["key"] for r in rows if not r["is_longlist"]] == ["ACCESS", "PARKING"]
+    dropped = [r for r in rows if r["is_longlist"] and r["key"].startswith("SAFETY_")]
+    assert dropped and {r["lineage_theme_id"] for r in dropped} == {None}
+    kept = [r for r in rows if r["is_longlist"] and not r["key"].startswith("SAFETY_")]
+    assert kept and None not in {r["lineage_theme_id"] for r in kept}
