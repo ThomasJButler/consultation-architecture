@@ -7,9 +7,14 @@ row 3: ids missing, ids added, a label outside the enum, malformed JSON,
 and prose where JSON was asked for), each built from the prompt it's
 answering so the fault is exact.
 
-The reply shape both fakes speak is the mapping contract PR-07 validates:
-`{"assignments": [{"answer_id": <int>, "theme_keys": [<key>, ...]}, ...]}`,
-every id sent back exactly once, every key from the enum.
+The fakes speak both shapes consult/replies.py validates, and read the
+prompt to pick one. A prompt with theme keys is a mapping (or preview)
+call and gets `{"assignments": [{"answer_id": <int>, "theme_keys": [<key>,
+...]}, ...]}`, every id sent back once, every key from the enum. A prompt
+with answer ids and no theme keys is a generation call and gets `{"themes":
+[{"key", "label", "description"}, ...]}`, three themes named from the
+batch's first id so condensation has something to merge. Each fault is
+built from the prompt it's answering so the fault is exact.
 """
 
 from __future__ import annotations
@@ -41,7 +46,37 @@ def good_assignments(prompt: Prompt) -> list[dict[str, object]]:
     return [{"answer_id": answer_id, "theme_keys": [key]} for answer_id in prompt.answer_ids]
 
 
+def good_themes(prompt: Prompt) -> list[dict[str, object]]:
+    """Three themes per batch, suffixed with the batch's first answer id, so
+    a fake condensation can fold SAFETY_1 and SAFETY_51 into SAFETY."""
+    base = min(prompt.answer_ids, default=0)
+    return [
+        {"key": f"{stem}_{base}", "label": f"{label} ({base})", "description": f"{label} raised"}
+        for stem, label in (("SAFETY", "Safety"), ("PARKING", "Parking"), ("ACCESS", "Access"))
+    ]
+
+
+def generation_reply_text(prompt: Prompt, fault: Fault) -> str:
+    themes = good_themes(prompt)
+    if fault is Fault.OUT_OF_ENUM_LABEL:
+        themes[0]["key"] = "not a key"
+    elif fault is Fault.DROPPED_ID:
+        del themes[0]["label"]
+    elif fault is Fault.EXTRA_ID:
+        themes[0]["confidence"] = 0.9
+    elif fault is Fault.DUPLICATED_ID:
+        themes[1]["key"] = themes[0]["key"]
+    elif fault is Fault.PROSE:
+        return "Certainly! Here are the themes I found in the responses you sent."
+    text = json.dumps({"themes": themes})
+    if fault is Fault.MALFORMED_JSON:
+        return text[:-2]
+    return text
+
+
 def reply_text(prompt: Prompt, fault: Fault) -> str:
+    if not prompt.theme_keys:
+        return generation_reply_text(prompt, fault)
     assignments = good_assignments(prompt)
     if fault is Fault.OUT_OF_ENUM_LABEL and assignments:
         assignments[0]["theme_keys"] = ["NOT_A_THEME_KEY"]
