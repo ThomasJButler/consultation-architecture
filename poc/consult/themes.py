@@ -21,8 +21,8 @@ from psycopg.rows import DictRow
 from consult import jobs
 from consult.jobs import Lease, LeaseLostError
 from consult.llm import LLM
-from consult.prompts import PromptAnswer, condense_prompt, find_themes_prompt
-from consult.replies import ProposedTheme, parse_condensation, parse_themes
+from consult.prompts import PromptAnswer, condense_prompt, find_themes_prompt, map_themes_prompt
+from consult.replies import ProposedTheme, parse_assignments, parse_condensation, parse_themes
 
 # About fifty distinct answers a batch (docs/02, step 6), under a token cap
 # that keeps a batch of long answers within what docs/05 budgets for a call:
@@ -32,6 +32,12 @@ TOKEN_CAP = 7_500
 CHARS_PER_TOKEN = 4
 # Condense to about thirty, cap seventy (docs/02, step 6).
 SHORTLIST_CAP = 70
+# The preview: a stratified sample of 200 answers mapped in batches of ten,
+# the mapping shape (docs/02, steps 6 and 9), and three quotes a theme for
+# the sign-off screen (docs/04, theme_example).
+SAMPLE_SIZE = 200
+PREVIEW_BATCH_SIZE = 10
+EXAMPLES_PER_THEME = 3
 
 
 @dataclass(frozen=True)
@@ -333,3 +339,142 @@ def condense(
         tokens_out=completion.tokens_out,
     )
     return len(shortlist)
+
+
+def stratified_sample(
+    strata: dict[str | None, list[PromptAnswer]], *, size: int, seed: int
+) -> dict[str | None, list[PromptAnswer]]:
+    """Up to `size` answers, allocated to each stratum in proportion to its
+    share, every non-empty stratum getting at least one while the size
+    allows, drawn with the seed so a takeover draws the same sample.
+    Everyone, in stratum order, when the size covers them all."""
+    total = sum(len(answers) for answers in strata.values())
+    if total <= size:
+        return {related: list(answers) for related, answers in strata.items()}
+    ordered = sorted(strata, key=lambda r: (r is None, r or ""))
+    # Largest-remainder allocation: floors first, then the leftovers to the
+    # strata with the largest fractional parts, so the shares add up.
+    shares = {r: len(strata[r]) * size / total for r in ordered}
+    counts = {r: max(1, int(shares[r])) if strata[r] else 0 for r in ordered}
+    leftover = size - sum(counts.values())
+    for related in sorted(ordered, key=lambda r: shares[r] - int(shares[r]), reverse=True):
+        if leftover <= 0:
+            break
+        if counts[related] < len(strata[related]):
+            counts[related] += 1
+            leftover -= 1
+    while leftover < 0:
+        biggest = max(ordered, key=lambda r: counts[r])
+        counts[biggest] -= 1
+        leftover += 1
+    rng = random.Random(seed)  # noqa: S311
+    sample: dict[str | None, list[PromptAnswer]] = {}
+    for related in ordered:
+        answers = list(strata[related])
+        rng.shuffle(answers)
+        sample[related] = sorted(answers[: counts[related]], key=lambda a: a.id)
+    return sample
+
+
+def _shortlist(conn: psycopg.Connection[DictRow], version_id: UUID) -> list[DictRow]:
+    return conn.execute(
+        """
+        SELECT id, key, label, description FROM theme
+         WHERE theme_set_version_id = %s AND NOT is_longlist ORDER BY key
+        """,
+        (version_id,),
+    ).fetchall()
+
+
+def preview(
+    conn: psycopg.Connection[DictRow],
+    llm: LLM,
+    lease: Lease,
+    job: FindThemesJob,
+    version_id: UUID,
+    *,
+    generated: int,
+    sample_size: int = SAMPLE_SIZE,
+    after_batch: Callable[[int], None] | None = None,
+) -> int:
+    """Step 6's preview: the shortlist mapped over a stratified sample in
+    batches of ten, so every candidate gets a count and quotes before a
+    reviewer sees it. Batches are numbered on from the condense checkpoint
+    and skipped when already checkpointed, and the counts are added per
+    batch in the same transaction as its checkpoint, so a takeover can't
+    count a batch twice. Returns the answers previewed by this call."""
+    strata: dict[str | None, list[PromptAnswer]] = {}
+    for answer_id, text, related in distinct_answers(conn, job.question_id):
+        strata.setdefault(related, []).append(PromptAnswer(answer_id, text))
+    sample = stratified_sample(strata, size=sample_size, seed=job.seed)
+    shortlist = _shortlist(conn, version_id)
+    themes = [(str(t["key"]), str(t["label"]), t["description"]) for t in shortlist]
+    theme_ids = {str(t["key"]): t["id"] for t in shortlist}
+    start = jobs.next_batch_no(conn, lease.job_id)
+    # Every shortlist theme gets a count before any batch runs, zero
+    # included, so the screen reads "0" and not "unknown" for a theme the
+    # sample never picks. Idempotent, so a takeover doing it again is fine.
+    jobs.heartbeat(conn, lease)
+    conn.execute(
+        """
+        UPDATE theme SET preview_count = coalesce(preview_count, 0)
+         WHERE theme_set_version_id = %s AND NOT is_longlist
+        """,
+        (version_id,),
+    )
+    batch_no = generated + 1  # the condense checkpoint
+    previewed = 0
+    for related in sorted(sample, key=lambda r: (r is None, r or "")):
+        answers = sample[related]
+        for offset in range(0, len(answers), PREVIEW_BATCH_SIZE):
+            batch_no += 1
+            chunk = answers[offset : offset + PREVIEW_BATCH_SIZE]
+            if batch_no < start:
+                continue
+            prompt = map_themes_prompt(
+                model_alias=job.model_alias,
+                question_text=job.question_text,
+                related_answer=related,
+                themes=themes,
+                answers=chunk,
+            )
+            completion = llm.complete(prompt)
+            assignments = parse_assignments(completion, prompt)
+            jobs.heartbeat(conn, lease)
+            for assignment in assignments:
+                for key in assignment.theme_keys:
+                    _count_and_quote(conn, theme_ids[key], assignment.answer_id)
+            jobs.checkpoint(
+                conn,
+                lease,
+                batch_no=batch_no,
+                stage="preview",
+                answer_ids=[a.id for a in chunk],
+                trace_id=completion.trace_id,
+                tokens_in=completion.tokens_in,
+                tokens_out=completion.tokens_out,
+            )
+            previewed += len(chunk)
+            if after_batch is not None:
+                after_batch(batch_no)
+    return previewed
+
+
+def _count_and_quote(conn: psycopg.Connection[DictRow], theme_id: UUID, answer_id: int) -> None:
+    conn.execute(
+        "UPDATE theme SET preview_count = coalesce(preview_count, 0) + 1 WHERE id = %s", (theme_id,)
+    )
+    # Up to three quotes a theme, ranked in the order the preview met them;
+    # one row per answer per theme however often a batch is replayed.
+    conn.execute(
+        """
+        INSERT INTO theme_example (department_id, theme_id, answer_id, rank)
+        SELECT t.department_id, t.id, %(answer)s,
+               (SELECT count(*) + 1 FROM theme_example WHERE theme_id = t.id)
+          FROM theme t
+         WHERE t.id = %(theme)s
+           AND (SELECT count(*) FROM theme_example WHERE theme_id = t.id) < %(cap)s
+        ON CONFLICT (theme_id, answer_id) DO NOTHING
+        """,
+        {"answer": answer_id, "theme": theme_id, "cap": EXAMPLES_PER_THEME},
+    )

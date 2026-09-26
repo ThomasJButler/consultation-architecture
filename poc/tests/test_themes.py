@@ -297,7 +297,7 @@ def test_the_sample_is_stratified_by_the_related_answer() -> None:
     # Proportional to each stratum, every non-empty stratum represented,
     # the same draw from the same seed, and everyone when there are fewer
     # answers than the sample asks for (docs/02, step 6: 200 answers).
-    strata = {
+    strata: dict[str | None, list[PromptAnswer]] = {
         "Support": [PromptAnswer(n, f"s{n}") for n in range(100)],
         "Oppose": [PromptAnswer(n, f"o{n}") for n in range(100, 150)],
         None: [PromptAnswer(n, f"n{n}") for n in range(150, 200)],
@@ -307,9 +307,15 @@ def test_the_sample_is_stratified_by_the_related_answer() -> None:
     assert all(a in strata[k] for k, v in drawn.items() for a in v)
     assert stratified_sample(strata, size=20, seed=7) == drawn
     assert stratified_sample(strata, size=20, seed=8) != drawn
-    small = {"Support": strata["Support"][:3], None: strata[None][:2]}
+    small: dict[str | None, list[PromptAnswer]] = {
+        "Support": strata["Support"][:3],
+        None: strata[None][:2],
+    }
     assert stratified_sample(small, size=200, seed=7) == small
-    tiny = {"A": strata["Support"][:50], "B": strata["Oppose"][:1]}
+    tiny: dict[str | None, list[PromptAnswer]] = {
+        "A": strata["Support"][:50],
+        "B": strata["Oppose"][:1],
+    }
     assert {k: len(v) for k, v in stratified_sample(tiny, size=5, seed=1).items()} == {
         "A": 4,
         "B": 1,
