@@ -47,7 +47,7 @@ from consult.worker import (
     record_gateway_failure,
     run_once,
 )
-from tests.fakes import FakeLLM, RecordingLLM
+from tests.fakes import FakeLLM, Fault, RecordingLLM
 from tests.pipeline import dispatched_fixture, signed_off_fixture
 
 pytestmark = pytest.mark.db
@@ -401,3 +401,147 @@ def test_the_worker_claims_the_oldest_job_and_runs_it_by_kind(
         _consultation(db, c) == {"status": "awaiting_review", "analysis_ready": 0} for c in raced
     )
     assert waits == []
+
+
+# The other three failure branches of `worker.run_once`, each a code and
+# never a message (CLAUDE.md, rule 8). The message strings are distinctive
+# so they can't turn up anywhere this test looks by accident.
+CRASH_MESSAGE = "crashed while reading: The towpath floods every winter"
+
+
+class _Crashing:
+    """A model that raises something that isn't a reply error or a gateway
+    error: the worker's catch-all branch, `worker_error`."""
+
+    prompts: list[Prompt]
+
+    def __init__(self) -> None:
+        self.prompts = []
+
+    def complete(self, prompt: Prompt) -> Completion:
+        self.prompts.append(prompt)
+        raise RuntimeError(CRASH_MESSAGE)
+
+
+class _Thief:
+    """A model that, before answering well, has a second worker take the
+    lease over on its own connection: the reply is fine, and the checkpoint
+    that follows it meets a stale fence (ADR-002's zombie)."""
+
+    def __init__(self, settings: Settings, llm: LLM) -> None:
+        self.settings = settings
+        self.llm = llm
+        self.stolen: UUID | None = None
+
+    def complete(self, prompt: Prompt) -> Completion:
+        if self.stolen is None:
+            with store.connect(self.settings) as other:
+                held = other.execute(
+                    "SELECT id FROM job WHERE status = 'running' AND claimed_by = 'w1'"
+                ).fetchone()
+                assert held is not None
+                other.execute(
+                    "UPDATE job SET heartbeat_at = now() - %s WHERE id = %s", (STALE, held["id"])
+                )
+                assert claim(other, held["id"], "thief") is not None
+                other.commit()
+                self.stolen = held["id"]
+        return self.llm.complete(prompt)
+
+
+def test_the_worker_records_a_refused_reply_a_lost_lease_and_a_crash_as_codes(
+    db: psycopg.Connection[DictRow], db_settings: Settings
+) -> None:
+    # Two find_themes jobs queued by ingest, then a map_themes job queued by
+    # sign-off on a second consultation: the worker takes them oldest first,
+    # so each run below gets the job its fake is scripted for.
+    consultation_id = dispatched_fixture(db, db_settings)
+    first, second = (row["id"] for row in _by_id(db, consultation_id, "find_themes"))
+    signed = signed_off_fixture(db)
+    db.commit()
+
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(Formatter())
+    root = logging.getLogger()
+    root.addHandler(handler)
+    previous_level = root.level
+    root.setLevel(logging.INFO)
+    # Read right after each run_once, before any query of the test's own
+    # opens a transaction that would mask what the call itself left behind.
+    statuses: list[TransactionStatus] = []
+    try:
+        # A reply the two-way check refuses on a find job, where there is no
+        # retry at size one: the job goes to failed_retryable with the
+        # check's code (docs/02, step 6; replies.py).
+        refused = run_once(db, FakeLLM([Fault.PROSE]), worker="w1")
+        statuses.append(db.info.transaction_status)
+        # A lease another worker took over mid-run: nothing of this run is
+        # written, and the code is lease_lost (docs/02, step 5).
+        thief = _Thief(db_settings, RecordingLLM())
+        lost = run_once(db, thief, worker="w1")
+        statuses.append(db.info.transaction_status)
+        # Anything else: worker_error, with the class in the log and the
+        # message nowhere (THREAT_MODEL.md, section 2).
+        crashed = run_once(db, _Crashing(), worker="w1")
+        statuses.append(db.info.transaction_status)
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(previous_level)
+
+    assert refused == Outcome(
+        first, "find_themes", "failed_retryable", 1, ErrorCode.MODEL_OUTPUT_INVALID
+    )
+    assert lost == Outcome(second, "find_themes", "running", 1, ErrorCode.LEASE_LOST)
+    assert thief.stolen == second
+    assert crashed == Outcome(
+        signed.job_id, "map_themes", "failed_retryable", 1, ErrorCode.WORKER_ERROR
+    )
+
+    rows = {
+        row["id"]: row
+        for row in db.execute(
+            "SELECT id, status, attempts, claimed_by, error_code, provider_request_id FROM job"
+            " WHERE id = ANY(%s)",
+            ([first, second, signed.job_id],),
+        ).fetchall()
+    }
+    assert rows[first] == {
+        "id": first,
+        "status": "failed_retryable",
+        "attempts": 1,
+        "claimed_by": "w1",
+        "error_code": "model_output_invalid",
+        "provider_request_id": None,
+    }
+    # The thief holds the lease at the second attempt; the zombie's run left
+    # no checkpoint and no failure record behind (ADR-002).
+    assert rows[second] == {
+        "id": second,
+        "status": "running",
+        "attempts": 2,
+        "claimed_by": "thief",
+        "error_code": None,
+        "provider_request_id": None,
+    }
+    assert _stages(db, second) == set()
+    assert rows[signed.job_id] == {
+        "id": signed.job_id,
+        "status": "failed_retryable",
+        "attempts": 1,
+        "claimed_by": "w1",
+        "error_code": "worker_error",
+        "provider_request_id": None,
+    }
+    # The connection comes back with nothing open, whichever branch ran.
+    assert statuses == [TransactionStatus.IDLE] * 3
+
+    output = stream.getvalue()
+    assert CRASH_MESSAGE not in output and "towpath" not in output
+    assert "error_code=model_output_invalid" in output
+    assert "error_code=lease_lost" in output
+    assert "error_code=worker_error" in output
+    assert "exception=RuntimeError" in output
+    for job_id in (first, second, signed.job_id):
+        assert f"job_id={job_id}" in output
+    assert CRASH_MESSAGE not in " ".join(str(v) for row in rows.values() for v in row.values())
