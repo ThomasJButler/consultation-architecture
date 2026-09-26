@@ -21,15 +21,20 @@ from psycopg.rows import DictRow
 
 from consult.ingest import ingest
 from consult.jobs import claim
-from consult.prompts import DATA_PREAMBLE
+from consult.prompts import DATA_PREAMBLE, PromptAnswer
 from consult.themes import (
     BATCH_SIZE,
+    EXAMPLES_PER_THEME,
+    PREVIEW_BATCH_SIZE,
+    SAMPLE_SIZE,
     SHORTLIST_CAP,
     batches,
     condense,
     ensure_version,
     generate,
     load_job,
+    preview,
+    stratified_sample,
 )
 from tests.fakes import RecordingLLM
 from tests.pipeline import NOT_ANSWERED, Staged, fixture_rows, staged_fixture
@@ -286,3 +291,108 @@ def test_condense_caps_the_shortlist_and_keeps_lineage(db: psycopg.Connection[Di
     assert dropped and {r["lineage_theme_id"] for r in dropped} == {None}
     kept = [r for r in rows if r["is_longlist"] and not r["key"].startswith("SAFETY_")]
     assert kept and None not in {r["lineage_theme_id"] for r in kept}
+
+
+def test_the_sample_is_stratified_by_the_related_answer() -> None:
+    # Proportional to each stratum, every non-empty stratum represented,
+    # the same draw from the same seed, and everyone when there are fewer
+    # answers than the sample asks for (docs/02, step 6: 200 answers).
+    strata = {
+        "Support": [PromptAnswer(n, f"s{n}") for n in range(100)],
+        "Oppose": [PromptAnswer(n, f"o{n}") for n in range(100, 150)],
+        None: [PromptAnswer(n, f"n{n}") for n in range(150, 200)],
+    }
+    drawn = stratified_sample(strata, size=20, seed=7)
+    assert {k: len(v) for k, v in drawn.items()} == {"Support": 10, "Oppose": 5, None: 5}
+    assert all(a in strata[k] for k, v in drawn.items() for a in v)
+    assert stratified_sample(strata, size=20, seed=7) == drawn
+    assert stratified_sample(strata, size=20, seed=8) != drawn
+    small = {"Support": strata["Support"][:3], None: strata[None][:2]}
+    assert stratified_sample(small, size=200, seed=7) == small
+    tiny = {"A": strata["Support"][:50], "B": strata["Oppose"][:1]}
+    assert {k: len(v) for k, v in stratified_sample(tiny, size=5, seed=1).items()} == {
+        "A": 4,
+        "B": 1,
+    }
+
+
+def test_preview_gives_every_candidate_a_count_and_quotes(db: psycopg.Connection[DictRow]) -> None:
+    staged = staged_fixture(db)
+    ingest(db, staged.consultation_id)
+    job_id = queued_find_themes_job(db, staged, "o_reason")
+    job = load_job(db, job_id)
+    lease = claim(db, job_id, "worker-1")
+    assert lease is not None
+    version_id = ensure_version(db, lease, job.question_id)
+    llm = RecordingLLM()
+    plan = batches(db, job.question_id, seed=job.seed)
+    generated = generate(db, llm, lease, job, version_id, plan)
+    assert condense(db, llm, lease, job, version_id, generated=generated) == 3
+    distinct = len(distinct_reasons())
+    assert distinct < SAMPLE_SIZE == 200, (
+        "fewer distinct answers than the sample, so everyone is in"
+    )
+    calls_before = len(llm.prompts)
+
+    # The first worker previews two batches and dies; the second finishes.
+    with pytest.raises(WorkerCrashError):
+        preview(db, llm, lease, job, version_id, generated=generated, after_batch=crash_after(2))
+    db.execute(
+        "UPDATE job SET heartbeat_at = now() - interval '11 minutes' WHERE id = %s", (job_id,)
+    )
+    second = claim(db, job_id, "worker-2")
+    assert second is not None
+    llm2 = RecordingLLM()
+    previewed = preview(db, llm2, second, job, version_id, generated=generated)
+
+    prompts = llm.prompts[calls_before:] + llm2.prompts
+    per_partition = Counter(related for _no, _text, related in distinct_reasons())
+    assert PREVIEW_BATCH_SIZE == 10
+    assert len(prompts) == sum(-(-count // 10) for count in per_partition.values())
+    # Every preview call maps at most ten answers against the shortlist enum
+    # (docs/02, step 9's shape; docs/06, section 2.2), placeholder filled.
+    assert all(len(p.answer_ids) <= 10 for p in prompts)
+    assert {p.theme_keys for p in prompts} == {("ACCESS", "PARKING", "SAFETY")}
+    seen = sorted(answer_id for p in prompts for answer_id in p.answer_ids)
+    assert seen == sorted(a.id for b in plan for a in b.answers)
+    assert previewed + 20 == distinct or previewed == distinct - sum(
+        len(p.answer_ids) for p in llm.prompts[calls_before:]
+    )
+    # The fake labels every answer with the first key, so ACCESS carries
+    # the whole sample and the other two carry zero rather than nothing.
+    counts = db.execute(
+        "SELECT key, preview_count FROM theme WHERE theme_set_version_id = %s AND NOT is_longlist ORDER BY key",
+        (version_id,),
+    ).fetchall()
+    assert [(c["key"], c["preview_count"]) for c in counts] == [
+        ("ACCESS", distinct),
+        ("PARKING", 0),
+        ("SAFETY", 0),
+    ]
+    examples = db.execute(
+        """
+        SELECT t.key, e.rank, e.answer_id FROM theme_example e JOIN theme t ON t.id = e.theme_id
+         WHERE t.theme_set_version_id = %s ORDER BY t.key, e.rank
+        """,
+        (version_id,),
+    ).fetchall()
+    assert EXAMPLES_PER_THEME == 3
+    assert [(e["key"], e["rank"]) for e in examples] == [
+        ("ACCESS", 1),
+        ("ACCESS", 2),
+        ("ACCESS", 3),
+    ]
+    assert {e["answer_id"] for e in examples} <= set(seen)
+    # One checkpoint per preview batch, numbered on from the condense one.
+    checkpoints = db.execute(
+        "SELECT batch_no, stage, answer_ids FROM job_batch WHERE job_id = %s ORDER BY batch_no",
+        (job_id,),
+    ).fetchall()
+    stages = [c["stage"] for c in checkpoints]
+    assert stages[: generated + 1] == ["generate"] * generated + ["condense"]
+    assert stages[generated + 1 :] == ["preview"] * len(prompts)
+    assert (
+        sorted(a for c in checkpoints if c["stage"] == "preview" for a in c["answer_ids"]) == seen
+    )
+    # And nothing counted twice across the takeover: the count is the sample.
+    assert sum(c["preview_count"] for c in counts) == distinct
