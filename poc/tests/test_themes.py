@@ -11,14 +11,18 @@ script, not from the code under test.
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Callable
+from uuid import UUID
 
 import psycopg
 import pytest
 from psycopg.rows import DictRow
 
 from consult.ingest import ingest
-from consult.themes import BATCH_SIZE, batches
-from tests.pipeline import NOT_ANSWERED, fixture_rows, staged_fixture
+from consult.jobs import claim
+from consult.themes import BATCH_SIZE, batches, ensure_version, generate, load_job
+from tests.fakes import RecordingLLM
+from tests.pipeline import NOT_ANSWERED, Staged, fixture_rows, staged_fixture
 
 pytestmark = pytest.mark.db
 
@@ -93,3 +97,108 @@ def test_generation_batches_distinct_answers_by_count_and_cap(
             sum(max(1, len(a.text) // 4) for a in batch.answers) <= 300 or len(batch.answers) == 1
         )
     assert sorted(a.id for b in capped for a in b.answers) == sorted(ids)
+
+
+class WorkerCrashError(Exception):
+    """A worker dying between batches."""
+
+
+def crash_after(batches_done: int) -> Callable[[int], None]:
+    def after_batch(batch_no: int) -> None:
+        if batch_no >= batches_done:
+            raise WorkerCrashError(batch_no)
+
+    return after_batch
+
+
+def queued_find_themes_job(
+    db: psycopg.Connection[DictRow], staged: Staged, column_ref: str
+) -> UUID:
+    """The job ingest inserted for the question, moved to queued by hand
+    (dispatch is PR-08's) with the alias and seed the runner will set."""
+    question_id = staged.configured.questions[column_ref]
+    row = db.execute(
+        """
+        UPDATE job SET status = 'queued', model_alias = 'fake-model', params = '{"seed": 7}'
+         WHERE question_id = %s AND kind = 'find_themes'
+        RETURNING id
+        """,
+        (question_id,),
+    ).fetchone()
+    assert row is not None
+    return UUID(str(row["id"]))
+
+
+def test_find_themes_checkpoints_every_batch_and_resumes(db: psycopg.Connection[DictRow]) -> None:
+    staged = staged_fixture(db)
+    ingest(db, staged.consultation_id)
+    job_id = queued_find_themes_job(db, staged, "o_reason")
+    job = load_job(db, job_id)
+    assert (job.model_alias, job.seed) == ("fake-model", 7)
+    plan = batches(db, job.question_id, seed=job.seed)
+    assert len(plan) == 4
+
+    # The first worker claims, runs two of the four batches and dies.
+    first = claim(db, job_id, "worker-1")
+    assert first is not None
+    version_id = ensure_version(db, first, job.question_id)
+    llm = RecordingLLM()
+    with pytest.raises(WorkerCrashError):
+        generate(db, llm, first, job, version_id, plan, after_batch=crash_after(2))
+    checkpoints = db.execute(
+        "SELECT batch_no, stage, answer_ids, status FROM job_batch WHERE job_id = %s ORDER BY batch_no",
+        (job_id,),
+    ).fetchall()
+    assert [(c["batch_no"], c["stage"], c["status"]) for c in checkpoints] == [
+        (1, "generate", "done"),
+        (2, "generate", "done"),
+    ]
+    assert [tuple(c["answer_ids"]) for c in checkpoints] == [
+        tuple(a.id for a in batch.answers) for batch in plan[:2]
+    ]
+    # Each prompt was the contract for its batch: the placeholder filled
+    # from the batch's related answer, or marked not answered.
+    for prompt, batch in zip(llm.prompts, plan[:2], strict=True):
+        assert (batch.related_answer or "(not answered)") in prompt.system
+        assert prompt.answer_ids == tuple(a.id for a in batch.answers)
+
+    # Ten minutes of silence, and a second worker takes over (ADR-002). It
+    # rebuilds the plan from the seed and the fake sees only the two
+    # batches the first worker never finished.
+    db.execute(
+        "UPDATE job SET heartbeat_at = now() - interval '11 minutes' WHERE id = %s", (job_id,)
+    )
+    second = claim(db, job_id, "worker-2")
+    assert second is not None and second.fence == 2
+    assert ensure_version(db, second, job.question_id) == version_id
+    llm2 = RecordingLLM()
+    generate(db, llm2, second, job, version_id, batches(db, job.question_id, seed=job.seed))
+    assert [p.answer_ids for p in llm2.prompts] == [
+        tuple(a.id for a in b.answers) for b in plan[2:]
+    ]
+    checkpoints = db.execute(
+        "SELECT batch_no, stage FROM job_batch WHERE job_id = %s ORDER BY batch_no", (job_id,)
+    ).fetchall()
+    assert [(c["batch_no"], c["stage"]) for c in checkpoints] == [
+        (n, "generate") for n in (1, 2, 3, 4)
+    ]
+
+    # Every batch's three candidates are in v1 as the longlist, each key
+    # once, and nothing is marked shortlist yet.
+    candidates = db.execute(
+        "SELECT key, is_longlist, lineage_theme_id FROM theme WHERE theme_set_version_id = %s ORDER BY key",
+        (version_id,),
+    ).fetchall()
+    assert len(candidates) == 12
+    assert {c["is_longlist"] for c in candidates} == {True}
+    assert {c["lineage_theme_id"] for c in candidates} == {None}
+    expected_keys = {
+        f"{stem}_{min(batch.answers, key=lambda a: a.id).id}"
+        for batch in plan
+        for stem in ("SAFETY", "PARKING", "ACCESS")
+    }
+    assert {c["key"] for c in candidates} == expected_keys
+    version = db.execute(
+        "SELECT version_no, status FROM theme_set_version WHERE id = %s", (version_id,)
+    ).fetchone()
+    assert version == {"version_no": 1, "status": "candidate"}
