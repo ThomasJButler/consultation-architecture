@@ -21,7 +21,7 @@ from psycopg.rows import DictRow
 from consult import reconciler, store
 from consult.config import Settings
 from consult.errors import ErrorCode
-from consult.jobs import claim, record_failure
+from consult.jobs import claim, heartbeat, record_failure
 from tests.rows import (
     make_consultation,
     make_department,
@@ -48,6 +48,9 @@ NOT_YET_DUE = timedelta(minutes=1)
 RELAY_LIMIT = 20
 OWED = 30
 RELAYS = 2
+# How long a pass may take before the test calls it stuck: the bound
+# test_fan_in_race.py gives its barrier.
+RETURNS_WITHIN_SECONDS = 30
 
 
 def _jobs(db: psycopg.Connection[DictRow], consultation_id: UUID) -> dict[UUID, DictRow]:
@@ -209,6 +212,60 @@ def test_recover_resends_a_stale_job_and_fails_it_at_five_attempts(
     assert reconciler.recover(db) == (0, 0)
     assert _jobs(db, consultation_id) == after
     assert _outbox(db, consultation_id) == outbox
+
+
+def test_recover_passes_over_a_job_row_a_paused_worker_holds(
+    db: psycopg.Connection[DictRow], db_settings: Settings
+) -> None:
+    # Two jobs whose leases went quiet eleven minutes back, as far as any
+    # other transaction can see. One worker has woken inside its batch
+    # transaction: its fenced heartbeat holds that job's row lock and it
+    # hasn't committed (a pause, a partition). The lock says the lease is
+    # live, so statement 2 leaves the row for a later pass, as a worker's
+    # pick SKIP LOCKs past it, and re-sends the other (docs/02, section 5
+    # and step 5). Waiting on it would stall every statement after this one
+    # for every consultation for as long as the worker stays paused.
+    consultation_id = make_consultation(db, make_department(db), status="processing")
+    q_held = make_open_question(db, consultation_id, "o_1", ordinal=1)
+    q_quiet = make_open_question(db, consultation_id, "o_2", ordinal=2)
+    held = make_queued_job(db, consultation_id, q_held)
+    paused = claim(db, held, "w-paused")
+    assert paused is not None
+    quiet = make_queued_job(db, consultation_id, q_quiet)
+    assert claim(db, quiet, "w-dead") is not None
+    for job_id in (held, quiet):
+        _age(db, job_id, attempts=1, sent_ago=SENT_BEFORE_THE_CLAIM, heartbeat_ago=STALE)
+    db.commit()
+    before = _jobs(db, consultation_id)
+    started = _now(db)
+
+    passes: list[tuple[int, int]] = []
+    first = threading.Thread(target=lambda: passes.append(reconciler.recover(db)))
+    with store.connect(db_settings) as holder:
+        heartbeat(holder, paused)
+        first.start()
+        first.join(timeout=RETURNS_WITHIN_SECONDS)
+        returned = not first.is_alive()
+        # The worker's transaction ends without a commit, as a crash ends
+        # it, which also lets a pass stuck behind the lock finish, so the
+        # test fails on the assertion below rather than hanging.
+        holder.rollback()
+    first.join(timeout=RETURNS_WITHIN_SECONDS)
+
+    assert returned
+    assert passes == [(1, 0)]
+    after = _jobs(db, consultation_id)
+    assert after[held] == before[held]
+    assert after[quiet]["sent_at"] >= started
+    assert after[quiet] == {**before[quiet], "sent_at": after[quiet]["sent_at"]}
+
+    # With the worker gone, the next pass re-sends the held job, and only it:
+    # the other's re-send opened a ten-minute window of its own.
+    assert reconciler.recover(db) == (1, 0)
+    again = _jobs(db, consultation_id)
+    assert again[held] == {**before[held], "sent_at": again[held]["sent_at"]}
+    assert again[held]["sent_at"] >= started
+    assert again[quiet] == after[quiet]
 
 
 def test_retry_returns_a_due_failure_to_pending_and_fails_the_fifth(
