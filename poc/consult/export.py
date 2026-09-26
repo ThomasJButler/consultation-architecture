@@ -41,7 +41,9 @@ _TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
 _PREFIX = "'"
 NO_ANSWER = "-"
 # docs/04 section 6's export query has no OFFSET; this is the page size
-# the cursor (the last id seen) is read in, looped until a page is short.
+# the cursor (the last id seen) is read in, looped until a page comes
+# back shorter than this, which stops the read without one further
+# round trip for an empty final page.
 _KEYSET_PAGE = 1000
 
 # openpyxl's own title setter (openpyxl.workbook.child.INVALID_TITLE_REGEX)
@@ -195,7 +197,8 @@ def _open_answers(
 ) -> dict[int, tuple[int | None, str | None]]:
     """docs/04 section 6's export keyset query, looped: no OFFSET, so the
     cursor is the last id seen and `answer_question_id_id` gives every
-    page an index scan rather than a re-sort."""
+    page an index scan rather than a re-sort. Stops on a short page
+    rather than reading on for an empty one."""
     by_respondent: dict[int, tuple[int | None, str | None]] = {}
     after = 0
     while True:
@@ -209,6 +212,8 @@ def _open_answers(
         for row in rows:
             by_respondent[row["respondent_id"]] = (row["id"], row["value_text"])
         after = rows[-1]["id"]
+        if len(rows) < _KEYSET_PAGE:
+            return by_respondent
 
 
 @dataclass(frozen=True)
