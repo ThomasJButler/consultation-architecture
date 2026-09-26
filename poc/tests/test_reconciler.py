@@ -51,6 +51,9 @@ OWED = 30
 RELAYS = 2
 # Enough rows for a send to come after a row's own commit twice over.
 SENDS = 3
+# More than one relay takes, so a relay that marked its whole take before
+# the first send would strand twenty and leave five.
+STRANDABLE = 25
 # How long a pass may take before the test calls it stuck: the bound
 # test_fan_in_race.py gives its barrier.
 RETURNS_WITHIN_SECONDS = 30
@@ -520,3 +523,38 @@ def test_the_relay_sends_with_no_transaction_open_and_commits_each_row(
     # At the nth send, the n rows before it are committed and nothing is open.
     assert seen == [(row_id, TransactionStatus.IDLE, owed[:n]) for n, row_id in enumerate(owed)]
     assert _sent(db) == owed
+
+
+class _SendFailedError(Exception):
+    """The stand-in send failing: Notify unreachable, or the process gone
+    in the middle of the call."""
+
+
+def test_a_relay_that_fails_at_its_first_send_strands_one_row_at_most(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    # ADR-006's relay marks a row sending, sends it and marks it sent, one
+    # row at a time, so a send that fails leaves the one row it was
+    # sending for the reference lookup and every other row pending for
+    # the next pass (the relay's own docstring). Nothing moves a row out
+    # of sending here (reconciler.py's module docstring), so a row put
+    # there before its own send is lost to every later pass.
+    consultation_id = make_consultation(db, make_department(db), status="processing")
+    for _ in range(STRANDABLE):
+        make_outbox_row(db, consultation_id)
+    db.commit()
+
+    def fails(_outbox_id: int) -> str:
+        raise _SendFailedError
+
+    with pytest.raises(_SendFailedError):
+        reconciler.relay(db, send=fails)
+    db.rollback()
+
+    counts = db.execute(
+        "SELECT status, count(*) AS n FROM notification_outbox GROUP BY status"
+    ).fetchall()
+    assert {row["status"]: row["n"] for row in counts} == {
+        "sending": 1,
+        "pending": STRANDABLE - 1,
+    }
