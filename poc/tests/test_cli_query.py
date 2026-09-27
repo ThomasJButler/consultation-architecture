@@ -19,7 +19,7 @@ import pytest
 from openpyxl import load_workbook
 from psycopg.rows import DictRow
 
-from consult import export, query
+from consult import export, query, store
 from consult.cli import main
 from consult.config import Settings
 from consult.store import PIPELINE_ROLE
@@ -320,6 +320,104 @@ def test_the_query_line_says_what_it_hides(
     out = capsys.readouterr().out
     assert f"question {reason_id}: of 221 respondents who answered" in out
     assert "hidden" not in out
+
+
+def test_the_query_commands_hidden_count_comes_from_one_snapshot(
+    db: psycopg.Connection[DictRow],
+    db_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_query` works out `hidden` from two `theme_table` calls with
+    `related_distribution` between them. A READ COMMITTED transaction
+    gives each of those three statements its own snapshot (Postgres
+    documentation, 13.2.1), so a tag retracted between the first call and
+    the third moves the count. `theme:ACCESS` makes the denominator
+    depend on the tag rather than only on the duplicate flag: the fake
+    tags every o_reason answer, canonical and duplicate alike, with the
+    shortlist's first key (the comment on test_the_query_and_export_commands,
+    above), so the hidden count under this filter is the same 147 as with
+    none (checked here, not assumed: test_query_db.py's own hand count is
+    for the unfiltered case).
+    """
+    ingested(db, db_settings)
+    for _ in range(2):
+        assert main(["worker", "--once", "--worker", "w1"], settings=db_settings) == 0
+    reviewer = str(uuid4())
+    open_ids = [
+        row["id"]
+        for row in db.execute(
+            "SELECT id FROM question WHERE kind = 'open' ORDER BY ordinal"
+        ).fetchall()
+    ]
+    for open_id in open_ids:
+        assert (
+            main(
+                ["sign-off", str(open_id), "--reviewer", reviewer, "--expect-version", "0"],
+                settings=db_settings,
+            )
+            == 0
+        )
+    for _ in range(2):
+        assert main(["worker", "--once", "--worker", "w1"], settings=db_settings) == 0
+    reason_row = db.execute("SELECT id FROM question WHERE column_ref = 'o_reason'").fetchone()
+    assert reason_row is not None
+    reason_id = reason_row["id"]
+
+    version_row = db.execute(
+        """
+        SELECT id FROM theme_set_version
+         WHERE question_id = %s AND status = 'signed_off'
+         ORDER BY version_no DESC LIMIT 1
+        """,
+        (reason_id,),
+    ).fetchone()
+    assert version_row is not None
+    version_id = version_row["id"]
+    retracted = [
+        row["answer_id"]
+        for row in db.execute(
+            """
+            SELECT at.answer_id FROM answer_theme at
+              JOIN theme t ON t.id = at.theme_id
+             WHERE at.theme_set_version_id = %s AND t.key = 'ACCESS'
+             LIMIT 10
+            """,
+            (version_id,),
+        ).fetchall()
+    ]
+    assert len(retracted) == 10
+
+    original = query.related_distribution
+
+    def retract_then_call(
+        conn: psycopg.Connection[DictRow],
+        question_id: UUID,
+        filter: query.Filter,
+        *,
+        department_id: UUID,
+    ) -> list[tuple[str, int]]:
+        # A tag batch, a retraction or a sign-off committed here, between
+        # the first theme_table call and the second, is what the finding
+        # reproduced: the second call sees it under READ COMMITTED and the
+        # first doesn't, so the printed count moves.
+        with store.connect(db_settings, autocommit=True) as second:
+            second.execute(
+                "UPDATE answer_theme SET retracted_at = now() WHERE answer_id = ANY(%s)",
+                (retracted,),
+            )
+        return original(conn, question_id, filter, department_id=department_id)
+
+    monkeypatch.setattr(query, "related_distribution", retract_then_call)
+    capsys.readouterr()
+
+    code = main(["query", str(reason_id), "--filter", "theme:ACCESS"], settings=db_settings)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert (
+        f"question {reason_id}: of 74 respondents who answered "
+        "(147 duplicate answers hidden; add --filter with=duplicates to count them)"
+    ) in out
 
 
 def test_export_refuses_its_own_error_and_names_truncated_cells(
