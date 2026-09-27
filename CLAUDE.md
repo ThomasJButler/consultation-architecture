@@ -85,4 +85,4 @@ sh scripts/brief-guard.sh --all       # what CI runs
 
 ## Status
 
-26 September 2026: PR-03 to PR-09 merged; PR-10, the submission finished, in review, with the owner's rewrite, PDF, merge and tag to come. See the Status block in `README.md`.
+27 September 2026: PR-03 to PR-10 merged; the submission bullets written from the evidence table and the PDF rebuilt. See the Status block in `README.md`.

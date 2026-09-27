@@ -41,7 +41,7 @@ The brief and the sample data for this task were shared in confidence and are
 marked OFFICIAL. They are not in this repository and never will be. Everything
 here is my own work or synthetic data in the same shape.
 
-## Status (26 September 2026)
+## Status (27 September 2026)
 
 Built: the plan, the scaffold, the design documents (brief, research,
 architecture, seven decision records, data model, cost model, security notes
@@ -97,13 +97,13 @@ respondents the planner takes the GIN index and probes the answer table
 by its unique key, with what that corrected in `docs/04`, `docs/05` and
 ADR-004 recorded as dated corrections. Two commands, `consult query` and
 `consult export`.
-In review: the submission, finished (PR-10): `TESTING.md` names a test for
+Merged: the submission, finished (PR-10): `TESTING.md` names a test for
 each of the four mechanics, pinned by a test that reads it; every design
 document carries a dated correction where the proof-of-concept found it
-otherwise; `poc/README.md` says only what is still unproved; and the
-evidence for every submission bullet is in the pull request for the
-owner's rewrite, which happens by hand before the PDF is rebuilt and
-`v1.0-submission` is tagged. Deliberately not built: see above.
+otherwise; `poc/README.md` says only what is still unproved; the
+evidence for every submission bullet is in the pull request, and the
+bullets are rewritten from it with the PDF rebuilt; rule 12 is pinned
+over the tracked text. Deliberately not built: see above.
 
 ## How it was built
 
