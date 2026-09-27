@@ -132,13 +132,20 @@ def as_role(conn: psycopg.Connection[DictRow], role: str) -> Iterator[None]:
     and a missing one shows as a permission error rather than nothing.
     RESET ROLE is skipped when the transaction has already failed, since
     it would fail too and hide the real error; the rollback ends the
-    transaction and the role with it.
+    transaction and the role with it. It's skipped too when the
+    connection itself is closed, `idle_in_transaction_session_timeout`
+    (`bound_idle_transactions`) having ended the whole session rather
+    than only the transaction (PostgreSQL 17 manual, 19.11.1): a closed
+    connection reports its transaction status as UNKNOWN, not INERROR, so
+    that check alone would still try RESET ROLE and raise "the connection
+    is closed" over whatever the caller's own block already raised or
+    returned.
     """
     conn.execute(sql.SQL("SET ROLE {}").format(sql.Identifier(role)))
     try:
         yield
     finally:
-        if conn.info.transaction_status != TransactionStatus.INERROR:
+        if not conn.closed and conn.info.transaction_status != TransactionStatus.INERROR:
             conn.execute("RESET ROLE")
 
 

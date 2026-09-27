@@ -667,22 +667,39 @@ def _worker(args: argparse.Namespace, settings: Settings) -> int:
     worker and not to this loop's own manual convenience (`_stop_flag`'s
     docstring). The loop isn't run by a test: real time isn't something a
     test should wait on, and `--once` is what `test_cli_worker.py` drives
-    instead."""
+    instead.
+
+    `idle_in_transaction_session_timeout` can end `run_once`'s own
+    connection rather than only the transaction it bounds
+    (`store.bound_idle_transactions`, `worker.run_once`'s docstring):
+    `run_once` already reports that as an `Outcome` instead of raising
+    (worker.py's module docstring), but `_print_outcome` still needs a
+    live connection to read the question and consultation back, so a
+    fresh one replaces the closed one before that call, and carries into
+    the loop's next iteration.
+    """
     llm = OfflineModel()
     name = _worker_name(args.worker)
-    with store.connect(settings) as conn:
+    conn = store.connect(settings)
+    try:
         if args.once:
             outcome = worker.run_once(conn, llm, worker=name)
+            if conn.closed:
+                conn = store.connect(settings)
             code = _print_outcome(conn, outcome)
             _log_outcome(outcome)
             return code
         stop = _stop_flag()
         while not stop.is_set():
             outcome = worker.run_once(conn, llm, worker=name)
+            if conn.closed:
+                conn = store.connect(settings)
             _print_outcome(conn, outcome)
             _log_outcome(outcome)
             if outcome is None:
                 stop.wait(args.poll_seconds)
+    finally:
+        conn.close()
     return 0
 
 
