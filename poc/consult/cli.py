@@ -727,37 +727,58 @@ def _query(args: argparse.Namespace, settings: Settings) -> int:
     The web app passes the signed-in user's; the command-line operator
     is trusted to name one with `--department`, and without it the
     command reads the question's own first, under the same role.
+
+    The theme table, the related distribution and the with-duplicates
+    theme table run in one REPEATABLE READ, read-only transaction, the
+    same reasoning as `export.write_workbook`'s own gather: three
+    statements under READ COMMITTED would each take their own snapshot
+    (Postgres documentation, 13.2.1), and `hidden`, below, is a
+    difference between two of them, so a tag batch, a retraction or a
+    sign-off committed between the calls would move it.
     """
     try:
         parsed = query.parse_filters(args.filter or [])
     except FilterError as exc:
         print(f"refused: {exc}")
         return 2
-    with store.connect(settings) as conn, as_role(conn, PIPELINE_ROLE):
-        try:
-            department_id = args.department or _question_department(conn, args.question)
-            query.check_filter_names(conn, args.question, parsed, department_id=department_id)
-            table = query.theme_table(conn, args.question, parsed, department_id=department_id)
-            distribution = query.related_distribution(
-                conn, args.question, parsed, department_id=department_id
-            )
-            # What with=duplicates would add: the same scope with the two
-            # IS NULL predicates dropped, less what the default scope
-            # already counts (docs/02 section 7, decision 9). Naming it is
-            # cli.py's half of the finding export.py's own summary line
-            # already carries.
-            shown = query.theme_table(
-                conn,
-                args.question,
-                replace(parsed, with_duplicates=True),
-                department_id=department_id,
-            )
-        except LookupError:
-            print(f"question {args.question}: not found")
-            return 1
-        except FilterError as exc:
-            print(f"refused: {exc}")
-            return 2
+    with store.connect(settings) as conn:
+        # One REPEATABLE READ, read-only snapshot for the reads below, the
+        # same fix export.write_workbook uses for its own gather: a READ
+        # COMMITTED transaction gives each statement its own snapshot
+        # (Postgres documentation, 13.2.1), so a tag batch, a retraction or
+        # a sign-off committed between the first theme_table call and the
+        # with-duplicates one would otherwise move the hidden count below.
+        # Set before as_role's SET ROLE, the first statement psycopg sends,
+        # so it applies to this transaction and not the next; the
+        # connection is this command's own, opened fresh above, so nothing
+        # needs restoring once it closes.
+        conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+        conn.read_only = True
+        with as_role(conn, PIPELINE_ROLE):
+            try:
+                department_id = args.department or _question_department(conn, args.question)
+                query.check_filter_names(conn, args.question, parsed, department_id=department_id)
+                table = query.theme_table(conn, args.question, parsed, department_id=department_id)
+                distribution = query.related_distribution(
+                    conn, args.question, parsed, department_id=department_id
+                )
+                # What with=duplicates would add: the same scope with the
+                # two IS NULL predicates dropped, less what the default
+                # scope already counts (docs/02 section 7, decision 9).
+                # Naming it is cli.py's half of the finding export.py's
+                # own summary line already carries.
+                shown = query.theme_table(
+                    conn,
+                    args.question,
+                    replace(parsed, with_duplicates=True),
+                    department_id=department_id,
+                )
+            except LookupError:
+                print(f"question {args.question}: not found")
+                return 1
+            except FilterError as exc:
+                print(f"refused: {exc}")
+                return 2
     hidden = shown.denominator - table.denominator
     logs.log_event(
         logger,
