@@ -274,9 +274,9 @@ def run_once(
     (`store.bound_idle_transactions`), so a worker paused inside one loses
     its job to a takeover (docs/02, step 5), and the bound commits with
     the claim. The same bound can end this worker's own session while
-    it's the one paused (`_run`'s module-level note on `_disconnected`);
-    `conn.closed` is checked before this function's own last commit too,
-    so that failure doesn't ride out as a second, unrelated exception.
+    it's the one paused (`_disconnected`'s own docstring); `conn.closed`
+    is checked before this function's own last commit too, so that
+    failure doesn't ride out as a second, unrelated exception.
     """
     started = time.monotonic()
     bound_idle_transactions(conn)
