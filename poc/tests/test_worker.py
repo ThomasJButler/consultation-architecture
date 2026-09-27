@@ -612,8 +612,10 @@ def test_a_paused_workers_job_is_taken_over(
 
         outcome = run_once(db, RecordingLLM(), worker="w-next")
 
-        # The paused worker, waking, finds its transaction gone: its
-        # heartbeat never commits, and the fence refuses what it tries next.
+        # The paused worker, waking, finds its own connection closed: the
+        # server ends the whole session on the bound, not just the
+        # transaction (PostgreSQL 17 manual, 19.11.1), so the heartbeat's
+        # commit fails on the dead connection and never reaches the fence.
         # Whether the client reads the server's own error or only the
         # closed socket, it's a psycopg error either way.
         with pytest.raises(psycopg.Error):
@@ -630,6 +632,73 @@ def test_a_paused_workers_job_is_taken_over(
         reconciler.reconcile(other, db_settings)
         shown = other.execute("SHOW idle_in_transaction_session_timeout").fetchone()
     assert shown == {"idle_in_transaction_session_timeout": IDLE_BOUND}
+
+
+def test_a_worker_cut_off_by_the_idle_bound_reports_it(
+    db: psycopg.Connection[DictRow], db_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`idle_in_transaction_session_timeout` ends the whole session, not
+    only the transaction (PostgreSQL 17 manual, 19.11.1): a worker paused
+    between its first checkpoint's own writes and the commit that follows
+    them wakes to a connection the server has already closed, and every
+    later interaction with it, `_record`'s own rollback included, raises
+    the same way. `run_once` is pinned to report that as an Outcome with
+    a code and one `job_failed` line rather than raising it (worker.py's
+    module docstring: one log line per job)."""
+    signed = signed_off_fixture(db)
+    db.commit()
+
+    # store.bound_idle_transactions's own default is five minutes
+    # (store.IDLE_IN_TRANSACTION_TIMEOUT), a default parameter bound at
+    # definition time, so it's the call `run_once` makes that's replaced
+    # here rather than the constant.
+    monkeypatch.setattr(
+        worker_module,
+        "bound_idle_transactions",
+        lambda conn: store.bound_idle_transactions(conn, timedelta(seconds=1)),
+    )
+
+    conn = store.connect(db_settings)
+    real_commit = conn.commit
+    commits = {"n": 0}
+
+    def pausing_commit() -> None:
+        commits["n"] += 1
+        if commits["n"] == 3:
+            # Commit 1 is the claim's; commit 2 is start_map_themes and
+            # the opening heartbeat, ahead of the first model call; commit
+            # 3 is the first batch's tags and checkpoint, after_batch's
+            # own commit (mapping.assign; mapping._send). Long enough past
+            # the one-second bound for the server to have ended the
+            # session before this reaches it.
+            time.sleep(1.5)
+        real_commit()
+
+    monkeypatch.setattr(conn, "commit", pausing_commit)
+
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(Formatter())
+    root = logging.getLogger()
+    root.addHandler(handler)
+    previous_level = root.level
+    root.setLevel(logging.INFO)
+    try:
+        outcome = run_once(conn, RecordingLLM(), worker="w-cut-off")
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(previous_level)
+        conn.close()
+
+    # Nothing of the run is written (the server rolled the open
+    # transaction back with the session), so the job's status is exactly
+    # what claim left it: running, at its first attempt.
+    assert outcome == Outcome(signed.job_id, "map_themes", "running", 1, ErrorCode.LEASE_LOST)
+    assert conn.closed
+    output = stream.getvalue()
+    assert output.count("job_failed") == 1
+    assert "error_code=lease_lost" in output
+    assert f"job_id={signed.job_id}" in output
 
 
 def test_a_takeover_with_nothing_left_does_not_deadlock_the_reconciler(
