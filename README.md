@@ -123,8 +123,10 @@ branch or kept with a reason. What each review found, and what I did about
 it, is in `docs/07-reviews.md`, one row per pull request, complete to
 row 10, the last being the round on the pull request that finished the
 repository.
-I used Claude throughout, to research, to stress-test alternatives and to
-draft; the decisions are mine.
+I used Claude throughout: to research, to stress-test alternatives, to draft
+the diagrams and, under the rules in `CLAUDE.md` and my review pass before
+every merge, to write most of the proof-of-concept's code and tests. The
+choices are mine.
 
 ## Licence
 
