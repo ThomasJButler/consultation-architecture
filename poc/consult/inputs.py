@@ -38,6 +38,9 @@ class Refusal(StrEnum):
     UNREADABLE = "unreadable"
     NOT_FOUND = "not_found"
     TOO_MANY_COLUMNS = "too_many_columns"
+    RESERVED_HEADER = "reserved_header"
+    NUL_CHARACTER = "nul_character"
+    UNNAMED_COLUMN = "unnamed_column"
 
 
 @dataclass(frozen=True)
@@ -45,18 +48,28 @@ class Caps:
     """The limits, with defaults that admit the largest consultations docs/02
     section 1 assumes (over 100,000 responses) and refuse the absurd.
 
-    The cell and column defaults are Excel's own limits, 32,767 characters
-    and 16,384 columns (Microsoft Support, "Excel specifications and
-    limits", checked 25 September 2026; the row is in docs/01), so a file
-    Excel itself saved is never refused on either. docs/01 records single
-    answers of 4,000 words, which a lower cell cap would have turned away.
+    The cell default is Excel's own limit, 32,767 characters (Microsoft
+    Support, "Excel specifications and limits", checked 25 September 2026;
+    the row is in docs/01), so a file Excel itself saved is never refused
+    on it. docs/01 records single answers of 4,000 words, which a lower
+    cell cap would have turned away.
+
+    The column default is the staging table's, not Excel's 16,384: every
+    header becomes a text column beside stage's row_no, and a Postgres
+    table takes 1,600 columns (TooManyColumns at 1,601 on the local
+    Postgres 16, 26 September 2026). validate.check_stageable_header holds
+    the same line whatever this cap is set to. A wide file of short cells
+    meets the row-size limit first: 750 cells of ten characters made a
+    row of 8,280 bytes against a maximum of 8,160, which COPY refused as
+    too big, naming sizes and no value (measured on the local Postgres
+    16.13, 26 September 2026; nothing refuses it earlier yet).
     """
 
     max_upload_bytes: int = 200 * 1024 * 1024
     max_rows: int = 250_000
     max_cell_chars: int = 32_767
     max_zip_ratio: int = 100
-    max_columns: int = 16_384
+    max_columns: int = 1_599
 
 
 DEFAULT_CAPS = Caps()

@@ -14,26 +14,30 @@ What a cell means: `-` or blank is not answered for every kind of question;
 `N/A` is a real value on a demographic or closed column (kept unless the
 configure step says otherwise) and not answered on an open one. A
 multi-select cell is tokenised against the option vocabulary, never split
-on commas (consult.tokenise). Two options that never appear apart are the
-tell-tale of an option containing a comma that the workbook split in two
-(docs/00), and get their own warning with the resolution to merge them.
+on commas (consult.tokenise). Adjacent options that never appear apart are
+the tell-tale of an option containing a comma that the workbook split
+(docs/00), and each run of them gets one warning, naming the label it
+spells, with the resolution to merge them.
 
 The report carries column names, counts, row numbers and the distinct
 values of demographic and closed columns. It never carries an open answer.
+What the staging table can't hold at all (a header named row_no, a NUL, more
+columns than a Postgres table takes) isn't reported but refused, as an
+InputError with a code and a count, the way the reader refuses a hostile file.
 """
 
 from __future__ import annotations
 
 import re
 from collections import Counter, defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from itertools import pairwise
 
 from consult.cost import DEFAULT_RATES, Estimate, Rates, estimate
-from consult.definition import ClosedQuestion, Definition, ResponseType
-from consult.responses import Responses
+from consult.definition import ClosedQuestion, Definition, ResponseType, spelt_by
+from consult.inputs import InputError, Refusal
+from consult.responses import Responses, Row
 from consult.tokenise import tokenise
 
 NO_ANSWER = "-"
@@ -82,6 +86,13 @@ ROLE_RESOLUTIONS = (Resolution.ROLE_RESPONDENT_ID, Resolution.ROLE_IDENTITY, Res
 # checked 26 September 2026), so a longer header would silently lose its
 # column between COPY and ingest. It blocks here, before spend.
 MAX_HEADER_BYTES = 63
+# The staging table's own column (consult.stage), so no header may take it.
+ROW_NO = "row_no"
+# A Postgres table takes 1,600 columns and the staging table spends one on
+# row_no (TooManyColumns at 1,601 on the local Postgres 16, 26 September
+# 2026). Caps.max_columns defaults to the same, but it's a setting.
+MAX_COLUMNS = 1_599
+NUL = "\x00"
 DUPLICATE_ID_RESOLUTIONS = (Resolution.IGNORE_COLUMN, Resolution.KEEP_FIRST_BLANK_REST)
 
 # Header words that say what an unmatched column is (docs/02, section 3.2:
@@ -155,6 +166,29 @@ class _Tally:
             self.unknown_rows[value].append(row_no)
 
 
+def check_stageable_header(header: Sequence[str]) -> None:
+    """Refuse a header the staging table can't hold, by a code and a count
+    and never the name: more columns than the table takes, stage's own
+    row_no, or a NUL, where libpq ends an identifier, so "notes<NUL>x" and
+    "notes<NUL>y" would both name "notes". The count is the width, the
+    column's position, or row 1. stage() runs the same check as its
+    backstop."""
+    if len(header) > MAX_COLUMNS:
+        raise InputError(Refusal.TOO_MANY_COLUMNS, len(header))
+    for position, name in enumerate(header, start=1):
+        if name == ROW_NO:
+            raise InputError(Refusal.RESERVED_HEADER, position)
+        if NUL in name:
+            raise InputError(Refusal.NUL_CHARACTER, 1)
+
+
+def check_stageable_row(row: Row) -> None:
+    """Refuse a NUL in a cell by the row's number: Postgres text can't store
+    one, and psycopg refuses the row with a DataError at COPY."""
+    if any(NUL in cell for cell in row.cells.values()):
+        raise InputError(Refusal.NUL_CHARACTER, row.no)
+
+
 def _sorted_values(counter: Counter[str]) -> tuple[tuple[str, int], ...]:
     return tuple(sorted(counter.items(), key=lambda pair: (-pair[1], pair[0])))
 
@@ -168,32 +202,69 @@ def _count_closed(tally: _Tally, question: ClosedQuestion, cell: str, row_no: in
         for first, second in zip(tokenised.tokens, tokenised.tokens[1:], strict=False):
             tally.adjacent[first, second] += 1
         return
+    # Anything else is unknown until every row is counted, when
+    # _claim_whole_labels takes back the whole labels of comma options.
     if cell in question.options:
         tally.values[cell] += 1
     else:
         tally.note_unknown(cell, row_no)
 
 
+def _claim_whole_labels(tally: _Tally, options: tuple[str, ...]) -> None:
+    """A single-select or likert cell is the chosen option written whole,
+    so an option with a comma arrives as one value that a run of its split
+    pieces spells (docs/00). Such a value is counted as that label, and
+    _never_apart offers the merge, only when no piece was ever chosen
+    alone: pieces chosen alone are real options, and a cell naming two of
+    them is a stray answer that the default merge would fuse, blanking
+    every answer to either (194 of c_route's 240 on the fixture with one
+    "Support, Oppose" cell). A stray stays an unknown value."""
+    for value in list(tally.unknown):
+        run = spelt_by(value, options)
+        if run is not None and not any(tally.values[piece] for piece in options[run]):
+            tally.values[value] = tally.unknown.pop(value)
+            del tally.unknown_rows[value]
+
+
 def _never_apart(tally: _Tally, options: tuple[str, ...]) -> Iterable[Warning]:
-    # Only a pair that sits next to each other in the option list can be the
-    # two halves of one comma option (that's how split_options made them).
-    adjacent_in_definition = set(pairwise(options))
-    for (first, second), together in sorted(tally.adjacent.items()):
-        if (first, second) not in adjacent_in_definition:
-            continue
-        if together and tally.values[first] == together and tally.values[second] == together:
-            yield Warning(
-                WarningKind.OPTIONS_NEVER_APART,
-                "",
-                f"{first}, {second}",
-                together,
-                (),
-                (Resolution.MERGE_OPTIONS,),
-                Resolution.MERGE_OPTIONS,
-            )
+    # Only a pair that sits next to each other in the option list can be two
+    # pieces of one comma option (that's how split_options made them). A
+    # label with two commas is three pieces and two such pairs, so each
+    # maximal run of joined pairs is one option and gets one warning, named
+    # by the label the run spells.
+    joined = {
+        pair
+        for pair, together in tally.adjacent.items()
+        if together and tally.values[pair[0]] == together == tally.values[pair[1]]
+    }
+    runs: list[list[str]] = []
+    for index, option in enumerate(options):
+        if index and (options[index - 1], option) in joined:
+            runs[-1].append(option)
+        else:
+            runs.append([option])
+    labels = [(", ".join(run), tally.values[run[0]]) for run in runs if len(run) > 1]
+    # The whole labels a single-select or likert column counted
+    # (_claim_whole_labels); a multi-select column counts pieces, all options.
+    labels.extend(
+        (value, count)
+        for value, count in tally.values.items()
+        if value not in options and spelt_by(value, options) is not None
+    )
+    for label, count in labels:
+        yield Warning(
+            WarningKind.OPTIONS_NEVER_APART,
+            "",
+            label,
+            count,
+            (),
+            (Resolution.MERGE_OPTIONS,),
+            Resolution.MERGE_OPTIONS,
+        )
 
 
 def validate(definition: Definition, responses: Responses, rates: Rates = DEFAULT_RATES) -> Report:
+    check_stageable_header(responses.header)
     # Cells are keyed by header (consult.responses), so a repeated name
     # would lose a column without a trace and a blank one has no key at
     # all. Both block, and every column is described once, in file order.
@@ -241,6 +312,7 @@ def validate(definition: Definition, responses: Responses, rates: Rates = DEFAUL
     row_count = 0
     open_answers = 0
     for row in responses.rows():
+        check_stageable_row(row)
         row_count += 1
         for ref, cell in row.cells.items():
             if ref not in tallies:
@@ -270,6 +342,8 @@ def validate(definition: Definition, responses: Responses, rates: Rates = DEFAUL
     columns: list[ColumnSummary] = []
     for ref in header:
         tally = tallies[ref]
+        if ref in closed and closed[ref].response_type is not ResponseType.MULTI_SELECT:
+            _claim_whole_labels(tally, closed[ref].options)
         columns.append(
             ColumnSummary(
                 ref, tally.kind, tally.answered, tally.not_answered, _sorted_values(tally.values)

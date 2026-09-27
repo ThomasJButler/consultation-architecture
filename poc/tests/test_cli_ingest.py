@@ -15,14 +15,16 @@ from pathlib import Path
 
 import psycopg
 import pytest
-from psycopg.errors import UniqueViolation
+from psycopg.errors import LockNotAvailable, UniqueViolation
 from psycopg.rows import DictRow
 
-from consult import cli
+from consult import cli, store
 from consult.cli import main
 from consult.config import Settings
 from consult.configure import defaults
 from consult.inputs import Caps
+from consult.jobs import checkpoint, claim
+from tests.pipeline import dispatched_fixture
 from tests.test_definition import GOOD, write_workbook
 from tests.test_ingest import staging_tables, write_repeated_id_file
 
@@ -62,7 +64,7 @@ def test_the_ingest_command_runs_the_fixtures_end_to_end(
     for expected in (
         "240 rows staged",
         "240 respondents",
-        f"{written['answers']} answers",
+        f"{written['answers']} answer rows",
         "240 identity rows",
         f"{written['duplicate_answers']} duplicate answers",
         f"{written['duplicate_respondents']} duplicate respondents",
@@ -132,6 +134,49 @@ def test_a_department_name_names_one_department(
         "SELECT (SELECT count(*) FROM department) AS departments, (SELECT count(*) FROM consultation) AS consultations"
     ).fetchone()
     assert counts == {"departments": 1, "consultations": 2}
+
+
+def test_an_ingest_does_not_lock_the_department_against_its_workers(
+    db: psycopg.Connection[DictRow], db_settings: Settings
+) -> None:
+    # An ingest finds its department first and commits once, after stage,
+    # configure, ingest and dispatch, so whatever lock the find takes is
+    # held for the whole file. job_batch, answer_theme, theme,
+    # theme_example and notification_outbox all reference department, and
+    # each insert into one takes FOR KEY SHARE on the department row,
+    # which only FOR UPDATE blocks (PostgreSQL 17 manual, 13.3.2, the row
+    # lock conflict table). A worker's batch commits on its own (docs/02,
+    # step 5), so an ingest into the same department mustn't hold it up.
+    # The lock timeout turns a wait into an error the test can see, where
+    # without it the checkpoint would wait for the ingest to end.
+    consultation_id = dispatched_fixture(db, db_settings)
+    found = db.execute(
+        """
+        SELECT d.id, d.name, j.id AS job_id
+          FROM consultation c JOIN department d ON d.id = c.department_id
+          JOIN job j ON j.consultation_id = c.id AND j.kind = 'find_themes'
+         WHERE c.id = %s ORDER BY j.id LIMIT 1
+        """,
+        (consultation_id,),
+    ).fetchone()
+    assert found is not None
+    lease = claim(db, found["job_id"], "w1")
+    assert lease is not None
+    db.commit()
+
+    timed_out = False
+    with store.connect(db_settings) as ingesting, store.connect(db_settings) as worker:
+        # A second ingest into the same department, its transaction open.
+        assert cli._department(ingesting, found["name"]) == found["id"]
+        worker.execute("SET lock_timeout = '2s'")
+        try:
+            checkpoint(worker, lease, batch_no=1, stage="generate", answer_ids=[1])
+        except LockNotAvailable:
+            timed_out = True
+        worker.rollback()
+        ingesting.rollback()
+
+    assert not timed_out
 
 
 def test_a_refused_ingest_leaves_nothing_behind(

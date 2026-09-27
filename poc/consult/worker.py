@@ -25,7 +25,7 @@ reports it carries the same two fields and nothing else
 takes it, and the job runs by kind through `themes.run_find_themes` or
 `mapping.run_map_themes`, as the pipeline role, committing after every
 batch. A failure goes on the row as a code under the fence, in
-`cli._run_job`'s three patterns, and every job leaves one log line of
+`cli._run_job`'s four patterns, and every job leaves one log line of
 ids, counts, a status, a duration and a code.
 """
 
@@ -45,10 +45,10 @@ from psycopg.rows import DictRow
 
 from consult import jobs, logs, mapping, themes, transitions
 from consult.errors import ErrorCode
-from consult.jobs import STALE_AFTER, Lease, LeaseLostError
+from consult.jobs import MAX_ATTEMPTS, STALE_AFTER, Lease, LeaseLostError
 from consult.llm import LLM, Completion, GatewayError, Prompt
 from consult.replies import ReplyError
-from consult.store import PIPELINE_ROLE, as_role
+from consult.store import PIPELINE_ROLE, as_role, bound_idle_transactions
 
 logger = logging.getLogger(__name__)
 
@@ -56,9 +56,6 @@ logger = logging.getLogger(__name__)
 BACKOFF_BASE_SECONDS = 1
 BACKOFF_CAP_SECONDS = 60
 BACKOFF_ATTEMPTS = 6
-# ADR-002: "the retry budget is job.attempts < 5". A job at five is the
-# reconciler's to fail (docs/02, section 5), never a worker's to run.
-MAX_ATTEMPTS = 5
 
 # docs/02, section 9, and ADR-005 back off only on a 429 or a 5xx.
 # GATEWAY_REJECTED is any other 4xx, the request's own fault (errors.py),
@@ -168,7 +165,7 @@ def record_gateway_failure(
 
     A stale fence surfaces as `LeaseLostError`, left to propagate with its
     own code: `run_once` turns it into a code the way `cli._run_job`'s
-    three patterns do.
+    four patterns do.
     """
     conn.rollback()
     try:
@@ -272,8 +269,17 @@ def run_once(
     ahead of every attempt, and each batch commits in `after_batch`, so
     no call and no backoff sleep has a transaction open (module
     docstring). The connection comes back with none open either.
+
+    The connection's idle transactions are bounded under the lease first
+    (`store.bound_idle_transactions`), so a worker paused inside one loses
+    its job to a takeover (docs/02, step 5), and the bound commits with
+    the claim. The same bound can end this worker's own session while
+    it's the one paused (`_disconnected`'s own docstring); `conn.closed`
+    is checked before this function's own last commit too, so that
+    failure doesn't ride out as a second, unrelated exception.
     """
     started = time.monotonic()
+    bound_idle_transactions(conn)
     with as_role(conn, PIPELINE_ROLE):
         claimed = _claim(conn, worker, stale_after)
         conn.commit()
@@ -282,8 +288,10 @@ def run_once(
             if claimed is None
             else _run(conn, llm, *claimed, sleep=sleep, rng=rng, started=started)
         )
-    # RESET ROLE opens a transaction of its own.
-    conn.commit()
+    # RESET ROLE opens a transaction of its own, unless conn.closed already
+    # skipped it (as_role's own docstring).
+    if not conn.closed:
+        conn.commit()
     return outcome
 
 
@@ -330,6 +338,8 @@ def _run(
             before_finish=conn.commit,
         )
     except GatewayError as exc:
+        if conn.closed:
+            return _disconnected(lease, kind, started)
         conn.rollback()
         fields = _fields(conn, lease, kind, started)
         try:
@@ -340,6 +350,8 @@ def _run(
     except ReplyError as exc:
         return _record(conn, lease, kind, exc.code, started)
     except LeaseLostError as exc:
+        if conn.closed:
+            return _disconnected(lease, kind, started)
         conn.rollback()
         return _lost(conn, lease, kind, exc, _fields(conn, lease, kind, started))
     except Exception as exc:
@@ -383,7 +395,11 @@ def _record(
     """`cli._run_job`'s pattern for a failure the job can retry: the batch
     in flight rolled back, the code recorded under the fence and committed,
     then the log line, carrying `error`'s class when there is one. A fence
-    gone stale while recording comes out as its code."""
+    gone stale while recording comes out as its code. A closed connection
+    is left alone: `_disconnected` reports it instead, since the rollback
+    below and the read `_fields` makes would each raise on it in turn."""
+    if conn.closed:
+        return _disconnected(lease, kind, started)
     conn.rollback()
     fields = _fields(conn, lease, kind, started)
     try:
@@ -404,6 +420,33 @@ def _record(
         **fields,
     )
     return Outcome(lease.job_id, kind, "failed_retryable", lease.fence, code)
+
+
+def _disconnected(lease: Lease, kind: str, started: float) -> Outcome:
+    """`idle_in_transaction_session_timeout` (`store.bound_idle_transactions`)
+    ends the whole session, not only the transaction (PostgreSQL 17
+    manual, 19.11.1), so a worker paused past the bound wakes to a
+    connection the server has already closed: the write that found this
+    out raised, and a rollback or a read on the same connection would
+    raise the same way, so nothing here touches it again. Nothing of this
+    run is written either, the server having rolled the open transaction
+    back with the session, so the job's status is exactly what `claim`
+    last set it to, which is `lease.fence`'s own attempt: `LEASE_LOST` is
+    the nearest code in the fixed vocabulary (errors.py) to what actually
+    happened, since another worker hasn't necessarily taken the lease,
+    only ended this one's hold on it."""
+    logs.log_event(
+        logger,
+        "job_failed",
+        level=logging.WARNING,
+        job_id=lease.job_id,
+        attempts=lease.fence,
+        status="running",
+        error_code=ErrorCode.LEASE_LOST,
+        kind=kind,
+        duration_ms=round((time.monotonic() - started) * 1000),
+    )
+    return Outcome(lease.job_id, kind, "running", lease.fence, ErrorCode.LEASE_LOST)
 
 
 def _lost(

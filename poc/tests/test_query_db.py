@@ -9,7 +9,10 @@ test is `test_query.py`, which stays pure.
 
 from __future__ import annotations
 
+import csv
 import re
+from collections import Counter
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -19,10 +22,23 @@ from psycopg import sql
 from psycopg.rows import DictRow
 
 from consult import store
-from consult.query import AttrFilter, Filter, OtherFilter, related_distribution, scope, theme_table
+from consult.ingest import ingest
+from consult.query import (
+    AttrFilter,
+    Filter,
+    FilterCode,
+    FilterError,
+    OtherFilter,
+    check_filter_names,
+    parse_filters,
+    related_distribution,
+    scope,
+    theme_table,
+)
 from make_fixture_data import PROFORMA_REASON, PROFORMA_ROWS
-from tests.pipeline import signed_off_fixture, signed_off_questions
+from tests.pipeline import fixture_rows, signed_off_fixture, signed_off_questions, staged_fixture
 from tests.rows import make_department, tag_answers_by_rule
+from tests.test_themes import distinct_reasons
 
 pytestmark = pytest.mark.db
 
@@ -323,6 +339,72 @@ def test_the_scope_holds_to_the_callers_department(db: psycopg.Connection[DictRo
     assert own.denominator == 74
 
 
+def test_the_related_lookup_stays_inside_the_department(db: psycopg.Connection[DictRow]) -> None:
+    # The related distribution first finds the question's related closed
+    # question, and that lookup is a read like any other: held to the
+    # caller's department (docs/06 section 2), since a question id is a
+    # guessable value (THREAT_MODEL.md row 5). From another department, a
+    # question that exists and an id nobody has must get the same answer,
+    # or the difference says which ids exist elsewhere. The answer is the
+    # empty distribution test_the_scope_holds_to_the_callers_department
+    # pins for the first.
+    signed = signed_off_fixture(db)
+    other_department = make_department(db)
+
+    def asked(question_id: UUID) -> object:
+        try:
+            return related_distribution(db, question_id, Filter(), department_id=other_department)
+        except LookupError:
+            return LookupError
+
+    assert asked(signed.question_id) == asked(uuid4()) == []
+
+
+# Lines 2 to 41 of responses.csv, its first forty respondents.
+NA_LINES = range(2, 42)
+
+
+def test_a_kept_na_counts_in_the_related_distribution(
+    db: psycopg.Connection[DictRow], tmp_path: Path
+) -> None:
+    # docs/02 section 3.2 makes N/A on a closed column a real value, kept
+    # unless the reviewer says otherwise, and ingest stores it with no
+    # option: value_text 'N/A', option_id NULL. The related distribution
+    # has to count it as it counts an option, or everyone who gave it
+    # drops out of screen 4's second panel while attr:c_route=N/A still
+    # finds them. c_route is N/A on NA_LINES here, under the default
+    # resolutions. The hand count runs over distinct_reasons(), the first
+    # occurrence of each o_reason text, which is the scope with duplicates
+    # hidden: a duplicate respondent repeats an earlier o_reason. The order
+    # is the definition's options, then N/A.
+    rows = fixture_rows()
+    for line, row in enumerate(rows, start=2):
+        if line in NA_LINES:
+            row["c_route"] = "N/A"
+    path = tmp_path / "responses.csv"
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    staged = staged_fixture(db, path=path)
+    ingest(db, staged.consultation_id)
+    question_id = staged.configured.questions["o_reason"]
+
+    answered = Counter(
+        "N/A" if line in NA_LINES else related
+        for line, _text, related in distinct_reasons()
+        if line in NA_LINES or related is not None
+    )
+    expected = [(label, answered[label]) for label in ("Support", "Oppose", "Not sure", "N/A")]
+
+    distribution = related_distribution(
+        db, question_id, Filter(), department_id=_department_of(db, question_id)
+    )
+
+    assert distribution == expected
+    assert sum(count for _label, count in distribution) == sum(answered.values())
+
+
 def test_the_theme_table_is_one_statement(
     db: psycopg.Connection[DictRow], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -378,3 +460,38 @@ def test_the_scope_holds_only_an_open_question(db: psycopg.Connection[DictRow]) 
     assert closed.denominator == 0
     assert closed.rows == []
     assert _run(db, row["id"], Filter()) == []
+
+
+def test_a_theme_key_the_signed_off_shortlist_lacks_is_refused(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    # theme: and other:<question>.theme= name a key on a question's latest
+    # signed-off shortlist, the version the scope's theme predicates read
+    # (docs/04 section 6). A key that isn't there narrows the scope to
+    # nobody, and the query reads "of 0 respondents who answered" at exit
+    # 0, which says "no data" where the truth is "no such key". Keys are
+    # enum values compared exactly (docs/02 step 9), so a wrong case is
+    # unknown too. Refused by code, like an unknown column, and never by
+    # the key. The shortlist here is the fake's three stems and sign-off's
+    # two fallbacks (fake_model.STEMS, transitions.FALLBACK_THEMES).
+    signed = signed_off_questions(db, ("o_reason", "o_safety"))
+    question_id = signed["o_reason"].question_id
+    department_id = _department_of(db, question_id)
+
+    for item, key in (
+        ("theme:access", "access"),
+        ("theme:NOT_A_KEY", "NOT_A_KEY"),
+        ("other:o_safety.theme=nope", "nope"),
+    ):
+        with pytest.raises(FilterError) as refused:
+            check_filter_names(db, question_id, parse_filters([item]), department_id=department_id)
+        assert refused.value.code is FilterCode.UNKNOWN_THEME
+        assert key not in str(refused.value)
+
+    for items in (
+        ["theme:ACCESS"],
+        ["theme:OTHER", "theme:NO_REASON"],
+        ["other:o_safety.theme=PARKING"],
+        ["attr:d_area=Villages", "theme:SAFETY", "other:o_safety.theme=ACCESS"],
+    ):
+        check_filter_names(db, question_id, parse_filters(items), department_id=department_id)

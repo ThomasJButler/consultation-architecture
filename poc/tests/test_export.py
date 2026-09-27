@@ -6,24 +6,34 @@ version (tests/rows.py, tests/pipeline.py).
 
 Marked db: `write_workbook` reads Postgres. The pure prefix rule has its
 own test, test_export_prefix.py, outside this mark (test_repo_rules.py).
+
+Each test commits its setup before it exports: `write_workbook` sets the
+isolation level for a transaction of its own, which psycopg applies only
+on an idle connection, and the setup is the test's to commit, not the
+export's. The `db` fixture empties every table on entry, so nothing a
+test commits outlives it.
 """
 
 from __future__ import annotations
 
+import warnings
+import zipfile
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from defusedxml import ElementTree
 from openpyxl import load_workbook
 from psycopg.errors import InsufficientPrivilege
+from psycopg.pq import TransactionStatus
 from psycopg.rows import DictRow
 
 from consult import export, store
 from consult.config import Settings
 from consult.query import Filter, theme_table
 from consult.store import EXPORT_ROLE, as_role
-from tests.pipeline import signed_off_questions
+from tests.pipeline import fixture_rows, signed_off_questions
 from tests.rows import make_job_batch, tag_answers_by_rule
 
 pytestmark = pytest.mark.db
@@ -57,6 +67,7 @@ def test_the_workbook_has_text_cells_every_sheet_and_the_manifest(
     tag_answers_by_rule(
         db, signed["o_safety"].version_id, signed["o_safety"].question_id, _o_safety_key
     )
+    db.commit()
 
     path = tmp_path / "export.xlsx"
     result = export.write_workbook(db, signed["o_reason"].consultation_id, path)
@@ -154,7 +165,10 @@ def test_the_workbook_has_text_cells_every_sheet_and_the_manifest(
         department_id=question_department["department_id"],
     )
     summary = workbook["o_reason summary"]
-    summary_rows = {row[0].value: row for row in summary.iter_rows(min_row=2)}
+    # The table's own rows, header excluded, and nothing the sheet says
+    # after them.
+    table_rows = summary.iter_rows(min_row=2, max_row=1 + len(expected.rows))
+    summary_rows = {row[0].value: row for row in table_rows}
     assert set(summary_rows) == {c.key for c in expected.rows}
     for count in expected.rows:
         row = summary_rows[count.key]
@@ -227,6 +241,7 @@ def test_export_reads_as_the_export_role(
         return original(conn, consultation_id)
 
     monkeypatch.setattr(export, "_respondents", recording)
+    db.commit()
 
     path = tmp_path / "export.xlsx"
     export.write_workbook(db, signed["o_reason"].consultation_id, path)
@@ -322,6 +337,7 @@ def test_export_reads_one_snapshot_despite_a_mid_export_retraction(
         return result
 
     monkeypatch.setattr(export, "_tags", retract_after_reading)
+    db.commit()
 
     path = tmp_path / "export.xlsx"
     export.write_workbook(db, signed["o_reason"].consultation_id, path)
@@ -374,6 +390,7 @@ def test_a_summary_sheet_title_is_always_valid(
         "UPDATE question SET column_ref = %s WHERE id = %s",
         (dirty_ref, signed["o_reason"].question_id),
     )
+    db.commit()
 
     path = tmp_path / "export.xlsx"
     export.write_workbook(db, signed["o_reason"].consultation_id, path)
@@ -430,6 +447,7 @@ def test_unprocessable_counts_the_versions_own_map_job(
     ).fetchone()
     assert second_job is not None
     make_job_batch(db, second_job["id"], [shared_answer_id], status="unprocessable")
+    db.commit()
 
     path = tmp_path / "export.xlsx"
     export.write_workbook(db, signed["o_reason"].consultation_id, path)
@@ -489,6 +507,7 @@ def test_a_control_character_never_rides_the_exports_error(
         "SELECT external_id FROM respondent WHERE id = %s", (target["respondent_id"],)
     ).fetchone()
     assert respondent is not None
+    db.commit()
 
     path = tmp_path / "export.xlsx"
     export.write_workbook(db, signed["o_reason"].consultation_id, path)
@@ -512,3 +531,292 @@ def test_a_control_character_never_rides_the_exports_error(
     assert isinstance(identity_cell, str)
     assert "\x1b" not in identity_cell
     assert "\\x1b" in identity_cell
+
+
+def test_a_noncharacter_never_breaks_the_workbook(
+    db: psycopg.Connection[DictRow], tmp_path: Path
+) -> None:
+    """XML 1.0's Char production (section 2.2) admits tab, LF, CR,
+    U+0020 to U+D7FF, U+E000 to U+FFFD and U+10000 up, so U+FFFE and
+    U+FFFF are no more legal in a sheet part than a C0 control is.
+    openpyxl 3.1.5 without lxml (openpyxl.xml.LXML is False here) hands
+    them to ElementTree, which writes them raw, and the save succeeds
+    with a sheet no XML parser will read. Postgres stores both in UTF-8
+    text, so an open answer or a vault identity value can carry one. The
+    same two carriers as the control-character test above, dirtied by
+    hand; every worksheet part is parsed straight out of the zip, since
+    Excel refuses the file where openpyxl's own reader might not.
+    """
+    signed = signed_off_questions(db, ("o_reason",))
+    target = db.execute(
+        "SELECT id, respondent_id, value_text FROM answer"
+        " WHERE question_id = %s AND NOT is_blank ORDER BY id LIMIT 1",
+        (signed["o_reason"].question_id,),
+    ).fetchone()
+    assert target is not None
+    answer_text = target["value_text"]
+    assert isinstance(answer_text, str)
+    db.execute(
+        "UPDATE answer SET value_text = %s WHERE id = %s",
+        (answer_text + "\uffff", target["id"]),
+    )
+
+    identity = db.execute(
+        "SELECT column_ref, value_text FROM vault.respondent_identity WHERE respondent_id = %s",
+        (target["respondent_id"],),
+    ).fetchone()
+    assert identity is not None
+    identity_text = identity["value_text"]
+    assert isinstance(identity_text, str)
+    db.execute(
+        "UPDATE vault.respondent_identity SET value_text = %s"
+        " WHERE respondent_id = %s AND column_ref = %s",
+        ("\ufffe" + identity_text, target["respondent_id"], identity["column_ref"]),
+    )
+    respondent = db.execute(
+        "SELECT external_id FROM respondent WHERE id = %s", (target["respondent_id"],)
+    ).fetchone()
+    assert respondent is not None
+    db.commit()
+
+    path = tmp_path / "export.xlsx"
+    export.write_workbook(db, signed["o_reason"].consultation_id, path)
+
+    with zipfile.ZipFile(path) as archive:
+        parts = [name for name in archive.namelist() if name.startswith("xl/worksheets/")]
+        assert len(parts) == 4
+        for name in parts:
+            ElementTree.fromstring(archive.read(name))
+
+    workbook = load_workbook(path)
+    responses = workbook["Responses"]
+    header = [cell.value for cell in next(responses.iter_rows(max_row=1))]
+    index = {name: i for i, name in enumerate(header)}
+    row = next(
+        r
+        for r in responses.iter_rows(min_row=2)
+        if r[index["respondent_ref"]].value == respondent["external_id"]
+    )
+    # The visible form the control-character escape already uses.
+    assert row[index["o_reason"]].value == answer_text + "\\uffff"
+    assert row[index[identity["column_ref"]]].value == "\\ufffe" + identity_text
+
+
+def test_the_responses_sheet_has_a_column_per_shortlist_theme_only(
+    db: psycopg.Connection[DictRow], tmp_path: Path
+) -> None:
+    """sign_off copies every theme of the candidate into the signed-off
+    version, the longlist too, for lineage (transitions.sign_off), while
+    mapping offers the model the shortlist and its two fallbacks and
+    nothing else (mapping._shortlist reads NOT is_longlist). A column for
+    a longlist key could never hold a mark, so docs/02 step 12's "one
+    column per theme" is one per theme an answer can be tagged with."""
+    signed = signed_off_questions(db, ("o_reason",))
+    themes = db.execute(
+        "SELECT key, is_longlist FROM theme WHERE theme_set_version_id = %s ORDER BY key",
+        (signed["o_reason"].version_id,),
+    ).fetchall()
+    shortlist = [row["key"] for row in themes if not row["is_longlist"]]
+    longlist = {row["key"] for row in themes if row["is_longlist"]}
+    # The fake's condensation leaves candidates on the longlist, so the
+    # fixture's signed-off version has some to leave out.
+    assert longlist
+    db.commit()
+
+    path = tmp_path / "export.xlsx"
+    export.write_workbook(db, signed["o_reason"].consultation_id, path)
+
+    workbook = load_workbook(path)
+    header = [str(cell.value) for cell in next(workbook["Responses"].iter_rows(max_row=1))]
+    columns = [name.removeprefix("o_reason: ") for name in header if name.startswith("o_reason: ")]
+    assert columns == shortlist
+    assert not longlist & set(columns)
+
+
+def test_a_cell_at_the_cap_keeps_a_visible_cut(
+    db: psycopg.Connection[DictRow], tmp_path: Path
+) -> None:
+    """openpyxl 3.1.5's check_string cuts every string to 32,767
+    characters, Excel's own cell limit, without a word (cell.py line 163),
+    and the input's cell cap is the same number (CONSULT_MAX_CELL_CHARS in
+    .env.example), so an answer at the cap that `neutralise` prefixes, or
+    that an escape lengthens, loses its tail silently. The cut has to show
+    where it is and the manifest has to count it. Hand count: 1 + 32,765 +
+    1 is the cap, 32,768 once prefixed, cut to 32,764 and "..." appended;
+    one character shorter, it fits exactly once prefixed."""
+    signed = signed_off_questions(db, ("o_reason",))
+    targets = db.execute(
+        "SELECT a.id, r.external_id FROM answer a JOIN respondent r ON r.id = a.respondent_id"
+        " WHERE a.question_id = %s AND NOT a.is_blank ORDER BY a.id LIMIT 2",
+        (signed["o_reason"].question_id,),
+    ).fetchall()
+    assert len(targets) == 2
+    at_cap = "=" + "a" * 32765 + "Z"
+    under = "=" + "a" * 32764 + "Z"
+    assert (len(at_cap), len(under)) == (32767, 32766)
+    for target, text in zip(targets, (at_cap, under), strict=True):
+        db.execute("UPDATE answer SET value_text = %s WHERE id = %s", (text, target["id"]))
+    db.commit()
+
+    path = tmp_path / "export.xlsx"
+    export.write_workbook(db, signed["o_reason"].consultation_id, path)
+
+    workbook = load_workbook(path)
+    responses = workbook["Responses"]
+    header = [cell.value for cell in next(responses.iter_rows(max_row=1))]
+    index = {name: i for i, name in enumerate(header)}
+    by_ref = {row[index["respondent_ref"]].value: row for row in responses.iter_rows(min_row=2)}
+    cut = by_ref[targets[0]["external_id"]][index["o_reason"]].value
+    assert cut == "'=" + "a" * 32762 + "..."
+    assert by_ref[targets[1]["external_id"]][index["o_reason"]].value == "'" + under
+
+    manifest = {row[0].value: row[1].value for row in workbook["Manifest"].iter_rows(min_row=2)}
+    assert manifest["truncated_cells"] == "1"
+
+
+def test_the_export_leaves_the_callers_connection_as_it_found_it(
+    db: psycopg.Connection[DictRow], tmp_path: Path
+) -> None:
+    """psycopg applies `isolation_level` and `read_only` to the next
+    transaction only, and only while the connection is idle, so a
+    connection with a transaction open can't be made REPEATABLE READ
+    without ending that transaction. Ending it isn't the export's call:
+    the caller's writes are the caller's to commit or roll back, so a
+    busy connection is refused by code with the transaction left as it
+    was. An idle one comes back at the caller's own settings, not at
+    psycopg's defaults."""
+    signed = signed_off_questions(db, ("o_reason",))
+    consultation_id = signed["o_reason"].consultation_id
+    db.commit()
+    db.isolation_level = psycopg.IsolationLevel.SERIALIZABLE
+    db.read_only = False
+
+    db.execute(
+        "UPDATE consultation SET name = %s WHERE id = %s",
+        ("Renamed, not committed", consultation_id),
+    )
+    busy_path = tmp_path / "busy.xlsx"
+    with pytest.raises(export.ExportError) as refused:
+        export.write_workbook(db, consultation_id, busy_path)
+    assert refused.value.code == "connection_busy"
+    assert not busy_path.exists()
+    assert db.info.transaction_status == TransactionStatus.INTRANS
+    renamed = db.execute(
+        "SELECT name FROM consultation WHERE id = %s", (consultation_id,)
+    ).fetchone()
+    assert renamed is not None
+    assert renamed["name"] == "Renamed, not committed"
+    db.rollback()
+    kept = db.execute("SELECT name FROM consultation WHERE id = %s", (consultation_id,)).fetchone()
+    assert kept is not None
+    assert kept["name"] == "Riverside cycle route"
+    db.rollback()
+
+    idle_path = tmp_path / "idle.xlsx"
+    export.write_workbook(db, consultation_id, idle_path)
+    assert idle_path.exists()
+    assert db.isolation_level == psycopg.IsolationLevel.SERIALIZABLE
+    assert db.read_only is False
+
+
+def test_the_export_refuses_an_autocommit_connection(
+    db: psycopg.Connection[DictRow], db_settings: Settings, tmp_path: Path
+) -> None:
+    """An autocommit connection reports IDLE between statements the same
+    as one with nothing open (psycopg sends no BEGIN for it), so
+    `_in_transaction`'s busy check alone lets it through; `isolation_level`
+    and `read_only` then never take hold, since psycopg only applies them
+    to the next transaction, and an autocommit connection starts a fresh
+    one for every statement (against the docstring's one-snapshot
+    promise). `store.connect(settings, autocommit=True)` is the
+    repository's own way to open one (the conftest's database-creation
+    helpers use it)."""
+    signed = signed_off_questions(db, ("o_reason",))
+    consultation_id = signed["o_reason"].consultation_id
+    db.commit()
+
+    auto_path = tmp_path / "auto.xlsx"
+    with (
+        store.connect(db_settings, autocommit=True) as auto,
+        pytest.raises(export.ExportError) as refused,
+    ):
+        export.write_workbook(auto, consultation_id, auto_path)
+    assert refused.value.code == "connection_busy"
+    assert not auto_path.exists()
+
+
+def test_sheet_titles_differing_only_in_case_stay_within_excels_limit(
+    db: psycopg.Connection[DictRow], tmp_path: Path
+) -> None:
+    """Excel compares sheet titles without regard to case, and so does
+    openpyxl's avoid_duplicate_name (openpyxl.workbook.child), which
+    appends a digit to a title matching an earlier one that way. 23
+    characters of column ref and " summary" make Excel's 31, and the
+    digit makes 32, which openpyxl warns about and Excel won't open.
+    Excel also refuses a title that starts or ends with an apostrophe.
+    The two open questions' refs here start with one and differ only in
+    case."""
+    signed = signed_off_questions(db, ("o_reason",))
+    ref = "'why this route and not"
+    assert len(ref) == 23
+    for column_ref, renamed in (("o_reason", ref), ("o_safety", ref.upper())):
+        db.execute(
+            "UPDATE question SET column_ref = %s WHERE consultation_id = %s AND column_ref = %s",
+            (renamed, signed["o_reason"].consultation_id, column_ref),
+        )
+    db.commit()
+
+    path = tmp_path / "export.xlsx"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        export.write_workbook(db, signed["o_reason"].consultation_id, path)
+    assert [str(warning.message) for warning in caught] == []
+
+    workbook = load_workbook(path)
+    titles = [name for name in workbook.sheetnames if name not in ("Responses", "Manifest")]
+    assert len(titles) == 2
+    assert len({title.casefold() for title in titles}) == 2
+    for title in titles:
+        assert len(title) <= 31
+        assert not title.startswith("'")
+        assert not title.endswith("'")
+
+
+def test_the_summary_sheet_says_how_many_duplicates_it_hides(
+    db: psycopg.Connection[DictRow], tmp_path: Path
+) -> None:
+    """The summary sheet counts respondents under the default filter,
+    which hides duplicates (docs/02 section 7, decision 9), while the
+    Responses sheet marks every row, a duplicate's copied tags included,
+    so the two disagree by design and the sheet has to say by how much.
+    Hand count from responses.csv: o_reason is answered on 221 rows
+    (blank, "-" and "N/A", which docs/02 section 3.2 makes not answered
+    on an open question, left out) holding 74 distinct texts, one
+    canonical answer each, so 147 rows are hidden."""
+    answered = [
+        row["o_reason"] for row in fixture_rows() if row["o_reason"] not in {"", "-", "N/A"}
+    ]
+    assert (len(answered), len(set(answered))) == (221, 74)
+
+    signed = signed_off_questions(db, ("o_reason",))
+    tag_answers_by_rule(
+        db, signed["o_reason"].version_id, signed["o_reason"].question_id, _o_reason_key
+    )
+    db.commit()
+
+    path = tmp_path / "export.xlsx"
+    export.write_workbook(db, signed["o_reason"].consultation_id, path)
+
+    workbook = load_workbook(path)
+    responses = workbook["Responses"]
+    header = [str(cell.value) for cell in next(responses.iter_rows(max_row=1))]
+    columns = [i for i, name in enumerate(header) if name.startswith("o_reason: ")]
+    marks = sum(1 for row in responses.iter_rows(min_row=2) for i in columns if row[i].value == "1")
+    assert marks == 221
+
+    summary = list(workbook["o_reason summary"].iter_rows(values_only=True))
+    assert summary[0] == ("key", "label", "respondents", "denominator")
+    assert {row[3] for row in summary[1:4]} == {"74"}
+    last = summary[-1]
+    assert last[0] == "Duplicate answers hidden: 147 (the Responses sheet marks every row)"
+    assert all(value is None for value in last[1:])

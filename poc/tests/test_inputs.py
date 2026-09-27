@@ -10,6 +10,7 @@ reviewer can read them and the first real upload can move them.
 from __future__ import annotations
 
 import csv
+import re
 import shutil
 import zipfile
 from pathlib import Path
@@ -20,7 +21,8 @@ from openpyxl import Workbook
 from consult.definition import read_definition
 from consult.errors import ErrorCode
 from consult.inputs import Caps, InputError, Refusal
-from consult.responses import Responses
+from consult.responses import Responses, Row
+from tests.test_definition import GOOD, write_workbook
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 SMALL = Caps(max_upload_bytes=100_000_000, max_rows=1_000, max_cell_chars=2_000, max_zip_ratio=100)
@@ -131,12 +133,14 @@ def test_the_default_caps_admit_the_fixtures(tmp_path: Path) -> None:
     assert read_definition(FIXTURES / "definition.xlsx", Caps()).column_refs
     assert Caps().max_upload_bytes >= 200 * 1024 * 1024
     assert Caps().max_rows >= 250_000
-    # A file Excel itself can save is never refused on a cell's length or a
-    # row's width: its own limits are 32,767 characters and 16,384 columns
-    # (Microsoft Support, "Excel specifications and limits", checked 25
-    # September 2026), and docs/01 records single answers of 4,000 words.
+    # A file Excel itself can save is never refused on a cell's length: its
+    # own limit is 32,767 characters (Microsoft Support, "Excel
+    # specifications and limits", checked 25 September 2026), and docs/01
+    # records single answers of 4,000 words. The width is the staging
+    # table's, not Excel's: 1,599 headers beside row_no is the most a
+    # Postgres table takes (test_stage.py).
     assert Caps().max_cell_chars == 32_767
-    assert Caps().max_columns == 16_384
+    assert Caps().max_columns == 1_599
 
 
 def test_malformed_xml_a_bad_encoding_and_a_missing_file_are_refused_too(tmp_path: Path) -> None:
@@ -227,3 +231,48 @@ def test_the_definition_workbook_gets_the_cell_and_width_caps_too(tmp_path: Path
     assert (
         refusal_of(read_definition, tmp_path / "wide.xlsx", caps).reason is Refusal.TOO_MANY_COLUMNS
     )
+
+
+def declare_dimension(source: Path, target: Path, ref: str) -> Path:
+    """A copy of a workbook whose every sheet declares `ref` as its
+    dimension, whatever its cells fill. The <dimension> element is the
+    file's own claim about itself, so a crafted file can claim anything."""
+    with (
+        zipfile.ZipFile(source) as archive,
+        zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as copy,
+    ):
+        for name in archive.namelist():
+            data = archive.read(name)
+            if name.startswith("xl/worksheets/"):
+                data = re.sub(rb'<dimension ref="[^"]*"', f'<dimension ref="{ref}"'.encode(), data)
+            copy.writestr(name, data)
+    return target
+
+
+def test_a_declared_dimension_cannot_widen_a_row(tmp_path: Path) -> None:
+    # openpyxl's read-only iter_rows pads every row to the sheet's declared
+    # dimension, and the row cap counts only rows with something in them,
+    # so this 4.9 KB file, declaring A1:XFD1048576 with two headers and one
+    # cell in the last row, would be read as rows of 16,384 cells each.
+    # Read by what the sheet holds, the header is its two names and the
+    # far cell is one row, numbered where it sits.
+    workbook = Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    sheet.append(["respondent_ref", "o_reason"])
+    sheet.cell(row=1_048_576, column=1, value="R-far")
+    workbook.save(tmp_path / "plain.xlsx")
+    path = declare_dimension(tmp_path / "plain.xlsx", tmp_path / "wide.xlsx", "A1:XFD1048576")
+
+    # Excel's own width as the cap, so what's measured is the row's width
+    # and not the cap's refusal of it.
+    responses = Responses(path, Caps(max_columns=16_384))
+    assert responses.header == ("respondent_ref", "o_reason")
+    assert list(responses.rows()) == [
+        Row(1_048_576, {"respondent_ref": "R-far", "o_reason": ""}),
+    ]
+
+    # The definition workbook is read the same way, at the default caps.
+    definition = write_workbook(tmp_path / "definition.xlsx", GOOD)
+    declared = declare_dimension(definition, tmp_path / "declared.xlsx", "A1:XFD1048576")
+    assert read_definition(declared) == read_definition(definition)

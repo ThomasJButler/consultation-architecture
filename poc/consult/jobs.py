@@ -23,6 +23,9 @@ from consult.errors import ErrorCode
 # Ten minutes of silence and a lease can be taken over (docs/02, step 5;
 # ADR-002 says why not shorter: a false takeover costs a batch).
 STALE_AFTER = timedelta(minutes=10)
+# ADR-002: "the retry budget is job.attempts < 5". A job at five is the
+# reconciler's to fail (docs/02, section 5), never a worker's to run.
+MAX_ATTEMPTS = 5
 
 
 @dataclass(frozen=True)
@@ -40,23 +43,35 @@ def claim(
     worker: str,
     *,
     stale_after: timedelta = STALE_AFTER,
+    kind: str | None = None,
 ) -> Lease | None:
-    """Take the job if it's queued or its lease has gone stale.
+    """Take the job if it's queued or its lease has gone stale, it's under
+    the retry budget, and it's of `kind` when one is given.
 
-    None means one of three things (a live lease, already finished, an
-    unknown id); the worker logs which and drops the message.
+    None means one of five things (a live lease, already finished, a
+    spent budget, another kind, an unknown id); the worker logs which and
+    drops the message. The budget and the kind are here and not only in
+    the worker's pick, because `cli._run_job` claims by id with no pick in
+    front of it.
     """
     row = conn.execute(
         """
         UPDATE job
            SET status = 'running', attempts = attempts + 1,
                claimed_by = %(worker)s, heartbeat_at = now()
-         WHERE id = %(job_id)s
+         WHERE id = %(job_id)s AND attempts < %(max_attempts)s
+           AND kind = coalesce(%(kind)s, kind)
            AND (status = 'queued'
                 OR (status = 'running' AND heartbeat_at < now() - %(stale_after)s))
         RETURNING attempts
         """,
-        {"job_id": job_id, "worker": worker, "stale_after": stale_after},
+        {
+            "job_id": job_id,
+            "worker": worker,
+            "stale_after": stale_after,
+            "max_attempts": MAX_ATTEMPTS,
+            "kind": kind,
+        },
     ).fetchone()
     if row is None:
         return None

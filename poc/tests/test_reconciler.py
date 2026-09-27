@@ -19,10 +19,10 @@ import pytest
 from psycopg.pq import TransactionStatus
 from psycopg.rows import DictRow
 
-from consult import reconciler, store
+from consult import reconciler, store, transitions
 from consult.config import Settings
 from consult.errors import ErrorCode
-from consult.jobs import claim, heartbeat, record_failure
+from consult.jobs import Lease, claim, heartbeat, record_failure
 from tests.rows import (
     make_consultation,
     make_department,
@@ -51,6 +51,9 @@ OWED = 30
 RELAYS = 2
 # Enough rows for a send to come after a row's own commit twice over.
 SENDS = 3
+# More than one relay takes, so a relay that marked its whole take before
+# the first send would strand twenty and leave five.
+STRANDABLE = 25
 # How long a pass may take before the test calls it stuck: the bound
 # test_fan_in_race.py gives its barrier.
 RETURNS_WITHIN_SECONDS = 30
@@ -269,6 +272,81 @@ def test_recover_passes_over_a_job_row_a_paused_worker_holds(
     assert again[held] == {**before[held], "sent_at": again[held]["sent_at"]}
     assert again[held]["sent_at"] >= started
     assert again[quiet] == after[quiet]
+
+
+def test_the_spent_fail_skips_a_held_or_revived_job(
+    db: psycopg.Connection[DictRow], db_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Statement 2 fails a job at the retry budget whose lease has gone
+    # quiet, "running with a stale heartbeat" (docs/02, section 5). Its scan
+    # takes no lock, so by the time the consultation is locked the fifth
+    # attempt's worker may have shown it's alive: a heartbeat committed
+    # since the scan, or one still uncommitted in its batch transaction,
+    # holding the job row. Either way the lease is live and the job is left
+    # for a later pass, as the re-send leaves a held row in the test above.
+    # Waiting on the held row would keep the consultation locked, and every
+    # statement after this one waiting, for as long as the worker pauses.
+    consultation_id = make_consultation(db, make_department(db), status="processing")
+
+    # Revived: the heartbeat commits between the scan and the lock.
+    q_revived = make_open_question(db, consultation_id, "o_1", ordinal=1)
+    revived = make_queued_job(db, consultation_id, q_revived)
+    assert claim(db, revived, "w-fifth") is not None
+    _age(db, revived, attempts=RETRY_BUDGET, sent_ago=SENT_BEFORE_THE_CLAIM, heartbeat_ago=STALE)
+    db.commit()
+    before = _jobs(db, consultation_id)
+    lock_consultation = transitions.lock_consultation
+    woke: list[UUID] = []
+
+    def wake_then_lock(conn: psycopg.Connection[DictRow], locked: UUID) -> None:
+        if not woke:
+            with store.connect(db_settings) as worker:
+                heartbeat(worker, Lease(revived, "w-fifth", RETRY_BUDGET))
+                worker.commit()
+            woke.append(revived)
+        lock_consultation(conn, locked)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(transitions, "lock_consultation", wake_then_lock)
+        assert reconciler.recover(db) == (0, 0)
+    assert woke == [revived]
+    after = _jobs(db, consultation_id)
+    assert after[revived]["heartbeat_at"] > before[revived]["heartbeat_at"]
+    assert after[revived] == {**before[revived], "heartbeat_at": after[revived]["heartbeat_at"]}
+    assert _outbox(db, consultation_id) == []
+
+    # Held: the fifth attempt's heartbeat is uncommitted inside its batch.
+    q_held = make_open_question(db, consultation_id, "o_2", ordinal=2)
+    held = make_queued_job(db, consultation_id, q_held)
+    assert claim(db, held, "w-fifth") is not None
+    _age(db, held, attempts=RETRY_BUDGET, sent_ago=SENT_BEFORE_THE_CLAIM, heartbeat_ago=STALE)
+    db.commit()
+    before = _jobs(db, consultation_id)
+
+    passes: list[tuple[int, int]] = []
+    first = threading.Thread(target=lambda: passes.append(reconciler.recover(db)))
+    with store.connect(db_settings) as holder:
+        heartbeat(holder, Lease(held, "w-fifth", RETRY_BUDGET))
+        first.start()
+        first.join(timeout=RETURNS_WITHIN_SECONDS)
+        returned = not first.is_alive()
+        # Ended without a commit, as a crash ends it, which also lets a
+        # pass stuck behind the lock finish, so the test fails on the
+        # assertion below rather than hanging.
+        holder.rollback()
+    first.join(timeout=RETURNS_WITHIN_SECONDS)
+
+    assert returned
+    assert passes == [(0, 0)]
+    assert _jobs(db, consultation_id) == before
+
+    # With the worker gone, its lease is still stale and the next pass
+    # fails it, and only it: the revived job's heartbeat is fresh.
+    assert reconciler.recover(db) == (0, 1)
+    again = _jobs(db, consultation_id)
+    assert again[held] == {**before[held], "status": "failed"}
+    assert again[revived] == before[revived]
+    assert _questions(db, consultation_id)[q_held] == "find_failed"
 
 
 def test_the_spent_scans_leave_a_job_of_a_kind_fail_job_cannot_fail(
@@ -520,3 +598,38 @@ def test_the_relay_sends_with_no_transaction_open_and_commits_each_row(
     # At the nth send, the n rows before it are committed and nothing is open.
     assert seen == [(row_id, TransactionStatus.IDLE, owed[:n]) for n, row_id in enumerate(owed)]
     assert _sent(db) == owed
+
+
+class _SendFailedError(Exception):
+    """The stand-in send failing: Notify unreachable, or the process gone
+    in the middle of the call."""
+
+
+def test_a_relay_that_fails_at_its_first_send_strands_one_row_at_most(
+    db: psycopg.Connection[DictRow],
+) -> None:
+    # ADR-006's relay marks a row sending, sends it and marks it sent, one
+    # row at a time, so a send that fails leaves the one row it was
+    # sending for the reference lookup and every other row pending for
+    # the next pass (the relay's own docstring). Nothing moves a row out
+    # of sending here (reconciler.py's module docstring), so a row put
+    # there before its own send is lost to every later pass.
+    consultation_id = make_consultation(db, make_department(db), status="processing")
+    for _ in range(STRANDABLE):
+        make_outbox_row(db, consultation_id)
+    db.commit()
+
+    def fails(_outbox_id: int) -> str:
+        raise _SendFailedError
+
+    with pytest.raises(_SendFailedError):
+        reconciler.relay(db, send=fails)
+    db.rollback()
+
+    counts = db.execute(
+        "SELECT status, count(*) AS n FROM notification_outbox GROUP BY status"
+    ).fetchall()
+    assert {row["status"]: row["n"] for row in counts} == {
+        "sending": 1,
+        "pending": STRANDABLE - 1,
+    }

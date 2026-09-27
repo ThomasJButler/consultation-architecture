@@ -81,7 +81,8 @@ def test_a_mapping_reply_is_validated_in_code() -> None:
     # The shape checks the schema promises, hand-built: the wrong top-level
     # type, a missing or extra property, an id that isn't an integer (a
     # bool is an int to Python and not to the schema), keys that aren't a
-    # list of strings. And a key repeated inside one assignment collapses.
+    # list of strings, an empty list of keys. And a key repeated inside one
+    # assignment collapses.
     assert refused_with("[]") is Reason.NOT_AN_OBJECT
     assert refused_with(json.dumps({"labels": []})) is Reason.WRONG_SHAPE
     assert refused_with(json.dumps({"assignments": {}})) is Reason.WRONG_SHAPE
@@ -102,18 +103,24 @@ def test_a_mapping_reply_is_validated_in_code() -> None:
         refused_with(json.dumps({"assignments": [{"answer_id": 1, "theme_keys": ["PARKING", 2]}]}))
         is Reason.WRONG_SHAPE
     )
+    unlabelled = [
+        {"answer_id": 1, "theme_keys": []},
+        {"answer_id": 2, "theme_keys": ["SAFETY"]},
+        {"answer_id": 3, "theme_keys": []},
+    ]
+    assert refused_with(json.dumps({"assignments": unlabelled})) is Reason.NO_LABEL
     collapsed = json.dumps(
         {
             "assignments": [
                 {"answer_id": 3, "theme_keys": ["OTHER", "PARKING", "OTHER"]},
-                {"answer_id": 1, "theme_keys": []},
+                {"answer_id": 1, "theme_keys": ["PARKING"]},
                 {"answer_id": 2, "theme_keys": ["SAFETY"]},
             ]
         }
     )
     assert parse_assignments(Completion(text=collapsed), MAPPING) == (
         Assignment(3, ("OTHER", "PARKING")),
-        Assignment(1, ()),
+        Assignment(1, ("PARKING",)),
         Assignment(2, ("SAFETY",)),
     )
 
@@ -272,3 +279,21 @@ def test_a_reply_error_carries_no_chained_exception_with_the_reply_in_it() -> No
         parse_assignments(Completion(text="Certainly! Not JSON at all."), MAPPING)
     assert refused.value.__cause__ is None
     assert refused.value.__suppress_context__ is True
+
+
+def test_a_lone_surrogate_in_a_label_is_refused_by_the_reply_check() -> None:
+    # A JSON escape can spell what UTF-8 can't: \ud800 decodes to a lone
+    # surrogate, which the first insert then fails to encode, and would
+    # be recorded as a worker error and retried rather than refused.
+    # U+FFFF encodes, but XML 1.0's Char production (section 2.2) leaves
+    # it out, and a label goes on to the sign-off screen and the export.
+    # Both are refused on the way in as malformed text, with a reason and
+    # never the text.
+    for text in ("Parking\ud800lane", "Parking\uffffLane"):
+        for field in ("label", "description"):
+            reply = themes_text(**{field: text})
+            assert text not in reply  # sent as a JSON escape, as a model would
+            with pytest.raises(ReplyError) as refused:
+                parse_themes(Completion(text=reply))
+            assert refused.value.reason is Reason.TEXT_MALFORMED
+            assert "Parking" not in str(refused.value)

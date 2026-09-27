@@ -103,7 +103,11 @@ document carries a dated correction where the proof-of-concept found it
 otherwise; `poc/README.md` says only what is still unproved; the
 evidence for every submission bullet is in the pull request, and the
 bullets are rewritten from it with the PDF rebuilt; rule 12 is pinned
-over the tracked text. Deliberately not built: see above.
+over the tracked text. Merged after it: the fix branch for the review of
+26 September (the pull request after PR-10), every finding the review
+listed as fixable fixed as a red/green pair, then what the branch's own
+round found (`docs/07-reviews.md`, row 11). Deliberately not built: see
+above.
 
 ## How it was built
 

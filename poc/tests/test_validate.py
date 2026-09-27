@@ -14,6 +14,7 @@ import csv
 from collections import Counter
 from pathlib import Path
 
+from consult.configure import defaults, merged_options
 from consult.definition import (
     ClosedQuestion,
     Definition,
@@ -23,6 +24,7 @@ from consult.definition import (
     read_definition,
 )
 from consult.responses import Responses
+from consult.tokenise import Tokenised, tokenise
 from consult.validate import (
     ColumnKind,
     Report,
@@ -263,6 +265,100 @@ def test_two_options_chosen_together_once_are_not_flagged_to_merge(tmp_path: Pat
     )
     (flagged,) = warnings_of(validate(definition, Responses(path)), WarningKind.OPTIONS_NEVER_APART)
     assert (flagged.value, flagged.count) == ("Run, Push a pram", 2)
+
+
+def test_an_option_with_two_commas_is_one_option(tmp_path: Path) -> None:
+    # A label can hold more than one comma (docs/00), and the workbook's
+    # comma-joined cell then splits it into three adjacent pieces. Five
+    # respondents chose it and three chose "No", so the three pieces never
+    # appear apart and have to come back as the one option they were, or
+    # attr:c_when=<the label> matches nobody after ingest.
+    label = "Yes, but only at weekends, and not in winter"
+    path = tmp_path / "responses.csv"
+    path.write_text("c_when\n" + f'"{label}"\n' * 5 + "No\n" * 3, encoding="utf-8")
+    # What split_options makes of the cell "Yes, but only at weekends, and
+    # not in winter, No".
+    split = ("Yes", "but only at weekends", "and not in winter", "No")
+    question = ClosedQuestion("c_when", "When?", ResponseType.MULTI_SELECT, split)
+    definition = Definition(demographic=(), closed=(question,), open=())
+
+    report = validate(definition, Responses(path))
+    options = merged_options(question, defaults(report))
+
+    assert options == [label, "No"]
+    assert tokenise(label, options) == Tokenised((label,), ())
+    # One warning for the one option, naming the label the workbook split.
+    never_apart = warnings_of(report, WarningKind.OPTIONS_NEVER_APART)
+    assert [(w.value, w.count) for w in never_apart] == [(label, 5)]
+
+
+def test_a_single_select_option_with_a_comma_is_merged_back(tmp_path: Path) -> None:
+    # A single-select cell is the one option chosen, written whole, so an
+    # option with a comma arrives as a value none of its split pieces
+    # matches (docs/00). Taken for an unknown value it would default to not
+    # answered and ingest would blank all six rows; it's the never-apart
+    # case, and the default is to merge (docs/02, section 3.2).
+    path = tmp_path / "responses.csv"
+    path.write_text(
+        "c_route\n" + '"Yes, with changes"\n' * 6 + "No\nNo\nNot sure\n", encoding="utf-8"
+    )
+    # What split_options makes of the cell "Yes, with changes, No, Not sure".
+    split = ("Yes", "with changes", "No", "Not sure")
+    question = ClosedQuestion("c_route", "Support?", ResponseType.SINGLE_SELECT, split)
+    definition = Definition(demographic=(), closed=(question,), open=())
+
+    report = validate(definition, Responses(path))
+
+    assert merged_options(question, defaults(report)) == ["Yes, with changes", "No", "Not sure"]
+    (never_apart,) = warnings_of(report, WarningKind.OPTIONS_NEVER_APART)
+    assert (never_apart.column_ref, never_apart.value, never_apart.count) == (
+        "c_route",
+        "Yes, with changes",
+        6,
+    )
+    assert never_apart.resolutions == (Resolution.MERGE_OPTIONS,)
+    assert never_apart.default is Resolution.MERGE_OPTIONS
+    assert warnings_of(report, WarningKind.UNKNOWN_VALUE) == []
+
+
+def test_two_real_options_in_one_single_select_cell_are_never_fused(tmp_path: Path) -> None:
+    # One respondent wrote two of c_route's options in its one cell.
+    # Support and Oppose sit next to each other in the option list, so the
+    # cell spells a run of them, but each is chosen alone by nearly a
+    # hundred others: a split comma option's pieces are never chosen alone
+    # (docs/00), so this is a stray answer and not one. Offered the merge,
+    # the default would fuse the two options and ingest would blank every
+    # answer to either. It stays an unknown value instead, and the options
+    # and their tallies stay as the definition and the CSV have them.
+    rows = fixture_rows()
+    assert rows[0]["c_route"] == "Support"
+    rows[0]["c_route"] = "Support, Oppose"
+    path = tmp_path / "responses.csv"
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    definition = read_definition(FIXTURES / "definition.xlsx")
+    (route,) = [q for q in definition.closed if q.column_ref == "c_route"]
+    counted = Counter(row["c_route"] for row in rows)
+
+    report = validate(definition, Responses(path))
+
+    assert [(w.kind, w.value, w.count) for w in report.warnings if w.column_ref == "c_route"] == [
+        (WarningKind.UNKNOWN_VALUE, "Unsure", counted["Unsure"]),
+        (WarningKind.UNKNOWN_VALUE, "Support, Oppose", 1),
+    ]
+    (stray,) = [w for w in report.warnings if w.value == "Support, Oppose"]
+    assert stray.example_rows == (2,)
+    assert stray.default is Resolution.TREAT_AS_NOT_ANSWERED
+    assert merged_options(route, defaults(report)) == ["Support", "Oppose", "Not sure"]
+    by_ref = {column.column_ref: column for column in report.columns}
+    assert dict(by_ref["c_route"].values) == {
+        "Support": counted["Support"],
+        "Oppose": counted["Oppose"],
+        "Not sure": counted["Not sure"],
+    }
+    assert (counted["Support"], counted["Oppose"]) == (102, 92)
 
 
 def test_a_repeated_or_blank_header_is_an_error_and_a_column_is_listed_once(tmp_path: Path) -> None:

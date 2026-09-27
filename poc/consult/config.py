@@ -101,13 +101,15 @@ def read_dotenv(path: Path) -> dict[str, str]:
     if not path.exists():
         return {}
     values: dict[str, str] = {}
-    for raw in path.read_text(encoding="utf-8").splitlines():
+    for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         key, sep, value = line.partition("=")
         if not sep:
-            raise ConfigError(f"{path}: expected KEY=value, got {line!r}")
+            # By number: the line may be a password with a typo in it, and
+            # this message reaches stderr.
+            raise ConfigError(f"{path}: line {number}: expected KEY=value")
         values[key.strip()] = value.strip()
     return values
 

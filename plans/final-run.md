@@ -405,7 +405,7 @@ docker compose exec db psql -U consult -d consult -c \
   "select id, column_ref, status from question where kind = 'open'"
 .venv/bin/consult worker --once            # run twice: both questions themes_ready
 .venv/bin/consult worker --once
-.venv/bin/consult themes <question-id>     # read the themes and the edit counter
+.venv/bin/consult themes <question-id>     # its first line names the --expect-version to pass
 .venv/bin/consult sign-off <question-id> --reviewer "$(uuidgen)" --expect-version <n>
                                            # once per question
 .venv/bin/consult worker --once            # run twice: both complete, consultation ready
@@ -421,9 +421,12 @@ After PR-09 (the flags as `consult query --help` shows them):
 ```bash
 .venv/bin/consult query <question-id> --filter attr:d_area=Villages
 .venv/bin/consult export <consultation-id> --out ~/Desktop/consult.xlsx
-open ~/Desktop/consult.xlsx                # the answer starting "=" shows as text, not a formula
-.venv/bin/pytest -m slow                   # the plan benchmark
+open ~/Desktop/consult.xlsx                # the answer starting "=" reads '=1+1, apostrophe visible, as text
 ```
+
+`make check` above already ran the plan benchmark (`pytest -m slow` is in
+`make test-slow`), and its audit step needs the network; offline, run
+`make lint type test test-slow` instead.
 
 What to look for:
 - No answer text anywhere in the terminal. Ids, counts, codes and

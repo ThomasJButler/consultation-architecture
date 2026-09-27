@@ -23,8 +23,10 @@ import psycopg
 import pytest
 from psycopg.rows import DictRow
 
+from consult import cli
 from consult.cli import main
 from consult.config import Settings
+from tests.fakes import FakeLLM, Fault
 from tests.test_cli_themes import ANSWER_FRAGMENTS, ingested
 
 pytestmark = pytest.mark.db
@@ -148,3 +150,53 @@ def test_the_worker_and_reconcile_commands_run_the_fixtures_to_ready(
     capsys.readouterr()
     assert main(["worker", "--once"], settings=db_settings) == 0
     assert "nothing to run" in capsys.readouterr().out
+
+
+def test_worker_once_reports_the_states_it_moved(
+    db: psycopg.Connection[DictRow],
+    db_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A succeeded job's line names the question and the consultation it
+    # left behind, the way run-job's own summary does, rather than
+    # leaving a script to read them back with psql.
+    ingested(db, db_settings)
+    capsys.readouterr()
+
+    assert main(["worker", "--once", "--worker", "w1"], settings=db_settings) == 0
+    out = capsys.readouterr().out
+    succeeded = db.execute(
+        """
+        SELECT j.id AS job_id, j.question_id, q.status AS question, c.status AS consultation
+          FROM job j JOIN question q ON q.id = j.question_id
+          JOIN consultation c ON c.id = j.consultation_id
+         WHERE j.status = 'succeeded'
+        """
+    ).fetchone()
+    assert succeeded is not None
+    assert (
+        f"job {succeeded['job_id']}: find_themes succeeded, attempt 1; "
+        f"question {succeeded['question_id']} themes_ready; consultation processing"
+    ) in out
+
+    # A job the fake fails still names the states, and --once exits 1
+    # rather than reading as success to a script.
+    monkeypatch.setattr(cli, "OfflineModel", lambda: FakeLLM([Fault.PROSE]))
+    capsys.readouterr()
+
+    code = main(["worker", "--once", "--worker", "w1"], settings=db_settings)
+    out = capsys.readouterr().out
+    assert code == 1
+    failed = db.execute(
+        """
+        SELECT j.id AS job_id, j.question_id, q.status AS question, c.status AS consultation
+          FROM job j JOIN question q ON q.id = j.question_id
+          JOIN consultation c ON c.id = j.consultation_id
+         WHERE j.status = 'failed_retryable'
+        """
+    ).fetchone()
+    assert failed is not None
+    assert (f"job {failed['job_id']}: find_themes failed_retryable, attempt 1") in out
+    assert f"question {failed['question_id']} finding_themes" in out
+    assert "consultation processing" in out

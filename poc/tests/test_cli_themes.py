@@ -11,12 +11,14 @@ is where a reviewer would read them.
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 from pathlib import Path
 from uuid import UUID
 
 import psycopg
 import pytest
 from psycopg.rows import DictRow
+from psycopg.types.json import Jsonb
 
 from consult import cli, themes
 from consult.cli import main
@@ -27,6 +29,7 @@ from consult.jobs import Lease
 from consult.llm import GatewayError
 from consult.transitions import Advance
 from consult.worker import BackingOff
+from tests.pipeline import signed_off_fixture
 
 pytestmark = pytest.mark.db
 
@@ -35,6 +38,10 @@ RESPONSES = str(FIXTURES / "responses.csv")
 DEFINITION = str(FIXTURES / "definition.xlsx")
 ARGS = ["--name", "Riverside cycle route", "--department", "Department of Fictional Affairs"]
 ANSWER_FRAGMENTS = ("towpath", "Mill Lane", "school run", "example.org", "R-0001")
+# ADR-002: "the retry budget is job.attempts < 5".
+RETRY_BUDGET = 5
+# docs/02, step 5: ten minutes of silence and a lease can be taken over.
+STALE = timedelta(minutes=11)
 
 
 def ingested(db: psycopg.Connection[DictRow], settings: Settings) -> dict[str, UUID]:
@@ -137,7 +144,7 @@ def test_the_themes_command_prints_keys_labels_counts_and_ids(
 
     out = capsys.readouterr().out
     assert code == 0
-    assert f"question {question_id}: version 1 (candidate, edit 0)" in out
+    assert f"question {question_id}: version 1 (candidate, edit 0; sign off with " in out
     # The shortlist: key, label, count and the example answer ids the
     # reviewer would open (docs/02, step 8's screen), then the longlist with
     # what each folded into.
@@ -246,6 +253,93 @@ def test_the_sign_off_command_freezes_v2_and_refuses_a_second(
         {"q": safety},
     ).fetchone()
     assert state == {"status": "themes_ready", "versions": 1}
+
+
+def test_a_version_conflict_names_both_edit_counters(
+    db: psycopg.Connection[DictRow], db_settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    jobs = ingested(db, db_settings)
+    assert (
+        main(
+            ["run-job", str(jobs["o_reason"]), "--worker", "w1", "--model", "fake"],
+            settings=db_settings,
+        )
+        == 0
+    )
+    question = db.execute(
+        "SELECT question_id FROM job WHERE id = %s", (jobs["o_reason"],)
+    ).fetchone()
+    assert question is not None
+    question_id = question["question_id"]
+    capsys.readouterr()
+
+    # consult themes prints the value --expect-version wants, the edit
+    # counter, not the version number: "edit 0", not "version 1".
+    assert main(["themes", str(question_id)], settings=db_settings) == 0
+    out = capsys.readouterr().out
+    assert "version 1 (candidate, edit 0; sign off with --expect-version 0)" in out
+    capsys.readouterr()
+
+    # A reviewer who typed the version number instead gets a conflict that
+    # names both counters, not a message that misreads the state as
+    # "moved on from edit 1" when the list is still at edit 0.
+    reviewer = "11111111-2222-3333-4444-555555555555"
+    code = main(
+        ["sign-off", str(question_id), "--reviewer", reviewer, "--expect-version", "1"],
+        settings=db_settings,
+    )
+    out = capsys.readouterr().out
+    assert code == 1
+    assert out == f"question {question_id}: conflict, expected edit 1, the list is at edit 0\n"
+
+
+def test_themes_reads_the_same_after_sign_off(
+    db: psycopg.Connection[DictRow], db_settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    jobs = ingested(db, db_settings)
+    assert (
+        main(
+            ["run-job", str(jobs["o_reason"]), "--worker", "w1", "--model", "fake"],
+            settings=db_settings,
+        )
+        == 0
+    )
+    question = db.execute(
+        "SELECT question_id FROM job WHERE id = %s", (jobs["o_reason"],)
+    ).fetchone()
+    assert question is not None
+    question_id = question["question_id"]
+    reviewer = "11111111-2222-3333-4444-555555555555"
+    assert (
+        main(
+            ["sign-off", str(question_id), "--reviewer", reviewer, "--expect-version", "0"],
+            settings=db_settings,
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    code = main(["themes", str(question_id)], settings=db_settings)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert f"question {question_id}: version 2 (signed_off" in out
+
+    # Every longlist entry still folds into the shortlist theme it merged
+    # into, not into a copy of itself: sign_off's own copy points a
+    # theme's lineage at the candidate row it was copied from, and that
+    # is not the same thing as what a longlist entry folded into.
+    assert re.search(r"ACCESS_\d+ > ACCESS\b", out)
+    assert not re.search(r"(ACCESS_\d+) > \1\b", out)
+
+    # A count on every shortlist theme: "-" rather than "None" for the
+    # fallback themes sign_off adds with no preview_count of their own.
+    assert "count None" not in out
+    assert re.search(r"^\s+OTHER\s+\S.*count -$", out, re.M)
+
+    # The examples a reviewer saw before sign-off are still there:
+    # sign_off doesn't copy theme_example, so this reads the source
+    # candidate's rows through the same lineage pointer instead.
+    assert re.search(r"^\s+ACCESS\s+\S.*\bexamples \d+", out, re.M)
 
 
 def test_dispatch_runs_under_a_role_from_every_command(
@@ -435,3 +529,78 @@ def test_run_job_reports_a_lost_lease_found_while_recording_a_failure(
     out = capsys.readouterr().out
     assert code == 1
     assert "lease_lost" in out and "Traceback" not in out
+
+
+def test_run_job_refuses_a_spent_job_and_a_map_job(
+    db: psycopg.Connection[DictRow], db_settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # run-job claims by id, with no pick in front of the claim to apply
+    # what the worker's pick applies (docs/02, step 5): the retry budget,
+    # attempts < 5 (ADR-002), past which a job is the reconciler's to fail
+    # and nobody's to run again (docs/02, section 5), and the command's
+    # own kind, find_themes (its help line). A fifth attempt gone quiet and
+    # a queued map_themes job are each refused at the claim, and each row
+    # is left as it was. The spent job carries the alias and seed its
+    # first dispatch stamped, so nothing but the claim stands in its way.
+    signed = signed_off_fixture(db)
+    spent = db.execute(
+        """
+        UPDATE job SET status = 'running', attempts = %s, claimed_by = 'w-dead',
+               heartbeat_at = now() - %s, model_alias = 'fake', params = %s
+         WHERE consultation_id = %s AND kind = 'find_themes' AND question_id <> %s
+        RETURNING id
+        """,
+        (RETRY_BUDGET, STALE, Jsonb({"seed": 7}), signed.consultation_id, signed.question_id),
+    ).fetchone()
+    assert spent is not None
+    db.commit()
+
+    for job_id in (spent["id"], signed.job_id):
+        before = db.execute("SELECT * FROM job WHERE id = %s", (job_id,)).fetchone()
+        code = main(
+            ["run-job", str(job_id), "--worker", "w-cli", "--model", "fake"],
+            settings=db_settings,
+        )
+        out = capsys.readouterr().out
+        assert code == 1
+        assert f"job {job_id}: not claimable" in out
+        assert db.execute("SELECT * FROM job WHERE id = %s", (job_id,)).fetchone() == before
+
+
+def test_run_job_records_an_unexpected_failure_as_a_code(
+    db: psycopg.Connection[DictRow],
+    db_settings: Settings,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # worker._run's fourth branch, in run-job too: anything that isn't a
+    # reply error, a gateway error or a lost lease goes on the row as
+    # worker_error under the fence, and the line names the code and the
+    # class, never the message (CLAUDE.md, rule 8; THREAT_MODEL.md,
+    # section 2). Left to escape, it leaves the committed claim running
+    # with no code until the lease goes stale ten minutes later.
+    jobs = ingested(db, db_settings)
+    message = "crashed while reading: The towpath floods"
+
+    def crash(conn: object, llm: object, lease: Lease, **_: object) -> Advance:
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(themes, "run_find_themes", crash)
+    code = main(
+        ["run-job", str(jobs["o_reason"]), "--worker", "w1", "--model", "fake"],
+        settings=db_settings,
+    )
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "worker_error" in captured.out and "RuntimeError" in captured.out
+    for printed in (captured.out, captured.err):
+        assert message not in printed and "towpath" not in printed
+    row = db.execute(
+        "SELECT status, error_code, provider_request_id FROM job WHERE id = %s",
+        (jobs["o_reason"],),
+    ).fetchone()
+    assert row == {
+        "status": "failed_retryable",
+        "error_code": "worker_error",
+        "provider_request_id": None,
+    }

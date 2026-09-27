@@ -94,6 +94,20 @@ def split_options(cell: str) -> tuple[str, ...]:
     return tuple(option.strip() for option in cell.split(",") if option.strip())
 
 
+def spelt_by(label: str, options: Sequence[str]) -> slice | None:
+    """Where in `options` a run of two or more adjacent options, joined by
+    ", ", spells `label`: the pieces split_options made of it, or None."""
+    for start in range(len(options)):
+        joined = options[start]
+        for end in range(start + 1, len(options)):
+            joined = f"{joined}, {options[end]}"
+            if joined == label:
+                return slice(start, end + 1)
+            if not label.startswith(joined):
+                break
+    return None
+
+
 def _cell(value: object) -> str:
     return "" if value is None else str(value).strip()
 
@@ -110,6 +124,9 @@ def _rows(
         problems.append(f"{sheet}: sheet missing")
         return
     worksheet = workbook[sheet]
+    # Rows by what the sheet holds, not by the dimension it declares, as in
+    # consult.responses.
+    worksheet.reset_dimensions()
     rows = (
         check_width(tuple(check_cell(_cell(value), caps) for value in row), caps)
         for row in guarded(worksheet.iter_rows(values_only=True))
@@ -122,7 +139,11 @@ def _rows(
     for values in rows:
         if not any(values):
             continue
-        yield dict(zip(expected, values, strict=False))
+        # A row ends at its last filled cell, so a short one is padded to
+        # the header, as responses._fitted pads a responses row, and a
+        # missing cell is a problem the checks below report, not a KeyError.
+        padded = [*values, *[""] * (len(expected) - len(values))]
+        yield dict(zip(expected, padded[: len(expected)], strict=True))
 
 
 def read_definition(path: Path, caps: Caps = DEFAULT_CAPS) -> Definition:

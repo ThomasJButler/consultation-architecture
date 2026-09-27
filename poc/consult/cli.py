@@ -38,6 +38,7 @@ import socket
 import threading
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from uuid import UUID
 
@@ -61,6 +62,7 @@ from consult.config import Settings
 from consult.configure import ConfigureError, configure, defaults
 from consult.definition import Definition, DefinitionError, read_definition
 from consult.dispatch import dispatch
+from consult.errors import ErrorCode
 from consult.fake_model import OfflineModel
 from consult.ingest import IngestError, ingest
 from consult.inputs import InputError
@@ -74,7 +76,11 @@ from consult.store import PIPELINE_ROLE, as_role
 from consult.validate import Report, validate
 from consult.worker import Outcome
 
-logger = logging.getLogger(__name__)
+# Named explicitly, not by __name__: the Makefile's targets run this
+# module as __main__ (`python -m consult.cli`), where __name__ is
+# "__main__" and every line here would log under that name instead of
+# consult.cli, the name .venv/bin/consult's console script gives it.
+logger = logging.getLogger("consult.cli")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -141,7 +147,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help=(
             "attr:<column>=<value>, theme:<key> (OR'd, repeatable), "
-            "other:<question>.theme=<key>, or with=duplicates (docs/02, step 11); repeatable"
+            "other:<column_ref>.theme=<key>, e.g. other:o_safety.theme=ACCESS, "
+            "or with=duplicates (docs/02, step 11); repeatable"
         ),
     )
     run_query.add_argument(
@@ -190,19 +197,21 @@ def _validate(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def _department(conn: psycopg.Connection[DictRow], name: str) -> UUID:
-    # Find or create in one statement on the unique name, so two runs
-    # racing on a new department can't each make one. The no-op SET is what
-    # gets RETURNING to yield the existing row.
-    found = conn.execute(
-        """
-        INSERT INTO department (name) VALUES (%s)
-        ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
-        RETURNING id
-        """,
+    # Find or create on the unique name, so two runs racing on a new
+    # department can't each make one. DO NOTHING takes no lock on a row
+    # that's already there, where a DO UPDATE setting the unique column
+    # would lock it FOR UPDATE until the ingest commits, and that blocks
+    # the FOR KEY SHARE every insert referencing department takes, a
+    # worker's checkpoints and tags among them (PostgreSQL 17 manual,
+    # 13.3.2). A racing insert of the same name makes DO NOTHING wait for
+    # it to commit, so the SELECT that follows finds its row.
+    created = conn.execute(
+        "INSERT INTO department (name) VALUES (%s) ON CONFLICT (name) DO NOTHING RETURNING id",
         (name,),
     ).fetchone()
+    found = created or conn.execute("SELECT id FROM department WHERE name = %s", (name,)).fetchone()
     if found is None:
-        raise LookupError("department insert returned no row")
+        raise LookupError("department neither inserted nor found")
     return UUID(str(found["id"]))
 
 
@@ -267,7 +276,7 @@ def _ingest(args: argparse.Namespace, settings: Settings) -> int:
     )
     print(
         f"consultation {consultation_id}: {staged.rows} rows staged, "
-        f"{ingested.respondents} respondents, {ingested.answers} answers, "
+        f"{ingested.respondents} respondents, {ingested.answers} answer rows, "
         f"{ingested.vault_rows} identity rows, {ingested.duplicate_answers} duplicate answers, "
         f"{ingested.duplicate_respondents} duplicate respondents, {ingested.jobs} jobs; processing"
     )
@@ -282,6 +291,9 @@ def _run_job(args: argparse.Namespace, settings: Settings) -> int:
     started = time.monotonic()
     llm = OfflineModel()
     with store.connect(settings) as conn:
+        # Bounded as the worker's connection is: a run paused mid-batch
+        # loses its job to a takeover (store.bound_idle_transactions).
+        store.bound_idle_transactions(conn)
         # Dispatched, then claimed and run as the pipeline role, whose
         # grants are the control on the worker's path (docs/06, section
         # 2.4): SET ROLE outlives the commits between batches, and RESET
@@ -289,7 +301,10 @@ def _run_job(args: argparse.Namespace, settings: Settings) -> int:
         with as_role(conn, PIPELINE_ROLE):
             dispatch(conn, settings)
             conn.commit()
-            lease = jobs.claim(conn, args.job, args.worker)
+            # The command runs find_themes and nothing else (its help
+            # line), and a job at the retry budget is the reconciler's to
+            # fail (ADR-002; docs/02, section 5): the claim refuses both.
+            lease = jobs.claim(conn, args.job, args.worker, kind="find_themes")
             if lease is None:
                 state = conn.execute("SELECT status FROM job WHERE id = %s", (args.job,)).fetchone()
                 print(f"job {args.job}: not claimable ({state['status'] if state else 'unknown'})")
@@ -340,6 +355,24 @@ def _run_job(args: argparse.Namespace, settings: Settings) -> int:
             except LeaseLostError as exc:
                 conn.rollback()
                 print(f"job {args.job}: {exc.code.value}")
+                return 1
+            except Exception as exc:
+                # worker._run's fourth branch: anything else is worker_error
+                # under the fence, so the claim doesn't sit running with no
+                # code until the lease goes stale. The class is printed and
+                # the message nowhere, since it could carry an answer
+                # (CLAUDE.md, rule 8).
+                conn.rollback()
+                try:
+                    jobs.record_failure(conn, lease, ErrorCode.WORKER_ERROR)
+                except LeaseLostError as lost:
+                    conn.rollback()
+                    print(f"job {args.job}: {lost.code.value}")
+                    return 1
+                conn.commit()
+                print(
+                    f"job {args.job}: failed ({ErrorCode.WORKER_ERROR.value}: {type(exc).__name__})"
+                )
                 return 1
             conn.commit()
         summary = conn.execute(
@@ -393,6 +426,10 @@ def _themes(args: argparse.Namespace, settings: Settings) -> int:
     then the longlist with what each folded into. Keys, labels and numbers;
     the quotes themselves are the sign-off screen's to show (docs/02, step 8)."""
     with store.connect(settings) as conn:
+        exists = conn.execute("SELECT 1 FROM question WHERE id = %s", (args.question,)).fetchone()
+        if exists is None:
+            print(f"question {args.question}: not found")
+            return 1
         version = conn.execute(
             """
             SELECT id, version_no, status, edit_version FROM theme_set_version
@@ -403,27 +440,53 @@ def _themes(args: argparse.Namespace, settings: Settings) -> int:
         if version is None:
             print(f"question {args.question}: no theme set yet")
             return 1
+        # lineage_theme_id carries two different meanings depending on when
+        # it was set: themes.condense sets it, within one version, to the
+        # shortlist theme a longlist entry folded into; transitions.sign_off
+        # then reuses the same column, across versions, to point a copied
+        # row at the candidate row it was copied from. `source` resolves
+        # the second meaning; when a row is native to its own version (a
+        # candidate, not yet signed off), source already IS the fold
+        # target, so the CASE reads its key directly there rather than
+        # hopping again through `folded`, which would be the shortlist
+        # row's own (always null) lineage. Examples ride the same source
+        # pointer: sign_off doesn't copy theme_example, so a signed-off
+        # row's examples are the row it was copied from carries.
         rows = conn.execute(
             """
             SELECT t.key, t.label, t.description, t.is_longlist, t.preview_count,
-                   l.key AS folded_into,
+                   CASE WHEN source.theme_set_version_id = t.theme_set_version_id
+                        THEN source.key ELSE folded.key END AS folded_into,
                    (SELECT string_agg(e.answer_id::text, ', ' ORDER BY e.rank)
-                      FROM theme_example e WHERE e.theme_id = t.id) AS examples
-              FROM theme t LEFT JOIN theme l ON l.id = t.lineage_theme_id
+                      FROM theme_example e
+                     WHERE e.theme_id = coalesce(t.lineage_theme_id, t.id)) AS examples
+              FROM theme t
+              LEFT JOIN theme source ON source.id = t.lineage_theme_id
+              LEFT JOIN theme folded ON folded.id = source.lineage_theme_id
              WHERE t.theme_set_version_id = %s
              ORDER BY t.is_longlist, t.preview_count DESC NULLS LAST, t.key
             """,
             (version["id"],),
         ).fetchall()
+    # --expect-version wants the edit counter, not the version number, so
+    # a candidate's own line names the value to pass sign-off next.
+    hint = (
+        f"; sign off with --expect-version {version['edit_version']}"
+        if version["status"] == "candidate"
+        else ""
+    )
     print(
         f"question {args.question}: version {version['version_no']} "
-        f"({version['status']}, edit {version['edit_version']})"
+        f"({version['status']}, edit {version['edit_version']}{hint})"
     )
     print("shortlist:")
     for row in rows:
         if row["is_longlist"]:
             continue
-        line = f"  {row['key']}  {report.shown(row['label'])}  count {row['preview_count']}"
+        # A fallback theme (OTHER, NO_REASON) carries no preview_count of
+        # its own: never previewed, so never counted (transitions.sign_off).
+        count = row["preview_count"] if row["preview_count"] is not None else "-"
+        line = f"  {row['key']}  {report.shown(row['label'])}  count {count}"
         if row["examples"]:
             line += f"  examples {row['examples']}"
         print(line)
@@ -452,9 +515,21 @@ def _sign_off(args: argparse.Namespace, settings: Settings) -> int:
             )
         except transitions.SignOffConflictError:
             conn.rollback()
+            # The candidate itself, not the caller's stale guess: read
+            # after the refusal, so the message names where the list
+            # actually is rather than assuming it moved past what was asked.
+            current = conn.execute(
+                """
+                SELECT edit_version FROM theme_set_version
+                 WHERE question_id = %s AND status = 'candidate'
+                 ORDER BY version_no DESC LIMIT 1
+                """,
+                (args.question,),
+            ).fetchone()
+            at = current["edit_version"] if current is not None else "unknown"
             print(
-                f"question {args.question}: conflict, the list has moved on from edit "
-                f"{args.expect_version}"
+                f"question {args.question}: conflict, expected edit "
+                f"{args.expect_version}, the list is at edit {at}"
             )
             return 1
         except transitions.TransitionError:
@@ -503,14 +578,34 @@ def _worker_name(name: str | None) -> str:
     return name or f"{socket.gethostname()}-{os.getpid()}"
 
 
-def _print_outcome(outcome: Outcome | None) -> None:
+def _print_outcome(conn: psycopg.Connection[DictRow], outcome: Outcome | None) -> int:
+    """Prints the outcome and returns the exit code: 0 for nothing to run
+    or a success, 1 when the run's own attempt failed. The question and
+    consultation are read back rather than assumed, the same as
+    `_run_job`'s summary, so a script reading this line sees the states
+    the job actually left rather than having to reach for psql."""
     if outcome is None:
         print("nothing to run")
-        return
+        return 0
     line = f"job {outcome.job_id}: {outcome.kind} {outcome.status}, attempt {outcome.attempts}"
     if outcome.error_code is not None:
         line += f", {outcome.error_code.value}"
+    state = conn.execute(
+        """
+        SELECT j.question_id, q.status AS question, c.status AS consultation
+          FROM job j JOIN question q ON q.id = j.question_id
+          JOIN consultation c ON c.id = j.consultation_id
+         WHERE j.id = %s
+        """,
+        (outcome.job_id,),
+    ).fetchone()
+    if state is not None:
+        line += (
+            f"; question {state['question_id']} {state['question']}; "
+            f"consultation {state['consultation']}"
+        )
     print(line)
+    return 1 if outcome.error_code is not None else 0
 
 
 def _log_outcome(outcome: Outcome | None) -> None:
@@ -572,22 +667,39 @@ def _worker(args: argparse.Namespace, settings: Settings) -> int:
     worker and not to this loop's own manual convenience (`_stop_flag`'s
     docstring). The loop isn't run by a test: real time isn't something a
     test should wait on, and `--once` is what `test_cli_worker.py` drives
-    instead."""
+    instead.
+
+    `idle_in_transaction_session_timeout` can end `run_once`'s own
+    connection rather than only the transaction it bounds
+    (`store.bound_idle_transactions`, `worker.run_once`'s docstring):
+    `run_once` already reports that as an `Outcome` instead of raising
+    (worker.py's module docstring), but `_print_outcome` still needs a
+    live connection to read the question and consultation back, so a
+    fresh one replaces the closed one before that call, and carries into
+    the loop's next iteration.
+    """
     llm = OfflineModel()
     name = _worker_name(args.worker)
-    with store.connect(settings) as conn:
+    conn = store.connect(settings)
+    try:
         if args.once:
             outcome = worker.run_once(conn, llm, worker=name)
-            _print_outcome(outcome)
+            if conn.closed:
+                conn = store.connect(settings)
+            code = _print_outcome(conn, outcome)
             _log_outcome(outcome)
-            return 0
+            return code
         stop = _stop_flag()
         while not stop.is_set():
             outcome = worker.run_once(conn, llm, worker=name)
-            _print_outcome(outcome)
+            if conn.closed:
+                conn = store.connect(settings)
+            _print_outcome(conn, outcome)
             _log_outcome(outcome)
             if outcome is None:
                 stop.wait(args.poll_seconds)
+    finally:
+        conn.close()
     return 0
 
 
@@ -632,26 +744,71 @@ def _query(args: argparse.Namespace, settings: Settings) -> int:
     The web app passes the signed-in user's; the command-line operator
     is trusted to name one with `--department`, and without it the
     command reads the question's own first, under the same role.
+
+    The theme table, the related distribution and the with-duplicates
+    theme table run in one REPEATABLE READ, read-only transaction, the
+    same reasoning as `export.write_workbook`'s own gather: three
+    statements under READ COMMITTED would each take their own snapshot
+    (Postgres documentation, 13.2.1), and `hidden`, below, is a
+    difference between two of them, so a tag batch, a retraction or a
+    sign-off committed between the calls would move it.
     """
     try:
         parsed = query.parse_filters(args.filter or [])
     except FilterError as exc:
         print(f"refused: {exc}")
         return 2
-    with store.connect(settings) as conn, as_role(conn, PIPELINE_ROLE):
-        department_id = args.department or _question_department(conn, args.question)
-        table = query.theme_table(conn, args.question, parsed, department_id=department_id)
-        distribution = query.related_distribution(
-            conn, args.question, parsed, department_id=department_id
-        )
+    with store.connect(settings) as conn:
+        # One REPEATABLE READ, read-only snapshot for the reads below, the
+        # same fix export.write_workbook uses for its own gather: a READ
+        # COMMITTED transaction gives each statement its own snapshot
+        # (Postgres documentation, 13.2.1), so a tag batch, a retraction or
+        # a sign-off committed between the first theme_table call and the
+        # with-duplicates one would otherwise move the hidden count below.
+        # Set before as_role's SET ROLE, the first statement psycopg sends,
+        # so it applies to this transaction and not the next; the
+        # connection is this command's own, opened fresh above, so nothing
+        # needs restoring once it closes.
+        conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+        conn.read_only = True
+        with as_role(conn, PIPELINE_ROLE):
+            try:
+                department_id = args.department or _question_department(conn, args.question)
+                query.check_filter_names(conn, args.question, parsed, department_id=department_id)
+                table = query.theme_table(conn, args.question, parsed, department_id=department_id)
+                distribution = query.related_distribution(
+                    conn, args.question, parsed, department_id=department_id
+                )
+                # What with=duplicates would add: the same scope with the
+                # two IS NULL predicates dropped, less what the default
+                # scope already counts (docs/02 section 7, decision 9).
+                # Naming it is cli.py's half of the finding export.py's
+                # own summary line already carries.
+                shown = query.theme_table(
+                    conn,
+                    args.question,
+                    replace(parsed, with_duplicates=True),
+                    department_id=department_id,
+                )
+            except LookupError:
+                print(f"question {args.question}: not found")
+                return 1
+            except FilterError as exc:
+                print(f"refused: {exc}")
+                return 2
+    hidden = shown.denominator - table.denominator
     logs.log_event(
         logger,
         "queried",
         question_id=args.question,
         theme_count=len(table.rows),
         respondent_count=table.denominator,
+        hidden_count=hidden,
     )
-    print(f"question {args.question}: of {table.denominator} respondents who answered")
+    line = f"question {args.question}: of {table.denominator} respondents who answered"
+    if hidden:
+        line += f" ({hidden} duplicate answers hidden; add --filter with=duplicates to count them)"
+    print(line)
     for row in table.rows:
         pct = (row.respondents / table.denominator * 100) if table.denominator else 0.0
         print(f"  {row.key}  {report.shown(row.label)}  {row.respondents}  {pct:.1f}%")
@@ -669,8 +826,18 @@ def _export(args: argparse.Namespace, settings: Settings) -> int:
     sets no role itself, only the path and the timing.
     """
     started = time.monotonic()
-    with store.connect(settings) as conn:
-        result = export.write_workbook(conn, args.consultation, args.out)
+    try:
+        with store.connect(settings) as conn:
+            result = export.write_workbook(conn, args.consultation, args.out)
+    except LookupError:
+        print(f"consultation {args.consultation}: not found")
+        return 1
+    except export.ExportError as exc:
+        # The code only: THREAT_MODEL.md section 2 forbids the value that
+        # failed a cell riding an exception message, and ExportError's own
+        # docstring carries nothing else.
+        print(f"refused: {exc.code}")
+        return 1
     logs.log_event(
         logger,
         "exported",
@@ -679,12 +846,16 @@ def _export(args: argparse.Namespace, settings: Settings) -> int:
         answer_count=result.answers,
         tag_count=result.tags,
         sheet_count=result.sheets,
+        truncated_cell_count=result.truncated_cells,
         duration_ms=round((time.monotonic() - started) * 1000),
     )
-    print(
-        f"wrote {args.out}: {result.respondents} respondents, {result.answers} answers, "
+    line = (
+        f"wrote {args.out}: {result.respondents} respondents, {result.answers} open answers, "
         f"{result.tags} tags, {result.sheets} sheets"
     )
+    if result.truncated_cells:
+        line += f", {result.truncated_cells} cells truncated at the cap"
+    print(line)
     return 0
 
 

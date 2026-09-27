@@ -454,7 +454,10 @@ def preview(
                 answers=chunk,
             )
             completion = llm.complete(prompt)
-            assignments = parse_assignments(completion, prompt)
+            # An answer left with no key counts for nothing here, where
+            # mapping would refuse it: the preview writes no tag, and has
+            # no retry at size one to send a refused batch to.
+            assignments = parse_assignments(completion, prompt, empty_keys="allow")
             jobs.heartbeat(conn, lease)
             for assignment in assignments:
                 for key in assignment.theme_keys:

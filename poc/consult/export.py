@@ -25,7 +25,7 @@ from uuid import UUID
 import psycopg
 from openpyxl import Workbook
 from openpyxl.cell import WriteOnlyCell
-from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE, Cell
+from openpyxl.cell.cell import Cell
 from openpyxl.utils.exceptions import IllegalCharacterError
 from openpyxl.worksheet._write_only import WriteOnlyWorksheet
 from psycopg.pq import TransactionStatus
@@ -54,22 +54,59 @@ _KEYSET_PAGE = 1000
 _INVALID_SHEET_CHARS = re.compile(r"[\\*?:/\[\]]")
 _MAX_SHEET_TITLE = 31
 
+# XML 1.0's Char production (section 2.2) admits tab, LF, CR, U+0020 to
+# U+D7FF, U+E000 to U+FFFD and U+10000 up, and this is the rest below
+# U+10000: the C0 controls openpyxl's own ILLEGAL_CHARACTERS_RE names
+# (openpyxl 3.1.5, cell.py line 45), the surrogates, and U+FFFE and
+# U+FFFF, which check_string lets through and ElementTree, openpyxl's
+# writer here without lxml, puts raw into a sheet part no XML parser
+# will read.
+_XML_FORBIDDEN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+
+# ECMA-376 Part 1, 22.9.2.19 (ST_Xstring): a spreadsheet decodes _xHHHH_
+# in a cell's text as the character with that code, and openpyxl 3.1.5
+# writes the text as given, so the underscore that opens one is written
+# as _x005F_, the underscore's own escape, the form XlsxWriter writes.
+# A lookahead rather than a match, so an underscore that closes one
+# sequence and opens the next is escaped too.
+_OOXML_ESCAPE = re.compile("_(?=x[0-9A-Fa-f]{4}_)")
+_ESCAPED_UNDERSCORE = "_x005F_"
+
+# Excel's own cell limit, and the length openpyxl 3.1.5's check_string
+# cuts every string to without a word (cell.py line 163). The input's
+# cell cap is the same number (CONSULT_MAX_CELL_CHARS), so the prefix or
+# an escape can take a value at the cap past it. A longer value is cut
+# here instead, short enough to end in the mark, and counted.
+_MAX_CELL_CHARS = 32767
+_CUT_MARK = "..."
+
 
 class ExportError(Exception):
-    """`_cell`'s backstop. Escaping every `ILLEGAL_CHARACTERS_RE` match
-    before the cell is built should leave openpyxl's own `check_string`
-    nothing left to refuse; if some character it still refuses reaches
-    this anyway, `IllegalCharacterError` puts the whole value in its
-    message (openpyxl 3.1.5, cell.py lines 164-165), and THREAT_MODEL.md
-    section 2, line 2 forbids an open answer or a vault value at any
-    level, an exception message included. This carries a code and
-    nothing the value it failed on.
+    """An export refused, carrying a code and nothing else.
+
+    `CELL_VALUE_ILLEGAL` is `_cell`'s backstop. Escaping every
+    `_XML_FORBIDDEN` match before the cell is built should leave
+    openpyxl's own `check_string` nothing left to refuse; if some
+    character it still refuses reaches this anyway,
+    `IllegalCharacterError` puts the whole value in its message (openpyxl
+    3.1.5, cell.py lines 164-165), and THREAT_MODEL.md section 2, line 2
+    forbids an open answer or a vault value at any level, an exception
+    message included, so this carries nothing of the value it failed on.
+
+    `CONNECTION_BUSY` is `write_workbook`'s refusal of a connection with
+    a transaction open, which it has no business ending, and of an
+    autocommit one: it is always idle between statements and psycopg
+    sends no BEGIN for it, so neither `isolation_level` nor `read_only`
+    would ever take hold and the gather would run as separate READ
+    COMMITTED transactions.
     """
 
-    code = "cell_value_illegal"
+    CELL_VALUE_ILLEGAL = "cell_value_illegal"
+    CONNECTION_BUSY = "connection_busy"
 
-    def __init__(self) -> None:
-        super().__init__(self.code)
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
 
 
 def _sheet_title(column_ref: str, used: set[str]) -> str:
@@ -77,32 +114,45 @@ def _sheet_title(column_ref: str, used: set[str]) -> str:
     isn't: `column_ref` is a free-text header from the definition
     workbook (docs/00), not a sheet-safe string, so the six characters
     `_INVALID_SHEET_CHARS` names are stripped and the result truncated to
-    Excel's limit before openpyxl ever sees it. `used` is mutated: titles
-    are de-duplicated here, with a numbered suffix, rather than left to
+    Excel's limit before openpyxl ever sees it. Excel also refuses a
+    title that starts or ends with an apostrophe, so those are stripped
+    from both ends.
+
+    `used` is mutated and holds titles casefolded: titles are
+    de-duplicated here, with a numbered suffix, rather than left to
     openpyxl's own `avoid_duplicate_name`, which runs after the character
-    check above has already raised.
+    check above has already raised, and compared without case, as Excel
+    and `avoid_duplicate_name` both compare them. Two titles differing
+    only in case would otherwise both pass here and have openpyxl append
+    a digit to the second, past the limit.
     """
-    base = _INVALID_SHEET_CHARS.sub("", column_ref)
-    title = f"{base} summary"[:_MAX_SHEET_TITLE]
-    if title not in used:
-        used.add(title)
+    base = _INVALID_SHEET_CHARS.sub("", column_ref).lstrip("'")
+    title = f"{base} summary"[:_MAX_SHEET_TITLE].rstrip("'")
+    if title.casefold() not in used:
+        used.add(title.casefold())
         return title
     n = 2
     while True:
         suffix = f" ({n})"
         candidate = title[: _MAX_SHEET_TITLE - len(suffix)] + suffix
-        if candidate not in used:
-            used.add(candidate)
+        if candidate.casefold() not in used:
+            used.add(candidate.casefold())
             return candidate
         n += 1
 
 
 def neutralise(value: str) -> str:
     """A value starting with a formula trigger gets a leading apostrophe,
-    the convention every spreadsheet reads as "force this cell to text"
-    (docs/06, section 2.7). The file's own no-answer marker, a lone "-",
-    is left alone: it isn't a formula wherever it's read back, and
-    prefixing it would change what "not answered" looks like (docs/00).
+    the convention CSV and a cell typed by hand both read as "force this
+    cell to text" (docs/06, section 2.7). In the XLSX `write_workbook`
+    saves, the apostrophe is written as part of the string and stays
+    visible when the file is opened: openpyxl sets no `quotePrefix` on
+    the cell (measured against openpyxl 3.1.5, 26 September 2026), so
+    what actually stops the value evaluating there is `_cell`'s own
+    `data_type` forced to "s", not the apostrophe. The file's own
+    no-answer marker, a lone "-", is left alone: it isn't a formula
+    wherever it's read back, and prefixing it would change what "not
+    answered" looks like (docs/00).
     """
     if value == NO_ANSWER:
         return value
@@ -118,35 +168,51 @@ def _or_dash(value: object) -> object:
     return NO_ANSWER if value is None else value
 
 
-def _cell(ws: WriteOnlyWorksheet, value: object) -> Cell:
+def _cell(ws: WriteOnlyWorksheet, value: object) -> tuple[Cell, bool]:
     """Every cell as text, twice over (docs/06, section 2.7): `neutralise`
     above, and `data_type` forced to "s" on top of it, since openpyxl
     infers "f" from a leading "=" on a plain string otherwise (measured
     against openpyxl 3.1.5, 26 September 2026).
 
     A C0 control character other than tab, newline or carriage return
-    (`ILLEGAL_CHARACTERS_RE`, openpyxl 3.1.5, cell.py line 45) fails
-    openpyxl's own `check_string` with the raw value in the exception
-    message it raises (cell.py lines 164-165). An open answer or a vault
-    identity value can carry one, and THREAT_MODEL.md section 2, line 2
-    forbids either riding an exception at any level, so every match is
-    escaped to the visible form `report.shown` already uses for a
-    control character before openpyxl ever sees the string. The `except`
-    is a backstop for a character neither list anticipated: it still
-    can't let the value through.
+    fails openpyxl's own `check_string` with the raw value in the
+    exception message it raises (cell.py lines 164-165), and U+FFFE or
+    U+FFFF passes it and leaves the sheet part malformed XML. An open
+    answer or a vault identity value can carry either, and THREAT_MODEL.md
+    section 2, line 2 forbids a value riding an exception at any level,
+    so every character XML 1.0 forbids (`_XML_FORBIDDEN`) is escaped to
+    the visible form `report.shown` already uses for a control character
+    before openpyxl ever sees the string. The `except` is a backstop for
+    a character neither list anticipated: it still can't let the value
+    through.
+
+    An `_xHHHH_` sequence in the text is escaped after `neutralise`
+    (`_OOXML_ESCAPE`), so Excel shows it as typed rather than decoding
+    `_x003D_` into an `=` that `neutralise` never saw.
+
+    Measured last, once the prefix and the escapes are in: a text past
+    `_MAX_CELL_CHARS` is cut to end in `_CUT_MARK`, and the second value
+    returned says so.
     """
     text = "" if value is None else str(value)
-    text = ILLEGAL_CHARACTERS_RE.sub(lambda match: repr(match.group())[1:-1], text)
+    text = _XML_FORBIDDEN.sub(lambda match: repr(match.group())[1:-1], text)
+    text = _OOXML_ESCAPE.sub(_ESCAPED_UNDERSCORE, neutralise(text))
+    cut = len(text) > _MAX_CELL_CHARS
+    if cut:
+        text = text[: _MAX_CELL_CHARS - len(_CUT_MARK)] + _CUT_MARK
     try:
-        cell = WriteOnlyCell(ws, value=neutralise(text))
+        cell = WriteOnlyCell(ws, value=text)
     except IllegalCharacterError:
-        raise ExportError() from None
+        raise ExportError(ExportError.CELL_VALUE_ILLEGAL) from None
     cell.data_type = "s"
-    return cell
+    return cell, cut
 
 
-def _row(ws: WriteOnlyWorksheet, values: list[object]) -> None:
-    ws.append([_cell(ws, value) for value in values])
+def _row(ws: WriteOnlyWorksheet, values: list[object]) -> int:
+    """One row of text cells; returns how many of them were cut."""
+    cells = [_cell(ws, value) for value in values]
+    ws.append([built for built, _cut in cells])
+    return sum(cut for _built, cut in cells)
 
 
 @dataclass(frozen=True)
@@ -270,8 +336,11 @@ def _latest_signed_off(conn: psycopg.Connection[DictRow], question_id: UUID) -> 
     ).fetchone()
     if version is None:
         return _ThemeSet(None, None, ())
+    # The shortlist and its fallbacks only: sign_off copies the longlist
+    # in too, for lineage, but mapping never offers the model a longlist
+    # key (mapping._shortlist), so a column for one could never be marked.
     keys = conn.execute(
-        "SELECT key FROM theme WHERE theme_set_version_id = %s ORDER BY key",
+        "SELECT key FROM theme WHERE theme_set_version_id = %s AND NOT is_longlist ORDER BY key",
         (version["id"],),
     ).fetchall()
     return _ThemeSet(version["id"], version["version_no"], tuple(row["key"] for row in keys))
@@ -429,11 +498,12 @@ def _write_responses(
     answers: dict[UUID, dict[int, tuple[int | None, str | None]]],
     theme_sets: dict[UUID, _ThemeSet],
     tags: dict[UUID, dict[int, set[str]]],
-) -> None:
+) -> int:
     """docs/02 step 12's first sheet: the respondent id, the vault's
     identity column, every demographic and closed answer from
     `respondent.attrs`, every open question's text, then one column per
-    theme per open question (docs/04, section 6)."""
+    theme per open question (docs/04, section 6). Returns the count of
+    cells cut at the cap."""
     other_questions = [question for question in questions if question.kind != "open"]
 
     header: list[object] = []
@@ -443,7 +513,7 @@ def _write_responses(
     header.extend(question.column_ref for question in open_questions)
     for question in open_questions:
         header.extend(f"{question.column_ref}: {key}" for key in theme_sets[question.id].keys)
-    _row(ws, header)
+    cut = _row(ws, header)
 
     for respondent in respondents:
         values: list[object] = []
@@ -471,30 +541,47 @@ def _write_responses(
             answer_id, _text = current[question.id]
             marked = tags[question.id].get(answer_id, set()) if answer_id is not None else set()
             values.extend("1" if key in marked else None for key in theme_sets[question.id].keys)
-        _row(ws, values)
+        cut += _row(ws, values)
+    return cut
 
 
-def _write_summary(ws: WriteOnlyWorksheet, table: query.ThemeTable) -> None:
+def _write_summary(ws: WriteOnlyWorksheet, table: query.ThemeTable, hidden: int) -> int:
     """docs/02 step 12's per-question summary: key, label, respondents and
     the denominator, straight from `query.theme_table` under the default
     filter, so this number and the per-question dashboard's can't drift
-    apart."""
-    _row(ws, ["key", "label", "respondents", "denominator"])
+    apart. The default filter hides duplicates (docs/02 section 7,
+    decision 9) and the Responses sheet marks every row, so a line under
+    the table, a blank row apart so it isn't read as a theme, names the
+    `hidden` count. Returns the count of cells cut at the cap."""
+    cut = _row(ws, ["key", "label", "respondents", "denominator"])
     for row in table.rows:
-        _row(ws, [row.key, row.label, row.respondents, table.denominator])
+        cut += _row(ws, [row.key, row.label, row.respondents, table.denominator])
+    ws.append([])
+    cut += _row(ws, [f"Duplicate answers hidden: {hidden} (the Responses sheet marks every row)"])
+    return cut
 
 
-def _write_manifest(ws: WriteOnlyWorksheet, manifest: _Manifest) -> None:
-    """docs/02 step 12's manifest, cut to what this schema holds: no
-    prompt hash and no agreement rate, since neither has a column here."""
-    _row(ws, ["field", "value"])
-    _row(ws, ["consultation_id", manifest.consultation_id])
-    _row(ws, ["consultation_name", manifest.consultation_name])
-    _row(ws, ["run_id", manifest.run_id])
-    _row(ws, ["retention_until", _or_dash(manifest.retention_until)])
-    _row(ws, ["exported_at", manifest.exported_at.isoformat()])
-    _row(ws, ["duplicate_answers", manifest.duplicate_answers])
-    _row(ws, ["duplicate_respondents", manifest.duplicate_respondents])
+def _write_manifest(ws: WriteOnlyWorksheet, manifest: _Manifest, cut: int) -> None:
+    """docs/02 step 12's manifest, cut to what this export computes. No
+    prompt hash: `job.prompt_sha256` is a real column (docs/04 section 1)
+    that nothing here, or anywhere else in this codebase, writes yet. No
+    agreement rate either, and that one has no column to write at all:
+    it would have to be derived from the tags, and nothing computes it.
+
+    `cut` is the other sheets' count of cells cut at the cap, and
+    `truncated_cells` adds the rows above it on this one. The rows below
+    it hold ids, counts, model aliases and column refs, each far short
+    of the cap: a column ref is a header stage.py holds to 63 bytes.
+    """
+    cut += _row(ws, ["field", "value"])
+    cut += _row(ws, ["consultation_id", manifest.consultation_id])
+    cut += _row(ws, ["consultation_name", manifest.consultation_name])
+    cut += _row(ws, ["run_id", manifest.run_id])
+    cut += _row(ws, ["retention_until", _or_dash(manifest.retention_until)])
+    cut += _row(ws, ["exported_at", manifest.exported_at.isoformat()])
+    cut += _row(ws, ["duplicate_answers", manifest.duplicate_answers])
+    cut += _row(ws, ["duplicate_respondents", manifest.duplicate_respondents])
+    _row(ws, ["truncated_cells", cut])
     _row(
         ws,
         [
@@ -522,12 +609,22 @@ def _write_manifest(ws: WriteOnlyWorksheet, manifest: _Manifest) -> None:
         )
 
 
+def _in_transaction(conn: psycopg.Connection[DictRow]) -> bool:
+    """Anything but idle: a statement running, a transaction open or
+    failed, or the connection lost. A call rather than the comparison
+    inline, because the status changes under `write_workbook`'s own
+    statements and mypy would otherwise carry the first comparison's
+    answer into its `finally` and call the rollback unreachable."""
+    return conn.info.transaction_status != TransactionStatus.IDLE
+
+
 @dataclass(frozen=True)
 class Exported:
     respondents: int
     answers: int
     tags: int
     sheets: int
+    truncated_cells: int
 
 
 def write_workbook(
@@ -541,22 +638,34 @@ def write_workbook(
     statement and holds it for every statement after (PostgreSQL 17
     manual, 13.2.2), so a retraction, a human tag, a worker insert or a
     new sign-off committed by another session mid-export can't split the
-    workbook across two states of the database, the summary sheet
-    disagreeing with the Responses sheet it's meant to total. psycopg
-    only applies `isolation_level` and `read_only` to the next
-    transaction, and only while the connection is idle, hence the commit
-    before either is set and the reset of both in `finally`, so `conn`
-    comes back to its caller at its own isolation level, not this
-    function's. `exported_at` is read back as that transaction's own
-    `now()` (`_snapshot_now`) rather than Python's clock, for the same
-    reason: it names the instant the snapshot was taken.
+    workbook across two states of the database. The summary sheets aren't
+    the Responses sheet's totals: they count respondents under the default
+    filter, duplicates hidden (docs/02 section 7, decision 9), where the
+    Responses sheet marks every row, and each says under its table how
+    many answers that hides. psycopg only applies `isolation_level` and
+    `read_only` to the next transaction, and only while the connection is
+    idle, so a connection with a transaction open is refused
+    (`ExportError.CONNECTION_BUSY`) rather than committed: those writes
+    are the caller's to commit or roll back. An autocommit connection is
+    refused the same way: it is always idle between statements, so the
+    busy check alone would let it through, but psycopg sends no BEGIN
+    for it, so neither setting would ever take hold and the gather would
+    run as separate READ COMMITTED transactions
+    (`store.connect(settings, autocommit=True)` is the repository's own
+    way to open one). Both settings are saved before they're set and put
+    back in `finally`, so `conn` comes back to its caller at its own
+    isolation level, not this function's. `exported_at` is read back as
+    that transaction's own `now()` (`_snapshot_now`) rather than Python's
+    clock, for the same reason: it names the instant the snapshot was
+    taken.
 
     The reads run as `store.EXPORT_ROLE` (docs/06, section 2.4 as
     corrected), the one role with a grant on the vault and none on the
     pipeline's writes.
     """
-    if conn.info.transaction_status != TransactionStatus.IDLE:
-        conn.commit()
+    if conn.autocommit or _in_transaction(conn):
+        raise ExportError(ExportError.CONNECTION_BUSY)
+    isolation_level, read_only = conn.isolation_level, conn.read_only
     conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
     conn.read_only = True
     try:
@@ -586,6 +695,15 @@ def write_workbook(
                 )
                 for question in open_questions
             }
+            # The same scope with duplicates shown: what its denominator
+            # adds to the default one is what the summary sheet hides.
+            hidden = {
+                question.id: query.theme_table(
+                    conn, question.id, Filter(with_duplicates=True), department_id=department_id
+                ).denominator
+                - summaries[question.id].denominator
+                for question in open_questions
+            }
             manifest_questions = tuple(
                 _manifest_question(conn, question, theme_sets[question.id], tag_counts[question.id])
                 for question in open_questions
@@ -598,10 +716,10 @@ def write_workbook(
         # is what releases the snapshot.
         conn.commit()
     finally:
-        if conn.info.transaction_status != TransactionStatus.IDLE:
+        if _in_transaction(conn):
             conn.rollback()
-        conn.isolation_level = None
-        conn.read_only = None
+        conn.isolation_level = isolation_level
+        conn.read_only = read_only
 
     manifest = _Manifest(
         consultation_id=consultation_id,
@@ -616,7 +734,7 @@ def write_workbook(
 
     workbook = Workbook(write_only=True)
     responses_ws: WriteOnlyWorksheet = workbook.create_sheet("Responses")
-    _write_responses(
+    cut = _write_responses(
         responses_ws,
         questions,
         respondent_id_header,
@@ -627,14 +745,14 @@ def write_workbook(
         theme_sets,
         tags,
     )
-    used_titles = {"Responses", "Manifest"}
+    used_titles = {"Responses".casefold(), "Manifest".casefold()}
     for question in open_questions:
         summary_ws: WriteOnlyWorksheet = workbook.create_sheet(
             _sheet_title(question.column_ref, used_titles)
         )
-        _write_summary(summary_ws, summaries[question.id])
+        cut += _write_summary(summary_ws, summaries[question.id], hidden[question.id])
     manifest_ws: WriteOnlyWorksheet = workbook.create_sheet("Manifest")
-    _write_manifest(manifest_ws, manifest)
+    _write_manifest(manifest_ws, manifest, cut)
     workbook.save(path)
 
     return Exported(
@@ -642,4 +760,5 @@ def write_workbook(
         answers=sum(len(value) for value in answers.values()),
         tags=sum(tag_counts.values()),
         sheets=len(workbook.worksheets),
+        truncated_cells=cut,
     )

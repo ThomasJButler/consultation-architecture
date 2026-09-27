@@ -41,6 +41,22 @@ def test_a_dotenv_line_without_an_equals_sign_is_refused(tmp_path: Path) -> None
         read_dotenv(dotenv)
 
 
+def test_a_malformed_dotenv_line_is_never_echoed(tmp_path: Path) -> None:
+    # A password written with a colon for its equals sign is still the
+    # password, and a ConfigError reaches stderr in a traceback. Every other
+    # ConfigError names a setting and never a value that could be a secret,
+    # so this one names the line by its number.
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "# local settings\nCONSULT_DB_HOST=127.0.0.1\nCONSULT_DB_PASSWORD:marker-4d1f\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError) as refused:
+        read_dotenv(dotenv)
+    assert "marker-4d1f" not in str(refused.value)
+    assert "line 3" in str(refused.value)
+
+
 def test_the_caps_and_rates_come_from_settings(tmp_path: Path) -> None:
     settings = load(
         env={

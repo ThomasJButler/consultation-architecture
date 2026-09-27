@@ -3,16 +3,18 @@ reads it (CLAUDE.md, rule 9; THREAT_MODEL.md, row 3).
 
 The gateway asks for structured output; this module doesn't trust that it
 got it. A mapping reply has to be an object with an `assignments` list
-whose items carry exactly an integer `answer_id` and a list of string
-`theme_keys`, every key from the enum the prompt carried, and every answer
-id the prompt sent has to come back exactly once with none added (docs/02,
-step 9's two-way check). A generation reply has to be an object with a
-`themes` list of key, label and description, keys well-formed and unique.
-A reply that fails is a ReplyError carrying job.error's code and a reason
-from a fixed list, never a word of the reply, because there is no column
-for one (docs/02, section 3.4). The checks here mirror the schemas in
-consult/prompts.py by hand rather than through a validator library, so
-the rules the model is told are the rules the code enforces.
+whose items carry exactly an integer `answer_id` and a list of one or
+more string `theme_keys` (an empty list is allowed only to the preview,
+which counts and writes no tag), every key from the enum the prompt
+carried, and every answer id the prompt sent has to come back exactly
+once with none added (docs/02, step 9's two-way check). A generation
+reply has to be an object with a `themes` list of key, label and
+description, keys well-formed and unique. A reply that fails is a
+ReplyError carrying job.error's code and a reason from a fixed list,
+never a word of the reply, because there is no column for one (docs/02,
+section 3.4). The checks here mirror the schemas in consult/prompts.py
+by hand rather than through a validator library, so the rules the model
+is told are the rules the code enforces.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Literal
 
 from consult.errors import ErrorCode
 from consult.llm import Completion, Prompt
@@ -37,10 +40,12 @@ _KEY = re.compile(KEY_PATTERN)
 # newline could open an instruction, a bidirectional override could make
 # the screen read backwards (THREAT_MODEL.md, row 2, "rewrite the theme
 # list"). C0 and C1 controls, zero-width and bidirectional format
-# characters are refused; everything else is the model's to say.
+# characters are refused, and so are U+FFFE and U+FFFF, which XML 1.0's
+# Char production (section 2.2) leaves out and a label would carry into
+# the export's summary sheet; everything else is the model's to say.
 MAX_LABEL = 80
 MAX_DESCRIPTION = 400
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069]")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufffe\uffff]")
 
 
 class Reason(StrEnum):
@@ -58,6 +63,7 @@ class Reason(StrEnum):
     TEXT_MALFORMED = "text_malformed"
     TEXT_TOO_LONG = "text_too_long"
     KEY_RESERVED = "key_reserved"
+    NO_LABEL = "no_label"
 
 
 class ReplyError(Exception):
@@ -103,9 +109,19 @@ def _key(key: str, count: int) -> str:
 
 
 def _plain(text: str, limit: int, count: int) -> str:
-    """One line of plain text within the limit, or a ReplyError."""
+    """One line of plain text within the limit, or a ReplyError.
+
+    A JSON escape can spell a lone surrogate, which has no UTF-8 form, so
+    the text would pass here and fail the first insert as a worker error
+    instead; it's refused as malformed, raised from None because the
+    UnicodeEncodeError keeps the whole text on `.object`.
+    """
     if _CONTROL.search(text):
         raise ReplyError(Reason.TEXT_MALFORMED, count)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ReplyError(Reason.TEXT_MALFORMED, count) from None
     if len(text) > limit:
         raise ReplyError(Reason.TEXT_TOO_LONG, count)
     return text
@@ -138,8 +154,18 @@ def _items(reply: dict[str, object], name: str, fields: tuple[str, ...]) -> list
     return checked
 
 
-def parse_assignments(completion: Completion, prompt: Prompt) -> tuple[Assignment, ...]:
-    """The mapping reply as typed assignments, or a ReplyError."""
+def parse_assignments(
+    completion: Completion,
+    prompt: Prompt,
+    *,
+    empty_keys: Literal["refuse", "allow"] = "refuse",
+) -> tuple[Assignment, ...]:
+    """The mapping reply as typed assignments, or a ReplyError.
+
+    `empty_keys="allow"` is the preview's: it only counts, so an answer
+    with no key adds to no theme and needs no retry (docs/02, step 6).
+    Mapping keeps the default, since there an answer with no key would
+    get no tag at all."""
     items = _items(_object(completion.text), "assignments", ("answer_id", "theme_keys"))
     assignments: list[Assignment] = []
     for item in items:
@@ -150,6 +176,13 @@ def parse_assignments(completion: Completion, prompt: Prompt) -> tuple[Assignmen
         if not isinstance(theme_keys, list) or not all(isinstance(k, str) for k in theme_keys):
             raise ReplyError(Reason.WRONG_SHAPE, len(items))
         assignments.append(Assignment(answer_id, tuple(dict.fromkeys(theme_keys))))
+    # The schema's minItems: an answer with no key is labelled with nothing,
+    # and a batch of them would otherwise pass every check below, get a done
+    # checkpoint and no tag, and never reach the retry at size one (docs/02,
+    # step 9). The count is how many came back empty.
+    unlabelled = sum(1 for assignment in assignments if not assignment.theme_keys)
+    if unlabelled and empty_keys == "refuse":
+        raise ReplyError(Reason.NO_LABEL, unlabelled)
     # The two-way check: every id sent comes back exactly once, and nothing
     # else does. Which way it failed is the reason.
     sent = Counter(prompt.answer_ids)

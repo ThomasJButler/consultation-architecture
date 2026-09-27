@@ -11,10 +11,12 @@ a request id, never the provider's text.
 The second drives `worker.run_once` on the fixtures (docs/02, step 5): the
 oldest runnable job first, each kind through its own runner, a stale lease
 taken over, a spent retry budget left alone, and workers racing on their
-own connections never sharing a job.
+own connections never sharing a job. Another takes over the job of a
+worker paused inside its batch transaction, once the server ends it.
 
 The last races a takeover with nothing left to send against the
-reconciler failing the same job, and pins the lock order the two share.
+reconciler's pass over the same spent job, and pins that the two neither
+deadlock nor fail a live fifth attempt.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ import io
 import logging
 import random
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from typing import Any
@@ -34,17 +37,17 @@ from psycopg.errors import DeadlockDetected
 from psycopg.pq import TransactionStatus
 from psycopg.rows import DictRow
 
-from consult import mapping, store, transitions
+from consult import mapping, reconciler, store, transitions
 from consult import worker as worker_module
 from consult.config import Settings
 from consult.dispatch import dispatch
 from consult.errors import ErrorCode
-from consult.jobs import Lease, LeaseLostError, claim
+from consult.jobs import Lease, claim, heartbeat
 from consult.llm import LLM, Completion, GatewayError, Prompt
 from consult.logs import Formatter
 from consult.mapping import assign, load_map_job, plan, run_map_themes
 from consult.reconciler import recover
-from consult.transitions import Advance, fail_job, sign_off, start_map_themes
+from consult.transitions import Advance, sign_off, start_map_themes
 from consult.worker import (
     BACKOFF_ATTEMPTS,
     BACKOFF_BASE_SECONDS,
@@ -554,6 +557,150 @@ def test_the_worker_records_a_refused_reply_a_lost_lease_and_a_crash_as_codes(
     assert CRASH_MESSAGE not in " ".join(str(v) for row in rows.values() for v in row.values())
 
 
+# Half the ten-minute lease (docs/02, step 5), as Postgres shows it: a
+# paused worker's transaction ends well before its lease can be taken over.
+IDLE_BOUND = "5min"
+# How long the server may take to end the paused transaction once its one
+# second is up before the test calls it stuck: test_fan_in_race.py's bound.
+ENDS_WITHIN_SECONDS = 30
+
+
+def _row_free(db: psycopg.Connection[DictRow], job_id: UUID) -> bool:
+    """Whether no other transaction holds the job's row lock, asked in a
+    transaction of its own and let go."""
+    row = db.execute(
+        "SELECT id FROM job WHERE id = %s FOR UPDATE SKIP LOCKED", (job_id,)
+    ).fetchone()
+    db.rollback()
+    return row is not None
+
+
+def test_a_paused_workers_job_is_taken_over(
+    db: psycopg.Connection[DictRow], db_settings: Settings
+) -> None:
+    # docs/02 step 5 takes a lease over after ten minutes of silence, and
+    # ADR-002 chose that over an advisory-lock lease so a paused process
+    # loses its job. A worker paused inside a batch transaction holds the
+    # job row with an uncommitted heartbeat, and the pick and the re-send
+    # both skip a held row, so nothing takes the job until the server ends
+    # that transaction. The paused worker's connection here is bounded at
+    # one second, the product's own bound shortened so the test needn't
+    # wait five minutes. The paused job is the older of the fixture's two,
+    # so the pick that follows takes it and not the other.
+    consultation_id = dispatched_fixture(db, db_settings)
+    older, _newer = _by_id(db, consultation_id, "find_themes")
+    db.execute(
+        "UPDATE job SET created_at = created_at - %s WHERE id = %s",
+        (timedelta(minutes=1), older["id"]),
+    )
+    paused = claim(db, older["id"], "w-paused")
+    assert paused is not None
+    db.execute("UPDATE job SET heartbeat_at = now() - %s WHERE id = %s", (STALE, paused.job_id))
+    db.commit()
+
+    holder = store.connect(db_settings)
+    try:
+        store.bound_idle_transactions(holder, timedelta(seconds=1))
+        holder.commit()
+        # The worker's next batch starts with its heartbeat, and the
+        # process pauses before the commit.
+        heartbeat(holder, paused)
+        deadline = time.monotonic() + ENDS_WITHIN_SECONDS
+        while not _row_free(db, paused.job_id) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        freed = _row_free(db, paused.job_id)
+
+        outcome = run_once(db, RecordingLLM(), worker="w-next")
+
+        # The paused worker, waking, finds its own connection closed: the
+        # server ends the whole session on the bound, not just the
+        # transaction (PostgreSQL 17 manual, 19.11.1), so the heartbeat's
+        # commit fails on the dead connection and never reaches the fence.
+        # Whether the client reads the server's own error or only the
+        # closed socket, it's a psycopg error either way.
+        with pytest.raises(psycopg.Error):
+            holder.commit()
+    finally:
+        holder.close()
+
+    assert freed
+    assert outcome == Outcome(paused.job_id, "find_themes", "succeeded", 2)
+    # The worker bounds its own connection, and so does the reconciler.
+    shown = db.execute("SHOW idle_in_transaction_session_timeout").fetchone()
+    assert shown == {"idle_in_transaction_session_timeout": IDLE_BOUND}
+    with store.connect(db_settings) as other:
+        reconciler.reconcile(other, db_settings)
+        shown = other.execute("SHOW idle_in_transaction_session_timeout").fetchone()
+    assert shown == {"idle_in_transaction_session_timeout": IDLE_BOUND}
+
+
+def test_a_worker_cut_off_by_the_idle_bound_reports_it(
+    db: psycopg.Connection[DictRow], db_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`idle_in_transaction_session_timeout` ends the whole session, not
+    only the transaction (PostgreSQL 17 manual, 19.11.1): a worker paused
+    between its first checkpoint's own writes and the commit that follows
+    them wakes to a connection the server has already closed, and every
+    later interaction with it, `_record`'s own rollback included, raises
+    the same way. `run_once` is pinned to report that as an Outcome with
+    a code and one `job_failed` line rather than raising it (worker.py's
+    module docstring: one log line per job)."""
+    signed = signed_off_fixture(db)
+    db.commit()
+
+    # store.bound_idle_transactions's own default is five minutes
+    # (store.IDLE_IN_TRANSACTION_TIMEOUT), a default parameter bound at
+    # definition time, so it's the call `run_once` makes that's replaced
+    # here rather than the constant.
+    monkeypatch.setattr(
+        worker_module,
+        "bound_idle_transactions",
+        lambda conn: store.bound_idle_transactions(conn, timedelta(seconds=1)),
+    )
+
+    conn = store.connect(db_settings)
+    real_commit = conn.commit
+    commits = {"n": 0}
+
+    def pausing_commit() -> None:
+        commits["n"] += 1
+        if commits["n"] == 3:
+            # Commit 1 is the claim's; commit 2 is start_map_themes and
+            # the opening heartbeat, ahead of the first model call; commit
+            # 3 is the first batch's tags and checkpoint, after_batch's
+            # own commit (mapping.assign; mapping._send). Long enough past
+            # the one-second bound for the server to have ended the
+            # session before this reaches it.
+            time.sleep(1.5)
+        real_commit()
+
+    monkeypatch.setattr(conn, "commit", pausing_commit)
+
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(Formatter())
+    root = logging.getLogger()
+    root.addHandler(handler)
+    previous_level = root.level
+    root.setLevel(logging.INFO)
+    try:
+        outcome = run_once(conn, RecordingLLM(), worker="w-cut-off")
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(previous_level)
+        conn.close()
+
+    # Nothing of the run is written (the server rolled the open
+    # transaction back with the session), so the job's status is exactly
+    # what claim left it: running, at its first attempt.
+    assert outcome == Outcome(signed.job_id, "map_themes", "running", 1, ErrorCode.LEASE_LOST)
+    assert conn.closed
+    output = stream.getvalue()
+    assert output.count("job_failed") == 1
+    assert "error_code=lease_lost" in output
+    assert f"job_id={signed.job_id}" in output
+
+
 def test_a_takeover_with_nothing_left_does_not_deadlock_the_reconciler(
     db: psycopg.Connection[DictRow], db_settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -577,11 +724,13 @@ def test_a_takeover_with_nothing_left_does_not_deadlock_the_reconciler(
     # run. The worker's fifth attempt holds the job row (assign's opening
     # heartbeat) before the reconciler scans, and the reconciler holds the
     # consultation (_fail_each's lock) before the worker's finish asks for
-    # it. fail_job takes the consultation and then the job (transitions.py);
-    # a finish in the heartbeat's transaction takes them the other way round.
+    # it. _fail_each takes the consultation and then the job (transitions.py
+    # fail_job's order); a finish in the heartbeat's transaction takes them
+    # the other way round.
     worker_holds_job = threading.Event()
     reconciler_holds_consultation = threading.Event()
     worker_raised: list[Exception] = []
+    lock_consultation = transitions.lock_consultation
 
     def assign_after_a_silence(*args: Any, **kwargs: Any) -> int:
         # Silent past the lease between its claim and its first heartbeat,
@@ -596,9 +745,11 @@ def test_a_takeover_with_nothing_left_does_not_deadlock_the_reconciler(
         reconciler_holds_consultation.wait(timeout=30)
         return ran
 
-    def announce_then_fail(conn: psycopg.Connection[DictRow], job_id: UUID) -> Advance:
-        reconciler_holds_consultation.set()
-        return fail_job(conn, job_id)
+    def lock_then_announce(conn: psycopg.Connection[DictRow], consultation_id: UUID) -> None:
+        lock_consultation(conn, consultation_id)
+        # The worker runs on `db`, so only the reconciler's lock announces.
+        if conn is not db:
+            reconciler_holds_consultation.set()
 
     def recording_runner(
         conn: psycopg.Connection[DictRow], llm: LLM, lease: Lease, **kwargs: Any
@@ -617,7 +768,7 @@ def test_a_takeover_with_nothing_left_does_not_deadlock_the_reconciler(
             return recover(conn)
 
     monkeypatch.setattr(mapping, "assign", assign_after_a_silence)
-    monkeypatch.setattr(transitions, "fail_job", announce_then_fail)
+    monkeypatch.setattr(transitions, "lock_consultation", lock_then_announce)
     monkeypatch.setitem(worker_module._RUNNERS, "map_themes", recording_runner)
     llm = FakeLLM([])
 
@@ -632,17 +783,19 @@ def test_a_takeover_with_nothing_left_does_not_deadlock_the_reconciler(
     raised = [*worker_raised, *([reconciler_error] if reconciler_error else [])]
     assert [exc for exc in raised if isinstance(exc, DeadlockDetected)] == []
     assert reconciler_error is None
-    # Statement 2 fails the spent fifth attempt, and the worker's finish
-    # meets its fence: the lease is lost and nothing more is written.
-    assert reconciling.result() == (0, 1)
-    assert [type(exc) for exc in worker_raised] == [LeaseLostError]
-    assert outcome == Outcome(
-        signed.job_id, "map_themes", "failed", RETRY_BUDGET, ErrorCode.LEASE_LOST
-    )
+    assert reconciler_holds_consultation.is_set()
+    # Statement 2 finds the spent fifth attempt's row held under the
+    # consultation's lock and leaves it: a held row is a live lease
+    # (docs/02, section 5, fails "running with a stale heartbeat"). The
+    # worker's finish takes the consultation once the pass commits, and
+    # the job succeeds on its fifth attempt with nothing sent.
+    assert reconciling.result() == (0, 0)
+    assert worker_raised == []
+    assert outcome == Outcome(signed.job_id, "map_themes", "succeeded", RETRY_BUDGET)
     assert llm.prompts == []
     row = db.execute(
         "SELECT j.status AS job, q.status AS question FROM job j"
         " JOIN question q ON q.id = j.question_id WHERE j.id = %s",
         (signed.job_id,),
     ).fetchone()
-    assert row == {"job": "failed", "question": "map_failed"}
+    assert row == {"job": "succeeded", "question": "complete"}

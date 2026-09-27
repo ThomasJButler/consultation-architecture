@@ -30,7 +30,7 @@ from consult.inputs import (
 @dataclass(frozen=True)
 class Row:
     """One respondent: the file's row number (the header is row 1) and the
-    cells by header, padded with empty strings and cut to the header."""
+    cells by header, padded with empty strings to the header's width."""
 
     no: int
     cells: dict[str, str]
@@ -41,6 +41,16 @@ def _cell(value: object) -> str:
 
 
 def _fitted(header: Sequence[str], values: Sequence[str]) -> dict[str, str]:
+    # Cells are keyed by header, so a filled cell past the last one has no
+    # name to go under, and cut it would take its column with it without a
+    # trace. An XLSX header is only as wide as its own cells once the
+    # sheet's dimension is reset (_raw_rows), so the validator's "column 3
+    # has no name" can't see such a column either. Refused by its
+    # position, never its content; an empty cell there, which a trailing
+    # comma makes, is cut.
+    for position in range(len(header), len(values)):
+        if values[position]:
+            raise InputError(Refusal.UNNAMED_COLUMN, position + 1)
     padded = [*values, *[""] * (len(header) - len(values))]
     return dict(zip(header, padded[: len(header)], strict=True))
 
@@ -61,6 +71,11 @@ class Responses:
         if self.is_xlsx:
             with open_workbook(self.path, caps) as workbook:
                 sheet = workbook.worksheets[0]
+                # The sheet's <dimension> is the file's claim about itself,
+                # and read-only iter_rows pads every row to it: 4,851 bytes
+                # declaring A1:XFD1048576 read as rows of 16,384 cells
+                # (test_inputs.py). Reset, a row is as wide as its cells.
+                sheet.reset_dimensions()
                 for sheet_values in guarded(sheet.iter_rows(values_only=True)):
                     yield check_width(
                         tuple(check_cell(_cell(value), caps) for value in sheet_values), caps

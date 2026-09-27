@@ -148,3 +148,28 @@ def test_a_reviewer_cannot_take_a_fallback_key(db: psycopg.Connection[DictRow]) 
                 expected_version=0,
             )
     assert edit_version_of(db, version_id) == 0
+
+
+def test_a_review_edit_waits_for_themes_ready(db: psycopg.Connection[DictRow]) -> None:
+    # themes.ensure_version makes v1 a candidate at the find_themes job's
+    # first batch, and the job goes on writing it, condensation and the
+    # preview's counts, until the question reaches themes_ready (docs/02,
+    # step 6 and section 6). The reviewer's screen is for that state
+    # (docs/02, step 8); an edit before it lands on a list still being
+    # written, and a merge mid-preview leaves the survivor's count short
+    # of what the preview goes on to count for the theme it folded. So the
+    # guard refuses an edit while the question is still finding, and the
+    # counter doesn't move.
+    consultation_id = make_consultation(db, make_department(db), status="processing")
+    question_id = make_open_question(db, consultation_id, status="finding_themes")
+    version_id = make_theme_set_version(db, question_id)
+    make_theme(db, version_id, "PARKING")
+
+    with pytest.raises(EditConflictError):
+        rename(db, version_id, "PARKING", label="Parking on Mill Lane", expected_version=0)
+    assert edit_version_of(db, version_id) == 0
+
+    db.execute("UPDATE question SET status = 'themes_ready' WHERE id = %s", (question_id,))
+    assert rename(
+        db, version_id, "PARKING", label="Parking on Mill Lane", expected_version=0
+    ) == Edited(version_id, 1)
