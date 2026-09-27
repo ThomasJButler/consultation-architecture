@@ -162,3 +162,12 @@ Postgres table takes 1,600 columns (the review's finding 16, measured on
 PostgreSQL 16.13; `poc/consult/inputs.py`, the `Caps` docstring). The
 cell cap is still Excel's 32,767 characters. The row is left as checked;
 this note is the correction.
+
+## Correction, 27 September 2026
+
+Section 2's reading of the press release, "two orders of magnitude below
+the 22 hours of expert checking", overstates the gap. Twenty-two hours of
+expert time at civil service rates is a few hundred to a couple of
+thousand pounds against £240 of model time: several times, one order of
+magnitude at most. The conclusion stands, that review time is the cost
+that matters; the submission gives the two figures rather than a ratio.

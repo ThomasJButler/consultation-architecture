@@ -201,3 +201,12 @@ A review of PR-02 found fifteen inconsistencies across the design documents; `do
    | Control | Tag | Reason |
    |---|---|---|
    | The SQS queue's policy allows `SendMessage` from the web task role, the worker task role and the reconciler's task role, and `ReceiveMessage` and `DeleteMessage` from the worker role only | SHOULD | Dispatch happens wherever a job row is inserted (`docs/02`, step 4); the reconciler is the slow path. The message is a hint and the claim is conditional (step 5), so a forged or replayed message from a compromised web task is nuisance and not damage: at worst a takeover of a stale lease slightly early. What the policy still buys is that nothing outside those three roles can enqueue at all |
+
+## Correction, 27 September 2026
+
+Section 5, Welsh. "A Welsh answer is routed to a human-read lane" reads as
+if the lane exists. It is on the cut list (`docs/02`, section 11), and
+nothing detects Welsh text at ingest, so until it is built a Welsh answer
+gets the English prompt and English themes, and the search index doesn't
+stem it. The department should be told that at Confirm. The intent is
+unchanged: a dated gap, not a permanent exclusion.
