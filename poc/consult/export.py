@@ -94,7 +94,11 @@ class ExportError(Exception):
     message included, so this carries nothing of the value it failed on.
 
     `CONNECTION_BUSY` is `write_workbook`'s refusal of a connection with
-    a transaction open, which it has no business ending.
+    a transaction open, which it has no business ending, and of an
+    autocommit one: it is always idle between statements and psycopg
+    sends no BEGIN for it, so neither `isolation_level` nor `read_only`
+    would ever take hold and the gather would run as separate READ
+    COMMITTED transactions.
     """
 
     CELL_VALUE_ILLEGAL = "cell_value_illegal"
@@ -642,18 +646,24 @@ def write_workbook(
     `read_only` to the next transaction, and only while the connection is
     idle, so a connection with a transaction open is refused
     (`ExportError.CONNECTION_BUSY`) rather than committed: those writes
-    are the caller's to commit or roll back. Both settings are saved
-    before they're set and put back in `finally`, so `conn` comes back to
-    its caller at its own isolation level, not this function's.
-    `exported_at` is read back as that transaction's own `now()`
-    (`_snapshot_now`) rather than Python's clock, for the same reason: it
-    names the instant the snapshot was taken.
+    are the caller's to commit or roll back. An autocommit connection is
+    refused the same way: it is always idle between statements, so the
+    busy check alone would let it through, but psycopg sends no BEGIN
+    for it, so neither setting would ever take hold and the gather would
+    run as separate READ COMMITTED transactions
+    (`store.connect(settings, autocommit=True)` is the repository's own
+    way to open one). Both settings are saved before they're set and put
+    back in `finally`, so `conn` comes back to its caller at its own
+    isolation level, not this function's. `exported_at` is read back as
+    that transaction's own `now()` (`_snapshot_now`) rather than Python's
+    clock, for the same reason: it names the instant the snapshot was
+    taken.
 
     The reads run as `store.EXPORT_ROLE` (docs/06, section 2.4 as
     corrected), the one role with a grant on the vault and none on the
     pipeline's writes.
     """
-    if _in_transaction(conn):
+    if conn.autocommit or _in_transaction(conn):
         raise ExportError(ExportError.CONNECTION_BUSY)
     isolation_level, read_only = conn.isolation_level, conn.read_only
     conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
