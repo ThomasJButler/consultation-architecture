@@ -17,9 +17,14 @@ small team. That is what this repository is about.
 2. `docs/` holds the reasoning: the brief in my own words, the research with
    sources, the architecture, the decision records, the data model, the cost
    model, the security and governance notes.
-3. `poc/` is a small proof-of-concept of the parts of the design that are easy
-   to claim and hard to get right: the job pipeline's claim, lease and fan-in
-   mechanics, on a real Postgres. It runs offline with a fake model.
+3. `poc/` is a small proof-of-concept of the parts of the design that are
+   easy to claim and hard to get right: the fan-in transaction, lease
+   takeover with a fence, idempotent tag inserts and the indexed filter
+   query, on a real Postgres, each of the four proved by a named test
+   rather than asserted (`poc/TESTING.md`). It runs offline with a fake
+   model, a fixture consultation taken end to end from `consult ingest`
+   through `consult worker`, `consult sign-off`, `consult query` and
+   `consult export`.
 4. `plans/` holds the plan for each pull request, written before the work.
 
 ## What it deliberately does not do
@@ -32,11 +37,11 @@ small team. That is what this repository is about.
 
 ## Handling
 
-The brief and the sample data for this task were received under a recruitment
-process and are marked OFFICIAL. They are not in this repository and never will
-be. Everything here is my own work or synthetic data in the same shape.
+The brief and the sample data for this task were shared in confidence and are
+marked OFFICIAL. They are not in this repository and never will be. Everything
+here is my own work or synthetic data in the same shape.
 
-## Status (26 September 2026)
+## Status (27 September 2026)
 
 Built: the plan, the scaffold, the design documents (brief, research,
 architecture, seven decision records, data model, cost model, security notes
@@ -91,20 +96,29 @@ generator at any scale, and the fourth mechanic proved: at 20,000
 respondents the planner takes the GIN index and probes the answer table
 by its unique key, with what that corrected in `docs/04`, `docs/05` and
 ADR-004 recorded as dated corrections. Two commands, `consult query` and
-`consult export`. Next: final polish (PR-10), run from
-`plans/final-run.md`. Deliberately not built: see above.
+`consult export`.
+Merged: the submission, finished (PR-10): `TESTING.md` names a test for
+each of the four mechanics, pinned by a test that reads it; every design
+document carries a dated correction where the proof-of-concept found it
+otherwise; `poc/README.md` says only what is still unproved; the
+evidence for every submission bullet is in the pull request, and the
+bullets are rewritten from it with the PDF rebuilt; rule 12 is pinned
+over the tracked text. Deliberately not built: see above.
 
 ## How it was built
 
 Test-first, with the checks in CI: ruff, mypy, pytest against a real Postgres,
-pip-audit and bandit (from PR-03 onwards). PR-01 to PR-03 were reviewed
+pip-audit and bandit (from PR-03 onwards; `poc/`'s own `make check` runs the
+same gate). PR-01 to PR-03 were reviewed
 before merging by [ReviewBot Protocol](https://github.com/ThomasJButler/ReviewBotProtocol),
 a code-review tool I built and run myself: several open-weight models read the
 diff independently on my own machine, their findings are compared, and nothing
 leaves the device. From PR-04 the review pass is a Claude code review and a
 Claude security review, run the same way: findings verified, fixed on the
 branch or kept with a reason. What each review found, and what I did about
-it, is in `docs/07-reviews.md`.
+it, is in `docs/07-reviews.md`, one row per pull request, complete to
+row 10, the last being the round on the pull request that finished the
+repository.
 I used Claude throughout, to research, to stress-test alternatives and to
 draft; the decisions are mine.
 

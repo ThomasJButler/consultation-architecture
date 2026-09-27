@@ -430,7 +430,7 @@ def theme_table(
 
 
 # docs/04 section 6's related closed question distribution, as its
-# correction of 26 September 2026 (item 5) has it. A kept N/A is a real
+# correction of 26 September 2026 (item 6) has it. A kept N/A is a real
 # value (docs/02 section 3.2) that ingest stores with no option, so the
 # option is a LEFT JOIN, a blank is left out by its own flag, and N/A is
 # labelled by its value and sorts after every option.

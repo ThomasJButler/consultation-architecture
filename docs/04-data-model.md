@@ -362,8 +362,10 @@ A review of PR-02 found fifteen inconsistencies across the design documents; `do
 
 ## Correction, 26 September 2026
 
-Three things PR-06's code does that the body above doesn't say, found by
-its review and recorded here rather than rewritten into the merged text.
+What the code and its review rounds found that the body above doesn't
+say, recorded here rather than rewritten into the merged text: items 1 to
+3 from PR-06's review, 4 from PR-09's benchmark, 5 from PR-10's evidence
+pass.
 
 1. **Section 2, the staging table's drop.** The proof-of-concept drops the
    table inside the ingest transaction, not after the commit. Its
@@ -392,7 +394,16 @@ its review and recorded here rather than rewritten into the merged text.
    chooses. The shares the planner needed, the GIN pending list after an
    ingest and what the fixture's duplicates do to the numbers are in docs/05's
    correction of the same date.
-5. **Section 6, the related closed question's distribution.** The sketch
+5. **Section 1, the job table and the inference region.** docs/06 section
+   2.1 and docs/02 section 10 both require the inference region recorded on
+   every job, for the DPIA. The `job` row above has no column for it, and
+   neither does `poc/consult/schema.sql`, so nothing in the proof-of-concept
+   records where a call was served. Found on 26 September 2026 by PR-10's
+   evidence pass over the submission's bullet on the gateway. The column
+   belongs beside `model_alias` on `job`, written by the worker from the
+   gateway's response; it is unbuilt here and the manifest can't carry it
+   until it is.
+6. **Section 6, the related closed question's distribution.** The sketch
    inner-joins `question_option`, but a closed answer kept as `N/A`, which
    docs/02 section 3.2 makes a real value, is stored with `option_id` null,
    so everyone who gave it dropped out of the distribution while
@@ -406,7 +417,7 @@ its review and recorded here rather than rewritten into the merged text.
    `poc/tests/test_query_db.py` pins it against a hand count (17 Support,
    22 Oppose, 6 Not sure, 26 `N/A`).
 
-6. **Item 3 above, the department row.** The one-statement find-or-create
+7. **Item 3 above, the department row.** The one-statement find-or-create
    (`INSERT ... ON CONFLICT (name) DO UPDATE`) locked the department row
    `FOR UPDATE` for the whole ingest transaction, because the `SET` named a
    unique-index column, and `FOR UPDATE` conflicts with the `FOR KEY SHARE`

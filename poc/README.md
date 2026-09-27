@@ -13,7 +13,7 @@ signed-off question in batches, and runs the worker loop and the
 reconciler's five statements without a hand on each job, and PR-09 adds
 the per-question filter query, the XLSX export and the plan benchmark
 that proves the fourth mechanic; the section "What it does not prove"
-says what is left, and `TESTING.md` which pull request proves it. This
+says what is left, and `TESTING.md` which test proves it. This
 is not the product, and `../README.md` says what it deliberately leaves
 out.
 
@@ -66,7 +66,7 @@ changes its schema by rewriting `consult/schema.sql` and resetting.
 |---|---|
 | `consult/schema.sql` | Fourteen of the design's sixteen tables (`docs/04`, section 8 says which two stay out), the `vault` and `staging` schemas, the four roles and their grants |
 | `consult/store.py` | Connections with dict rows, `init`, `reset`, `record_failure` |
-| `consult/cli.py` | `consult init [--reset]`; `consult validate RESPONSES --definition WORKBOOK [--json]`; `consult ingest RESPONSES --definition WORKBOOK --name NAME --department NAME`; `consult run-job JOB --worker NAME --model fake`; `consult themes QUESTION`; `consult sign-off QUESTION --reviewer UUID --expect-version N`; `consult worker [--once] [--worker NAME] [--model fake] [--poll-seconds N]`; `consult reconcile`; `consult query QUESTION [--filter F]...`; `consult export CONSULTATION --out PATH` |
+| `consult/cli.py` | `consult init [--reset]`; `consult validate RESPONSES --definition WORKBOOK [--json]`; `consult ingest RESPONSES --definition WORKBOOK --name NAME --department NAME`; `consult run-job JOB --worker NAME --model fake`; `consult themes QUESTION`; `consult sign-off QUESTION --reviewer UUID --expect-version N`; `consult worker [--once] [--worker NAME] [--model fake] [--poll-seconds N]`; `consult reconcile`; `consult query QUESTION [--filter F]... [--department ID]`; `consult export CONSULTATION --out PATH` |
 | `consult/definition.py` | The definition workbook, read into typed questions (`docs/00`) |
 | `consult/responses.py` | The responses file, CSV or XLSX, one row at a time |
 | `consult/tokenise.py` | Multi-select cells matched by longest match against the option vocabulary, never split on commas |
@@ -89,8 +89,8 @@ changes its schema by rewriting `consult/schema.sql` and resetting.
 | `consult/transitions.py` | The only module that writes the consultation's status: `advance_consultation` for both fan-ins, the sign-off guard, the reopen, `start_map_themes` and `fail_job` (`docs/02`, steps 7, 8 and 10, section 6; ADR-001, ADR-003) |
 | `consult/reconciler.py` | The five statements in order, each idempotent: dispatch, recover, retry, re-run both fan-ins, relay (`docs/02`, section 5) |
 | `consult/tags.py` | Tags inserted on the full unique index, retracted in place, never deleted (ADR-004); a pair whose theme, answer and version don't line up writes nothing |
-| `consult/query.py` | The filter grammar parsed to a typed value, the scope CTE composed with `psycopg.sql`, the theme table with its denominator, the related closed question's distribution (`docs/02`, step 11; `docs/04`, section 6) |
-| `consult/export.py` | The XLSX export: text cells, the neutralising prefix, the per-question summary and the manifest, read as `consult_export` (`docs/02`, step 12) |
+| `consult/query.py` | The filter grammar parsed to a typed value, the scope CTE composed with `psycopg.sql` and held to the caller's department, the theme table with its denominator, the related closed question's distribution (`docs/02`, step 11; `docs/04`, section 6; `docs/06`, section 2) |
+| `consult/export.py` | The XLSX export: text cells, the neutralising prefix, the per-question summary and the manifest, the whole gather one REPEATABLE READ snapshot, read as `consult_export` (`docs/02`, step 12) |
 | `consult/config.py` | Settings from the environment, then `.env`; held to `.env.example` by a test |
 | `consult/llm.py` | The model boundary: `Prompt`, `Completion`, the `LLM` protocol |
 | `consult/logs.py` | The log formatter that lets through ids, counts, durations, states and codes and nothing else |
@@ -148,6 +148,29 @@ proforma repeated word for word, and one answer starting with `=`.
   outbox row sent with a fake reference; and nothing records when a
   question entered `themes_ready` to key a reminder on
   (`plans/PR-08-poc-mapping-worker.md`, section 0).
+- The export's own department scope. `export.write_workbook` scopes by
+  consultation id alone; the caller's department, which `query.scope`
+  takes as a required keyword, isn't a parameter of the export yet
+  (`docs/06`, section 2; `plans/PR-09-poc-query-export-cli.md`, section 7).
+- The plan benchmark's node placement. The GIN scan feeding a Bitmap
+  Heap Scan on `respondent`, with the answer key probed on a Nested
+  Loop's inner side, was observed in PR-09's review round
+  (`docs/07-reviews.md`, row 09) and isn't yet asserted by the test.
+- The manifest's prompt hash and agreement rate (`docs/02`, step 12).
+  `job.prompt_sha256` has its column and nothing here writes it; the
+  agreement rate is derived from human edits and nothing here computes
+  it; the manifest carries neither (`docs/02`'s correction of
+  26 September 2026, item 3).
+- The scaled fixture's duplicate text. At 20,000 rows 99.5% of the
+  non-blank `o_reason` answers are exact duplicates, so the measured
+  page is empty; the generator needs distinct open-answer text before
+  the benchmark says anything about a consultation with few duplicates
+  (`docs/05`'s correction of 26 September 2026, item 4).
+- The GIN index's pending list after an ingest. `ANALYZE` doesn't flush
+  it, so the first filter query after an ingest runs without the index
+  until autovacuum reaches the table; a flush before the ingest commits,
+  or `fastupdate = off`, is unmeasured (`docs/05`'s correction of
+  26 September 2026, item 3).
 
 ## Pre-commit
 

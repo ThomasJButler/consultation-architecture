@@ -20,7 +20,7 @@ written for. Find the row that matches your question and start there.
 | `SUBMISSION.md` | Source of the submitted document: both diagrams and the bullets | Everyone. It's the deliverable |
 | `submission/index.html`, `submission/*.svg`, `submission/*.pdf` | The rendered submission: the page the PDF is printed from, the diagram renders and the PDF itself | Anyone who wants the document exactly as submitted |
 | `poc/README.md` | What the proof-of-concept is, how to run it, what it does and does not prove | Anyone about to run `make check`; anyone asking what the code shows |
-| `poc/TESTING.md` | What each test file proves, how the harness works, which pull request proves each mechanic | Anyone reading a test, or writing the next one |
+| `poc/TESTING.md` | What each test file proves, how the harness works, which test proves each mechanic | Anyone reading a test, or writing the next one |
 
 ## Conventions
 
@@ -29,4 +29,4 @@ written for. Find the row that matches your question and start there.
 - Every figure names its source and the date it was checked (`CLAUDE.md`, rule
   11). Anything that couldn't be verified is rounded or left out.
 - The numbered files are in reading order.
-- Files from later pull requests are added to this table as they land.
+- A file a later pull request adds gets a row here when it lands.

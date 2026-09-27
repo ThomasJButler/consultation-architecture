@@ -34,8 +34,8 @@ merge, because nothing is rewritten after a tag (CLAUDE.md, rule 4).
   yet (docs/06, section 2; `plans/PR-09-poc-query-export-cli.md`,
   section 7).
 - The plan benchmark finds its two index nodes anywhere in the plan tree;
-  the observed placement is recorded in `docs/05`'s correction of
-  26 September 2026 and not yet asserted.
+  the observed placement is in `docs/07-reviews.md` row 09 and isn't yet
+  asserted.
 - The scaled fixture's open answers are 99.5% exact duplicates at 20,000
   rows, so the measured page is empty; the generator needs distinct text
   before the benchmark says anything about a consultation with few
@@ -107,7 +107,7 @@ a documentation rule can be checked by code:
 
 ## 6. Security and quality notes
 
-- **The owner decides one thing.** README.md line 35 and `.gitignore`
+- **The owner decides one thing.** README.md line 40 and `.gitignore`
   line 1 say the brief was "received under a recruitment process", which
   CLAUDE.md rule 12 forbids. A neutral wording keeps the handling point
   without the process, e.g. "The brief and the sample data for this task
