@@ -396,7 +396,7 @@ half an hour. It's not a gate on the run. Anything it finds goes on a
 `fix/` branch cut from `main` as a red/green pair, before PR-10 merges.
 
 ```bash
-cd ~/Repos/iai/iaitakehometest && git switch main && git pull
+cd ~/Repos/consultation-architecture && git switch main && git pull
 cd poc && docker compose up -d db
 .venv/bin/pip install -e '.[dev]'
 make reset && make check

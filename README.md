@@ -37,9 +37,9 @@ small team. That is what this repository is about.
 
 ## Handling
 
-The brief and the sample data for this task were received under a recruitment
-process and are marked OFFICIAL. They are not in this repository and never will
-be. Everything here is my own work or synthetic data in the same shape.
+The brief and the sample data for this task were shared in confidence and are
+marked OFFICIAL. They are not in this repository and never will be. Everything
+here is my own work or synthetic data in the same shape.
 
 ## Status (26 September 2026)
 
