@@ -719,6 +719,32 @@ def test_the_export_leaves_the_callers_connection_as_it_found_it(
     assert db.read_only is False
 
 
+def test_the_export_refuses_an_autocommit_connection(
+    db: psycopg.Connection[DictRow], db_settings: Settings, tmp_path: Path
+) -> None:
+    """An autocommit connection reports IDLE between statements the same
+    as one with nothing open (psycopg sends no BEGIN for it), so
+    `_in_transaction`'s busy check alone lets it through; `isolation_level`
+    and `read_only` then never take hold, since psycopg only applies them
+    to the next transaction, and an autocommit connection starts a fresh
+    one for every statement (against the docstring's one-snapshot
+    promise). `store.connect(settings, autocommit=True)` is the
+    repository's own way to open one (the conftest's database-creation
+    helpers use it)."""
+    signed = signed_off_questions(db, ("o_reason",))
+    consultation_id = signed["o_reason"].consultation_id
+    db.commit()
+
+    auto_path = tmp_path / "auto.xlsx"
+    with (
+        store.connect(db_settings, autocommit=True) as auto,
+        pytest.raises(export.ExportError) as refused,
+    ):
+        export.write_workbook(auto, consultation_id, auto_path)
+    assert refused.value.code == "connection_busy"
+    assert not auto_path.exists()
+
+
 def test_sheet_titles_differing_only_in_case_stay_within_excels_limit(
     db: psycopg.Connection[DictRow], tmp_path: Path
 ) -> None:
