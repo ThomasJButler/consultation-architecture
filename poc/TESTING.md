@@ -69,6 +69,7 @@ pull requests add that take more than a few seconds. `pytest.ini` sets
 | `test_store.py` | A failed job stores an error code and a provider request id; every column of `job` that can hold a string is on a named allow-list and `params` is held to a JSON object; the code vocabulary is a `CHECK` that names exactly the enum's values; a stale fence writes nothing | Postgres |
 | `test_logs.py` | The formatter keeps ids, counts, durations, states and codes and drops everything else by name and by shape; a sentence as a message becomes a marker; an exception contributes its class and never its message | nothing |
 | `test_repo_rules.py` | Every test module that needs a database is marked `db`, and only those; nothing outside `transitions.py` writes `consultation.status`; nothing on the pipeline path names the `vault` schema | nothing |
+| `test_testing_md.py` | The paragraph below on the four mechanics names a `file::function` for each mechanic `docs/02` section 13 lists, and each function is defined in that file | nothing |
 | `test_jobs.py` | The claim returns the fence and refuses a live lease; a lease stale for ten minutes can be taken over and the fence moves on; a zombie's heartbeat, checkpoint and failure record are all refused, and the checkpoint INSERT refuses a stale fence on its own without the heartbeat in front; checkpoints are idempotent and a worker resumes from the last one | Postgres |
 | `test_transitions.py` | Fan-in 1 flips the consultation behind the row lock and writes one `themes_ready` row naming the pass; its predicate waits for configured and finding questions and not for failed or signed-off ones; fan-in 2 needs every question complete; the sign-off guard admits one reviewer, freezes v2 with the fallbacks and queues one map job; a reopen mints a run id so the second email has its own row; every transition stamps `status_changed_at`; a reopen of a consultation that isn't ready and a second finish of a question already moved on both refuse and change nothing; the draft-to-staging and staging-to-staged edges refuse the wrong state and the processing edge answers False; `start_map_themes` both ways and `fail_job` from a working and a pre-working state, setting `attention_reason`, writing one `attention_needed` row naming the failed job, and flipping fan-in 1 when the last unfinished question fails | Postgres |
 | `test_fan_in_race.py` | Twenty threaded finishers on twenty connections flip the consultation exactly once with one email row (marked `slow`); and without the row lock two finishers lose the update, hand-stepped on two connections, which the reconciler's fourth statement then frees | Postgres |
@@ -107,8 +108,12 @@ pull requests add that take more than a few seconds. `pytest.ini` sets
 
 The four mechanics the design rests on (`docs/02`, section 13) are all
 proved here, each by a named test: the fan-in transaction
-(`test_fan_in_race.py`), lease takeover with a fence (`test_jobs.py`),
-idempotent tag inserts (`test_tags.py`), and the indexed filter query
+(`test_fan_in_race.py::test_the_fan_in_flips_exactly_once_under_twenty_threaded_finishers`),
+lease takeover with a fence
+(`test_jobs.py::test_a_zombie_with_a_stale_fence_writes_nothing`),
+idempotent tag inserts
+(`test_tags.py::test_tag_inserts_are_idempotent_and_a_retracted_tag_stays_retracted`),
+and the indexed filter query
 (`test_plan_benchmark.py::test_the_filter_plan_uses_both_indexes_at_twenty_thousand`).
 The vault refusal for the pipeline role, promised in `docs/06` section
 2.4, is `test_vault.py`. PR-04's parsing and validator tests are all

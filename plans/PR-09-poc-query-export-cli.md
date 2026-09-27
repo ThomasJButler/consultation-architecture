@@ -187,8 +187,8 @@ adds one failing test, run and seen failing for the right reason.
 - The plan benchmark finds its two index nodes anywhere in the plan tree.
   The observed placement (the GIN scan feeding a Bitmap Heap Scan on
   `respondent`, the answer key probed on the inner side of a Nested Loop,
-  200 loops) is recorded in `docs/05`'s correction of 26 September 2026
-  and not yet asserted.
+  200 loops) was observed in the review round (`docs/07-reviews.md`,
+  row 09) and isn't yet asserted.
 
 ## 8. Definition of done
 
